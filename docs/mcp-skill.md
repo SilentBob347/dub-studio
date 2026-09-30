@@ -155,11 +155,18 @@ choose or correct. They combine: `transcribe_file`, then `project_get` with its
 
 1. `project_analyze` with `mode: nodub` (translated subtitles over the original audio) or
    `mode: transcribe` (the transcript in the original language).
-2. `project_export_text` with `format: srt` (or `txt`) and `dir` - `text: src` for the
-   original words, `tgt` for the translation; `name` goes with `dir` only (without `dir`
-   the file lands in the project's folder as subtitles.srt, transcript.srt, translation.txt
-   or transcript.txt). `project_render` burns the subtitles in
+2. `project_export_text` with `format: srt` (or `vtt`, `ass`, `txt`, `json`) and `dir` -
+   `text: src` for the original words, `tgt` for the translation, `both` for bilingual
+   srt, vtt or ass (the translation and the original as two lines of each subtitle,
+   `order` says which is on top, the project's own order when left out); `name` goes with
+   `dir` only (without `dir` the file lands in the project's folder as subtitles.srt,
+   transcript.srt, bilingual.srt, the same .vtt and .ass, translation.txt or
+   transcript.txt). `project_render` burns the subtitles in
    instead, `subtitles_burn_set` with `on: false` leaves the picture clean.
+   `subtitles_content_set` chooses what they say apart from what is heard: `transcribe`
+   (a dub with subtitles in the original language), `translate`, or `bilingual` (the
+   translation with the original as a smaller second line, `order` and `secondary` style
+   it); an mkv output also carries them as subtitle tracks with their languages.
 3. Subtitles the user already has: `project_create` with `subtitles_path` (.srt, .ass,
    .ssa); `project_analyze` takes their text and timing instead of recognising speech, and
    `import_translated: true` when they are already in `tgt_lang`.
@@ -292,7 +299,7 @@ without it they answer that the window is not open, and everything else still wo
   `project_waveform`, `project_frame`.
 - **one call on a file**: `transcribe_file`, `translate_file`, `dub_file`, `separate_file`,
   `detect_text_file`, and `export_subtitles` for a project's subtitles.
-- **files**: `project_files`, `project_export_text` (SRT, VTT, ASS, TXT, JSON),
+- **files**: `project_files`, `project_export_text` (SRT, VTT, ASS, TXT, JSON; bilingual),
   `project_save_output`, `project_open_output`, `project_reveal`.
 - **lines**: `segment_update`, `segment_add`, `segments_delete`, `segments_hide`,
   `segments_keep_original`, `segments_reorder`, `segment_regen`, `segments_regen_all`,

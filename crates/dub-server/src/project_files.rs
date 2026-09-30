@@ -1,7 +1,8 @@
 //! A project's files for an agent: where they are on this computer, and its
 //! lines written as SRT or plain text the way the window's export buttons
 //! write them - or as WebVTT, JSON with word timings, or ASS styled as the
-//! render burns them - into any folder and without opening Explorer.
+//! render burns them, the translation and the original together in bilingual
+//! SRT, WebVTT and ASS - into any folder and without opening Explorer.
 
 use axum::extract::{Path as AxPath, State};
 use axum::http::StatusCode;
@@ -59,8 +60,9 @@ pub async fn files(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> R
 /// The formats a project's lines are written in.
 const FORMATS: &[&str] = &["srt", "vtt", "ass", "txt", "json"];
 
-/// POST /projects/{pid}/export-text {format: srt|vtt|ass|txt|json, text?: tgt|src, dir?, name?,
-/// speaker_label?, content?} — write the lines as a file. Without dir it goes
+/// POST /projects/{pid}/export-text {format: srt|vtt|ass|txt|json, text?: tgt|src|both,
+/// order?: translation_top|original_top, dir?, name?, speaker_label?, content?}
+/// — write the lines as a file. Without dir it goes
 /// into the project's folder under the fixed name of its kind, replacing the
 /// earlier one, as the window's save-text does; a name of one's own needs dir,
 /// and there a name already taken gets (2), (3) instead of being overwritten.
@@ -78,23 +80,24 @@ pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
     if !FORMATS.contains(&format) {
         return (StatusCode::BAD_REQUEST, format!("format is one of {}, not {format:?}", FORMATS.join(", "))).into_response();
     }
-    let which = body.get("text").and_then(Value::as_str).unwrap_or("tgt");
-    let source = match which {
-        "tgt" => false,
-        "src" => true,
-        other => return (StatusCode::BAD_REQUEST, format!("text is tgt or src, not {other:?}")).into_response(),
+    let which = match which_of(&body, &proj) {
+        Ok(which) => which,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
+    if matches!(which, Which::Both { .. }) && matches!(format, "txt" | "json") {
+        return (StatusCode::BAD_REQUEST, "text both is for srt, vtt and ass: txt is one line per phrase, and json gives the original with each translated line already").into_response();
+    }
     if format == "ass" && (proj.meta.width <= 0 || proj.meta.height <= 0) {
         return (StatusCode::BAD_REQUEST, "ass places the subtitles on the picture, and this project is audio: take srt, vtt, txt or json").into_response();
     }
     let label = body.get("speaker_label").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).unwrap_or("Speaker");
-    let rows = lines(&proj, source);
+    let rows = lines(&proj, which);
     let target = match destination(
         &dir,
         body.get("dir").and_then(Value::as_str),
         body.get("name").and_then(Value::as_str),
         format,
-        source,
+        which,
     ) {
         Ok(target) => target,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
@@ -102,7 +105,7 @@ pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
     let written = if format == "ass" {
         let fonts = st.fonts_dir.clone();
         let target = target.clone();
-        tokio::task::spawn_blocking(move || write_ass(&proj, source, &target, &fonts, &dir))
+        tokio::task::spawn_blocking(move || write_ass(&proj, which, &target, &fonts, &dir))
             .await
             .unwrap_or_else(|e| Err(format!("ass: {e}")))
     } else {
@@ -120,6 +123,32 @@ pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
     Json(answer).into_response()
 }
 
+/// Which text an export carries: the translation, the recognised original, or
+/// both as two lines of one subtitle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Which {
+    Tgt,
+    Src,
+    Both { original_top: bool },
+}
+
+/// The text asked for; the order of a bilingual export is the project's own
+/// unless the request names one.
+fn which_of(body: &Value, proj: &Project) -> Result<Which, String> {
+    let order = body.get("order").and_then(Value::as_str).unwrap_or(proj.subs.bilingual.order.as_str());
+    let original_top = match order {
+        dub_core::ORDER_TRANSLATION_TOP => false,
+        dub_core::ORDER_ORIGINAL_TOP => true,
+        other => return Err(format!("order is translation_top or original_top, not {other:?}")),
+    };
+    match body.get("text").and_then(Value::as_str).unwrap_or("tgt") {
+        "tgt" => Ok(Which::Tgt),
+        "src" => Ok(Which::Src),
+        "both" => Ok(Which::Both { original_top }),
+        other => Err(format!("text is tgt, src or both, not {other:?}")),
+    }
+}
+
 /// The lines as the text of a file of the format: srt, vtt, txt or json.
 pub(crate) fn render_text(rows: &[Row], format: &str, label: &str) -> String {
     match format {
@@ -135,10 +164,20 @@ pub(crate) fn render_text(rows: &[Row], format: &str, label: &str) -> String {
 /// render, and timed as it times them: in a dub each line where the dubbed
 /// phrase sounds (the project's dub_timing.json). The transcript gets the
 /// recognised words in the same style at the original speech's timing,
-/// without the titles, which are the picture's translation.
-fn write_ass(proj: &Project, source: bool, target: &Path, fonts: &Path, project_dir: &Path) -> Result<String, String> {
+/// without the titles, which are the picture's translation. Both is the
+/// bilingual subtitles as burned, in the order asked.
+fn write_ass(proj: &Project, which: Which, target: &Path, fonts: &Path, project_dir: &Path) -> Result<String, String> {
     let mut proj = proj.clone();
-    proj.subs.mode = if source { "transcribe" } else { "translate" }.to_string();
+    let source = which == Which::Src;
+    proj.subs.mode = match which {
+        Which::Tgt => "translate",
+        Which::Src => "transcribe",
+        Which::Both { .. } => "bilingual",
+    }
+    .to_string();
+    if let Which::Both { original_top } = which {
+        proj.subs.bilingual.order = if original_top { dub_core::ORDER_ORIGINAL_TOP } else { dub_core::ORDER_TRANSLATION_TOP }.to_string();
+    }
     if source {
         for seg in &mut proj.segments {
             seg.tgt_text = seg.src_text.clone();
@@ -154,33 +193,47 @@ fn write_ass(proj: &Project, source: bool, target: &Path, fonts: &Path, project_
     std::fs::read_to_string(target).map_err(|e| format!("read {}: {e}", target.display()))
 }
 
-/// The name each format's lines take in the project's folder, by whether they
-/// are the transcript. None is a name the studio keeps there for itself: the
-/// JSON lines are not transcript.json, analyze's saved speech recognition.
-const FIXED_NAMES: &[(&str, bool, &str)] = &[
-    ("srt", false, "subtitles.srt"),
-    ("srt", true, "transcript.srt"),
-    ("vtt", false, "subtitles.vtt"),
-    ("vtt", true, "transcript.vtt"),
-    ("ass", false, "subtitles.ass"),
-    ("ass", true, "transcript.ass"),
-    ("json", false, "translation.lines.json"),
-    ("json", true, "transcript.lines.json"),
-    ("txt", false, "translation.txt"),
-    ("txt", true, "transcript.txt"),
+/// The name each format's lines take in the project's folder, by their text:
+/// the translation (tgt), the transcript (src) or both. None is a name the
+/// studio keeps there for itself: the JSON lines are not transcript.json,
+/// analyze's saved speech recognition.
+const FIXED_NAMES: &[(&str, &str, &str)] = &[
+    ("srt", "tgt", "subtitles.srt"),
+    ("srt", "src", "transcript.srt"),
+    ("srt", "both", "bilingual.srt"),
+    ("vtt", "tgt", "subtitles.vtt"),
+    ("vtt", "src", "transcript.vtt"),
+    ("vtt", "both", "bilingual.vtt"),
+    ("ass", "tgt", "subtitles.ass"),
+    ("ass", "src", "transcript.ass"),
+    ("ass", "both", "bilingual.ass"),
+    ("json", "tgt", "translation.lines.json"),
+    ("json", "src", "transcript.lines.json"),
+    ("txt", "tgt", "translation.txt"),
+    ("txt", "src", "transcript.txt"),
 ];
+
+impl Which {
+    fn kind(self) -> &'static str {
+        match self {
+            Which::Tgt => "tgt",
+            Which::Src => "src",
+            Which::Both { .. } => "both",
+        }
+    }
+}
 
 /// Where the lines go. In the project's folder only the fixed name of their
 /// kind is written: that folder also holds the studio's own files (source.txt
 /// names the video, name.txt the project, import_subs.* are the imported
 /// subtitles, analyze's stages are saved as JSON), which a name of the
 /// caller's could replace.
-fn destination(project_dir: &Path, dir: Option<&str>, name: Option<&str>, format: &str, source: bool) -> Result<PathBuf, String> {
+fn destination(project_dir: &Path, dir: Option<&str>, name: Option<&str>, format: &str, which: Which) -> Result<PathBuf, String> {
     let fixed = FIXED_NAMES
         .iter()
-        .find(|(kind, transcript, _)| *kind == format && *transcript == source)
+        .find(|(kind, text, _)| *kind == format && *text == which.kind())
         .map(|(_, _, fixed)| *fixed)
-        .ok_or_else(|| format!("format is one of {}, not {format:?}", FORMATS.join(", ")))?;
+        .ok_or_else(|| format!("{format} is not written with text {}", which.kind()))?;
     let asked = name.map(str::trim).filter(|n| !n.is_empty());
     match dir.map(str::trim).filter(|d| !d.is_empty()) {
         Some(folder) => {
@@ -199,21 +252,24 @@ fn destination(project_dir: &Path, dir: Option<&str>, name: Option<&str>, format
     }
 }
 
-/// One line of an export: its timing, speaker and words; the recognised line
-/// under a translation, and the word timings of a recognised line.
+/// One line of an export: its timing, speaker and words (two lines of text in
+/// a bilingual subtitle); the recognised line under a translation, and the
+/// word timings of a recognised line.
 pub(crate) struct Row {
-    id: String,
-    start: f64,
-    end: f64,
-    speaker: String,
-    text: String,
-    original: Option<String>,
-    words: Option<Value>,
+    pub(crate) id: String,
+    pub(crate) start: f64,
+    pub(crate) end: f64,
+    pub(crate) speaker: String,
+    pub(crate) text: String,
+    pub(crate) original: Option<String>,
+    pub(crate) words: Option<Value>,
 }
 
 /// The lines the window's buttons export: every line with its translation
-/// (the recognised text where it has none), or the recognised lines alone.
-pub(crate) fn lines(proj: &Project, source: bool) -> Vec<Row> {
+/// (the recognised text where it has none), the recognised lines alone, or
+/// every line with its translation and its original under or over it.
+pub(crate) fn lines(proj: &Project, which: Which) -> Vec<Row> {
+    let source = which == Which::Src;
     // The lines render::build_ass burns: no hidden line anywhere, no line that keeps the original
     // speech in the translation, and a caption's own text over the translation.
     let flag = |s: &dub_core::Segment, key: &str| s.extra.get(key).and_then(Value::as_bool).unwrap_or(false);
@@ -230,18 +286,35 @@ pub(crate) fn lines(proj: &Project, source: bool) -> Vec<Row> {
         .map(|s| {
             let tgt = overrides.get(s.id.as_str()).copied().unwrap_or(s.tgt_text.as_str());
             let translated = !source && !tgt.is_empty();
-            let text = if translated { tgt } else { s.src_text.as_str() };
+            let text = match which {
+                Which::Both { original_top } => two_lines(tgt.trim(), s.src_text.trim(), original_top),
+                _ if translated => tgt.trim().to_string(),
+                _ => s.src_text.trim().to_string(),
+            };
             Row {
                 id: s.id.clone(),
                 start: s.start,
                 end: s.end,
                 speaker: s.speaker.clone().unwrap_or_else(|| "0".into()),
-                text: text.trim().to_string(),
+                text,
                 original: translated.then(|| s.src_text.trim().to_string()),
                 words: if source { s.extra.get("words").filter(|words| words.is_array()).cloned() } else { None },
             }
         })
         .collect()
+}
+
+/// A bilingual subtitle's text: the translation and the original on lines of
+/// their own, in the order asked; one line when either is missing or both say
+/// the same.
+pub(crate) fn two_lines(translation: &str, original: &str, original_top: bool) -> String {
+    match (translation.is_empty(), original.is_empty()) {
+        (true, _) => original.to_string(),
+        (false, true) => translation.to_string(),
+        _ if translation == original => translation.to_string(),
+        _ if original_top => format!("{original}\n{translation}"),
+        _ => format!("{translation}\n{original}"),
+    }
 }
 
 /// SRT time: hh:mm:ss,mmm, rounded to the millisecond.
@@ -250,7 +323,7 @@ fn srt_time(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02},{:03}", ms / 3_600_000, ms % 3_600_000 / 60_000, ms % 60_000 / 1000, ms % 1000)
 }
 
-fn srt(rows: &[Row]) -> String {
+pub(crate) fn srt(rows: &[Row]) -> String {
     rows.iter()
         .enumerate()
         .map(|(i, r)| format!("{}\n{} --> {}\n{}\n", i + 1, srt_time(r.start), srt_time(r.end), r.text))
@@ -362,11 +435,11 @@ mod tests {
     fn the_translation_is_every_line_and_the_transcript_the_recognised_ones() {
         let p = project();
         assert_eq!(
-            srt(&lines(&p, false)),
+            srt(&lines(&p, Which::Tgt)),
             "1\n00:00:00,000 --> 00:00:01,500\nПривет\n\n2\n01:01:01,250 --> 01:01:02,000\nСвоя фраза\n\n3\n00:00:05,000 --> 00:00:06,000\nBye\n"
         );
-        assert_eq!(srt(&lines(&p, true)), "1\n00:00:00,000 --> 00:00:01,500\nHello\n\n2\n00:00:05,000 --> 00:00:06,000\nBye\n");
-        assert_eq!(txt(&lines(&p, true), "Speaker"), "[Speaker 0] Hello\n[Speaker 0] Bye");
+        assert_eq!(srt(&lines(&p, Which::Src)), "1\n00:00:00,000 --> 00:00:01,500\nHello\n\n2\n00:00:05,000 --> 00:00:06,000\nBye\n");
+        assert_eq!(txt(&lines(&p, Which::Src), "Speaker"), "[Speaker 0] Hello\n[Speaker 0] Bye");
     }
 
     fn spoken() -> Project {
@@ -385,20 +458,20 @@ mod tests {
     fn webvtt_escapes_its_markup_and_names_the_speakers() {
         let p = spoken();
         assert_eq!(
-            render_text(&lines(&p, true), "vtt", "Speaker"),
+            render_text(&lines(&p, Which::Src), "vtt", "Speaker"),
             "WEBVTT\n\n00:00:00.250 --> 00:00:01.500\n<v Speaker 0>Tom &amp; &lt;Jerry&gt;\n\n00:00:02.000 --> 00:00:03.250\n<v Speaker 1>Run --&gt;\nnow\n"
         );
         let one: Project = serde_json::from_value(json!({ "segments": [{ "id": "a", "start": 0.0, "end": 1.0, "speaker": "0", "src_text": "Hi" }] })).unwrap();
-        assert_eq!(render_text(&lines(&one, true), "vtt", "Speaker"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHi\n", "one speaker needs no voice tag");
+        assert_eq!(render_text(&lines(&one, Which::Src), "vtt", "Speaker"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHi\n", "one speaker needs no voice tag");
     }
 
     #[test]
     fn json_keeps_the_speakers_the_word_timings_and_the_original() {
         let p = spoken();
-        let transcript: Value = serde_json::from_str(&render_text(&lines(&p, true), "json", "Speaker")).unwrap();
+        let transcript: Value = serde_json::from_str(&render_text(&lines(&p, Which::Src), "json", "Speaker")).unwrap();
         assert_eq!(transcript[0], json!({ "id": "s0", "start": 0.25, "end": 1.5, "speaker": "0", "text": "Tom & <Jerry>", "words": [{ "word": "Tom", "start": 0.25, "end": 0.5 }, { "word": "&", "start": 0.5, "end": 0.6 }] }));
         assert_eq!(transcript[1]["speaker"], "1");
-        let translation: Value = serde_json::from_str(&render_text(&lines(&p, false), "json", "Speaker")).unwrap();
+        let translation: Value = serde_json::from_str(&render_text(&lines(&p, Which::Tgt), "json", "Speaker")).unwrap();
         assert_eq!(translation[0], json!({ "id": "s0", "start": 0.25, "end": 1.5, "speaker": "0", "text": "Том и Джерри", "original": "Tom & <Jerry>" }));
         assert!(translation[1].get("original").is_none(), "a line without a translation is its recognised text");
         assert!(translation[0].get("words").is_none(), "word timings belong to the recognised words");
@@ -410,9 +483,9 @@ mod tests {
         let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fonts");
         let mut p = spoken();
         p.captions.titles.push(serde_json::from_value(json!({ "text": "SIGN", "tgt": "ВЫВЕСКА", "bbox": [100, 80, 300, 60], "start": 0.0, "end": 8.0 })).unwrap());
-        let subtitles = write_ass(&p, false, &folder.path().join("subtitles.ass"), &fonts, folder.path()).unwrap();
+        let subtitles = write_ass(&p, Which::Tgt, &folder.path().join("subtitles.ass"), &fonts, folder.path()).unwrap();
         assert!(subtitles.contains("[Events]") && subtitles.contains("Том и Джерри") && subtitles.contains("ВЫВЕСКА"), "{subtitles}");
-        let transcript = write_ass(&p, true, &folder.path().join("transcript.ass"), &fonts, folder.path()).unwrap();
+        let transcript = write_ass(&p, Which::Src, &folder.path().join("transcript.ass"), &fonts, folder.path()).unwrap();
         assert!(transcript.contains("Tom & <Jerry>") && !transcript.contains("Том и Джерри"), "{transcript}");
         assert!(!transcript.contains("ВЫВЕСКА"), "the titles are the picture's translation");
     }
@@ -433,17 +506,17 @@ mod tests {
         .unwrap();
         p.captions.overrides.push(serde_json::from_value(json!({ "seg_id": "d", "text": "До встречи" })).unwrap());
         for format in ["srt", "vtt", "json", "txt"] {
-            let translation = render_text(&lines(&p, false), format, "Speaker");
+            let translation = render_text(&lines(&p, Which::Tgt), format, "Speaker");
             assert!(translation.contains("Привет") && translation.contains("До встречи"), "{format}: {translation}");
             assert!(!translation.contains("Спасибо") && !translation.contains("Бонжур") && !translation.contains("Пока"), "{format}: {translation}");
-            let transcript = render_text(&lines(&p, true), format, "Speaker");
+            let transcript = render_text(&lines(&p, Which::Src), format, "Speaker");
             assert!(transcript.contains("Hello") && transcript.contains("Bonjour") && transcript.contains("Bye"), "{format}: {transcript}");
             assert!(!transcript.contains("Thanks for watching"), "{format}: {transcript}");
         }
-        let subtitles = write_ass(&p, false, &folder.path().join("subtitles.ass"), &fonts, folder.path()).unwrap();
+        let subtitles = write_ass(&p, Which::Tgt, &folder.path().join("subtitles.ass"), &fonts, folder.path()).unwrap();
         assert!(subtitles.contains("Привет") && subtitles.contains("До встречи"), "{subtitles}");
         assert!(!subtitles.contains("Спасибо") && !subtitles.contains("Бонжур") && !subtitles.contains("Пока"), "{subtitles}");
-        let transcript = write_ass(&p, true, &folder.path().join("transcript.ass"), &fonts, folder.path()).unwrap();
+        let transcript = write_ass(&p, Which::Src, &folder.path().join("transcript.ass"), &fonts, folder.path()).unwrap();
         assert!(transcript.contains("Hello") && transcript.contains("Bonjour") && transcript.contains("Bye"), "{transcript}");
         assert!(!transcript.contains("Thanks for watching"), "{transcript}");
     }
@@ -451,15 +524,18 @@ mod tests {
     #[test]
     fn every_format_has_its_fixed_name() {
         let folder = tempfile::tempdir().unwrap();
-        let named = |format: &str, source: bool| destination(folder.path(), None, None, format, source).unwrap().file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!((named("vtt", false), named("vtt", true)), ("subtitles.vtt".into(), "transcript.vtt".into()));
-        assert_eq!((named("ass", false), named("ass", true)), ("subtitles.ass".into(), "transcript.ass".into()));
-        assert_eq!((named("json", false), named("json", true)), ("translation.lines.json".into(), "transcript.lines.json".into()));
-        assert!(destination(folder.path(), None, Some("project"), "json", true).is_err(), "project.json is the studio's own");
-        assert!(destination(folder.path(), None, Some("transcript"), "json", true).is_err(), "transcript.json is analyze's own");
-        assert_eq!(destination(folder.path(), None, Some("transcript.lines"), "json", true).unwrap(), folder.path().join("transcript.lines.json"));
+        let named = |format: &str, which: Which| destination(folder.path(), None, None, format, which).unwrap().file_name().unwrap().to_string_lossy().into_owned();
+        let both = Which::Both { original_top: false };
+        assert_eq!((named("vtt", Which::Tgt), named("vtt", Which::Src), named("vtt", both)), ("subtitles.vtt".into(), "transcript.vtt".into(), "bilingual.vtt".into()));
+        assert_eq!((named("ass", Which::Tgt), named("ass", Which::Src), named("ass", both)), ("subtitles.ass".into(), "transcript.ass".into(), "bilingual.ass".into()));
+        assert_eq!(named("srt", Which::Both { original_top: true }), "bilingual.srt");
+        assert_eq!((named("json", Which::Tgt), named("json", Which::Src)), ("translation.lines.json".into(), "transcript.lines.json".into()));
+        assert!(destination(folder.path(), None, None, "txt", both).is_err(), "txt has no bilingual form");
+        assert!(destination(folder.path(), None, Some("project"), "json", Which::Src).is_err(), "project.json is the studio's own");
+        assert!(destination(folder.path(), None, Some("transcript"), "json", Which::Src).is_err(), "transcript.json is analyze's own");
+        assert_eq!(destination(folder.path(), None, Some("transcript.lines"), "json", Which::Src).unwrap(), folder.path().join("transcript.lines.json"));
         for format in FORMATS {
-            assert!(destination(folder.path(), None, None, format, false).is_ok() && destination(folder.path(), None, None, format, true).is_ok(), "{format}");
+            assert!(destination(folder.path(), None, None, format, Which::Tgt).is_ok() && destination(folder.path(), None, None, format, Which::Src).is_ok(), "{format}");
         }
     }
 
@@ -511,14 +587,14 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let folder = project.path();
         std::fs::write(folder.join("source.txt"), "D:/videos/clip.mp4").unwrap();
-        let refused = destination(folder, None, Some("source"), "txt", true).unwrap_err();
+        let refused = destination(folder, None, Some("source"), "txt", Which::Src).unwrap_err();
         assert!(refused.contains("needs dir") && refused.contains("transcript.txt"), "{refused}");
-        assert!(destination(folder, Some("  "), Some("name"), "txt", false).is_err(), "a blank dir is no dir");
-        assert!(destination(folder, None, Some("import_subs"), "srt", false).is_err());
-        assert_eq!(destination(folder, None, None, "srt", false).unwrap(), folder.join("subtitles.srt"));
-        assert_eq!(destination(folder, None, Some(" "), "srt", true).unwrap(), folder.join("transcript.srt"));
-        assert_eq!(destination(folder, None, Some("Subtitles.SRT"), "srt", false).unwrap(), folder.join("subtitles.srt"));
-        assert_eq!(destination(folder, None, None, "txt", false).unwrap(), folder.join("translation.txt"));
+        assert!(destination(folder, Some("  "), Some("name"), "txt", Which::Tgt).is_err(), "a blank dir is no dir");
+        assert!(destination(folder, None, Some("import_subs"), "srt", Which::Tgt).is_err());
+        assert_eq!(destination(folder, None, None, "srt", Which::Tgt).unwrap(), folder.join("subtitles.srt"));
+        assert_eq!(destination(folder, None, Some(" "), "srt", Which::Src).unwrap(), folder.join("transcript.srt"));
+        assert_eq!(destination(folder, None, Some("Subtitles.SRT"), "srt", Which::Tgt).unwrap(), folder.join("subtitles.srt"));
+        assert_eq!(destination(folder, None, None, "txt", Which::Tgt).unwrap(), folder.join("translation.txt"));
         assert_eq!(std::fs::read_to_string(folder.join("source.txt")).unwrap(), "D:/videos/clip.mp4");
     }
 
@@ -528,9 +604,43 @@ mod tests {
         let folder = project.path();
         std::fs::write(folder.join("source.txt"), "D:/videos/clip.mp4").unwrap();
         let path = folder.to_str().unwrap();
-        assert_eq!(destination(folder, Some(path), Some("source"), "txt", true).unwrap(), folder.join("source (2).txt"));
-        assert_eq!(destination(folder, Some(path), None, "srt", false).unwrap(), folder.join("subtitles.srt"));
-        assert!(destination(folder, Some("Z:/nowhere/at/all"), Some("x"), "srt", false).unwrap_err().contains("not a folder"));
+        assert_eq!(destination(folder, Some(path), Some("source"), "txt", Which::Src).unwrap(), folder.join("source (2).txt"));
+        assert_eq!(destination(folder, Some(path), None, "srt", Which::Tgt).unwrap(), folder.join("subtitles.srt"));
+        assert!(destination(folder, Some("Z:/nowhere/at/all"), Some("x"), "srt", Which::Tgt).unwrap_err().contains("not a folder"));
+    }
+
+    #[test]
+    fn a_bilingual_export_puts_both_languages_in_one_subtitle() {
+        let p = project();
+        assert_eq!(
+            srt(&lines(&p, Which::Both { original_top: false })),
+            "1\n00:00:00,000 --> 00:00:01,500\nПривет\nHello\n\n2\n01:01:01,250 --> 01:01:02,000\nСвоя фраза\n\n3\n00:00:05,000 --> 00:00:06,000\nBye\n"
+        );
+        assert_eq!(lines(&p, Which::Both { original_top: true })[0].text, "Hello\nПривет");
+        assert_eq!(two_lines("OK", "OK", false), "OK");
+        let vtt = render_text(&lines(&p, Which::Both { original_top: false })[..1], "vtt", "Speaker");
+        assert_eq!(vtt, "WEBVTT\n\n00:00:00.000 --> 00:00:01.500\nПривет\nHello\n");
+    }
+
+    #[test]
+    fn a_bilingual_export_takes_the_project_s_order_unless_asked_for_another() {
+        let mut p = project();
+        assert_eq!(which_of(&json!({}), &p).unwrap(), Which::Tgt);
+        assert_eq!(which_of(&json!({ "text": "both" }), &p).unwrap(), Which::Both { original_top: false });
+        p.subs.bilingual.order = dub_core::ORDER_ORIGINAL_TOP.into();
+        assert_eq!(which_of(&json!({ "text": "both" }), &p).unwrap(), Which::Both { original_top: true });
+        assert_eq!(which_of(&json!({ "text": "both", "order": "translation_top" }), &p).unwrap(), Which::Both { original_top: false });
+        assert!(which_of(&json!({ "text": "both", "order": "sideways" }), &p).is_err());
+        assert!(which_of(&json!({ "text": "all" }), &p).is_err());
+    }
+
+    #[test]
+    fn bilingual_ass_is_the_burned_pair() {
+        let folder = tempfile::tempdir().unwrap();
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fonts");
+        let p = spoken();
+        let ass = write_ass(&p, Which::Both { original_top: true }, &folder.path().join("bilingual.ass"), &fonts, folder.path()).unwrap();
+        assert!(ass.contains("Style: S2,") && ass.contains("Том и Джерри") && ass.contains("Tom & <Jerry>"), "{ass}");
     }
 
     #[test]

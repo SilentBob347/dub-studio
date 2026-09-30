@@ -588,6 +588,7 @@
     "subsNone": "无字幕",
     "subsOriginal": "原文",
     "subsTranslate": "翻译",
+    "subsBilingual": "双语",
     "audioNoneHint": "保留原始音轨——不生成配音。",
     "audioDubHint": "用目标语言生成的语音替换讲话。",
     "audioVoiceoverHint": "在压低的原声之上叠加翻译配音。",
@@ -595,11 +596,24 @@
     "subsNoneHint": "不显示字幕。",
     "subsOriginalHint": "原始（口语）语言的字幕。",
     "subsTranslateHint": "翻译成目标语言的字幕。",
+    "subsBilingualHint": "译文加上一行较小的原文。",
     "optionsHelp": "将鼠标悬停在选项上即可查看其作用",
     "burn": "烧录到视频",
     "burnHint": "将字幕/标题烧录到视频（关 = 纯净视频，如配音无字幕）",
     "funny": "恶搞混剪",
     "voiceHint": "声音：克隆 / 自动分配 / 声音包"
+  },
+  "bilingual": {
+    "settings": "第二行设置",
+    "title": "原文行",
+    "translationTop": "译文在上",
+    "originalTop": "原文在上",
+    "size": "字号",
+    "sizeValue": "主行的 {{pct}}%",
+    "color": "文字颜色",
+    "opacity": "不透明度",
+    "pct": "{{pct}}%",
+    "sameAsMain": "与主行相同"
   },
   "audio": {
     "onlyTitle": "纯音频项目",

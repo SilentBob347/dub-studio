@@ -74,7 +74,7 @@ fn exec_config() -> ExecutionConfig {
     })
 }
 
-pub use segment::{segment_words, Segment, Word, SEG_MAX_GAP, SEG_MAX_DUR};
+pub use segment::{segment_words, split_at_speaker_turns, Segment, Word, SEG_MAX_GAP, SEG_MAX_DUR};
 
 /// Целевая частота parakeet-rs.
 pub const TARGET_SR: u32 = 16_000;
@@ -715,8 +715,16 @@ fn is_opening_punct(w: &str) -> bool {
     w.chars().all(|c| matches!(c, '(' | '[' | '{' | '¿' | '¡'))
 }
 
+/// Хвост слова, записанного без пробела после точки или запятой («e» + «.g.», «3» + «.5», «т» + «.е.»):
+/// parakeet-rs начинает на знаке новое слово и дописывает к нему следующий токен без границы слова.
+fn is_glued_tail(w: &str) -> bool {
+    let mut chars = w.chars();
+    matches!(chars.next(), Some('.' | ',')) && chars.next().is_some_and(char::is_alphanumeric)
+}
+
 /// parakeet-rs в режиме Words отдаёт знак препинания отдельным словом: закрывающий приклеивается к
-/// предыдущему слову, открывающий — к следующему; тайминги слова не меняются.
+/// предыдущему слову, открывающий — к следующему; тайминги слова не меняются. Хвост слова после точки
+/// или запятой без пробела ([`is_glued_tail`]) возвращается в своё слово, конец слова — конец хвоста.
 fn attach_punct(words: Vec<Word>) -> Vec<Word> {
     let mut out: Vec<Word> = Vec::with_capacity(words.len());
     let mut opening = String::new();
@@ -724,6 +732,13 @@ fn attach_punct(words: Vec<Word>) -> Vec<Word> {
         if is_closing_punct(&w.word) {
             if let Some(prev) = out.last_mut() {
                 prev.word.push_str(&w.word);
+                continue;
+            }
+        }
+        if is_glued_tail(&w.word) && opening.is_empty() {
+            if let Some(prev) = out.last_mut() {
+                prev.word.push_str(&w.word);
+                prev.end = prev.end.max(w.end);
                 continue;
             }
         }
@@ -999,6 +1014,35 @@ mod diar_word_tests {
         assert!((ws[2].start - 2.1).abs() < 1e-5, "открывающий знак не сдвигает начало слова: {:?}", ws[2]);
         let seg = segment::segment_words(&ws, segment::SEG_MAX_GAP, segment::SEG_MAX_DUR);
         assert_eq!(seg[0].text, "Where's uniform?");
+    }
+
+    #[test]
+    fn dotted_abbreviations_and_decimals_stay_one_word() {
+        // Токены так, как их группирует parakeet-rs: знак начинает слово, токен без «▁» дописывается к нему.
+        let ws = words_from_tokens(
+            vec![
+                tok(" e", 0.0, 0.1),
+                tok(".g", 0.1, 0.2),
+                tok(".", 0.2, 0.2),
+                tok(" apples", 0.3, 0.7),
+                tok(" 3", 1.0, 1.1),
+                tok(".5", 1.1, 1.3),
+                tok(" т", 1.6, 1.7),
+                tok(".е", 1.7, 1.8),
+                tok(".", 1.8, 1.8),
+                tok(" 1", 2.0, 2.1),
+                tok(",5", 2.1, 2.3),
+                tok(" Next", 2.6, 2.9),
+                tok(".", 2.9, 2.9),
+            ],
+            0.0,
+            10.0,
+        );
+        let got: Vec<&str> = ws.iter().map(|w| w.word.as_str()).collect();
+        assert_eq!(got, ["e.g.", "apples", "3.5", "т.е.", "1,5", "Next."]);
+        assert!((ws[2].end - 1.3).abs() < 1e-5, "конец слова — конец хвоста: {:?}", ws[2]);
+        let seg = segment::segment_words(&ws, segment::SEG_MAX_GAP, 100.0);
+        assert_eq!(seg.len(), 1, "{seg:?}");
     }
 
     #[test]

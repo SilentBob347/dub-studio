@@ -602,6 +602,7 @@
     "subsNone": "Sem legendas",
     "subsOriginal": "Original",
     "subsTranslate": "Traduzidas",
+    "subsBilingual": "Ambos",
     "audioNoneHint": "Manter a faixa original — nenhuma voz é gerada.",
     "audioDubHint": "Substituir a fala por uma voz gerada no idioma de destino.",
     "audioVoiceoverHint": "Voz traduzida sobre o original abafado.",
@@ -609,11 +610,24 @@
     "subsNoneHint": "Não mostrar legendas.",
     "subsOriginalHint": "Legendas no idioma original (falado).",
     "subsTranslateHint": "Legendas traduzidas para o idioma de destino.",
+    "subsBilingualHint": "A tradução com o original em uma segunda linha menor.",
     "optionsHelp": "Passe o cursor sobre uma opção para ver o que faz",
     "burn": "No vídeo",
     "burnHint": "Gravar legendas/títulos no vídeo (desligado = vídeo limpo, ex. dublagem sem legendas)",
     "funny": "Remix divertido",
     "voiceHint": "Voz: clone / elenco auto / do pacote"
+  },
+  "bilingual": {
+    "settings": "Ajustes da segunda linha",
+    "title": "Linha do original",
+    "translationTop": "Tradução em cima",
+    "originalTop": "Original em cima",
+    "size": "Tamanho",
+    "sizeValue": "{{pct}}% da linha principal",
+    "color": "Cor do texto",
+    "opacity": "Opacidade",
+    "pct": "{{pct}}%",
+    "sameAsMain": "Como a principal"
   },
   "audio": {
     "onlyTitle": "Projeto somente de áudio",

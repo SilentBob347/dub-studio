@@ -365,7 +365,8 @@ pub(crate) fn routes() -> Router {
                 note(&mut studio, &pid, format!("POST /projects/{pid}/export-text {format} {which}"));
                 let Some(project) = studio.projects.get(&pid) else { return unplanned(&pid) };
                 let proj: dub_core::Project = serde_json::from_value(project.body.clone()).expect("the stub's project is a Project");
-                let rows = crate::project_files::lines(&proj, which == "src");
+                let text = if which == "src" { crate::project_files::Which::Src } else { crate::project_files::Which::Tgt };
+                let rows = crate::project_files::lines(&proj, text);
                 let file = match body["dir"].as_str() {
                     Some(dir) => format!("{dir}/{}.{format}", body["name"].as_str().unwrap_or("export")),
                     None => format!("C:/w/{pid}/export.{format}"),

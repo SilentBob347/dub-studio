@@ -17,6 +17,8 @@ import { api, llmProviderOf, slot, ApiError, SetupError, JobCancelledError, type
 import { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
+import SubsContentControl from "./components/SubsContentControl";
+import { subtitleText } from "./lib/subtitleText";
 import { playSfx } from "./lib/sfx";
 import ResourceMonitor from "./components/ResourceMonitor";
 import { GENDER_LABEL_KEY, genderKey } from "./lib/gender";
@@ -1026,7 +1028,7 @@ function DropZone() {
       // subs здесь — ЭФФЕКТИВНЫЙ (как eSubs ниже): transcribe-режим форсит субтитры оригинала,
       // перевода в нём нет, что бы ни стояло в сыром стейте селектора.
       const effSubs = audioOnly ? "none" : audio === "transcribe" ? "transcribe" : subs;
-      const wantTranslate = audio === "dub" || audio === "voiceover" || effSubs === "translate" || (funnyOn && !!funny.trim());
+      const wantTranslate = audio === "dub" || audio === "voiceover" || effSubs === "translate" || effSubs === "bilingual" || (funnyOn && !!funny.trim());
       const wantVoice = audio === "dub" || audio === "voiceover";
       const steps = ["download", "separating", "diarizing", "recognizing"];
       if (wantTranslate) steps.push("translating");
@@ -1244,10 +1246,10 @@ function DropZone() {
             const voicesStatus = voiceSrc === "clone"
               ? t("voiceSlots.clone")
               : t("accordion.voicesLib", { count: slotsM.length + slotsF.length });
-            const subsStatus = t(subs === "none" ? "comp.subsNone" : subs === "transcribe" ? "comp.subsOriginal" : "comp.subsTranslate");
+            const subsStatus = t(subs === "none" ? "comp.subsNone" : subs === "transcribe" ? "comp.subsOriginal" : subs === "bilingual" ? "comp.subsBilingual" : "comp.subsTranslate");
             // «Дополнительно» показываем только если при текущем режиме внутри есть хоть один пункт.
             // стиль перевода — только там, где перевод реально идёт (не в транскрипт-режиме).
-            const showTrStyle = audio === "dub" || audio === "voiceover" || (subs === "translate" && audio !== "transcribe");
+            const showTrStyle = audio === "dub" || audio === "voiceover" || ((subs === "translate" || subs === "bilingual") && audio !== "transcribe");
             const showKeepOrig = isVoiced && !audioOnly;
             const showDetect = showSubs;
             const showCasting = !audioOnly && isVoiced;   // #115: кастинг имеет смысл только при дубляже видео
@@ -1280,8 +1282,8 @@ function DropZone() {
                 {/* СУБТИТРЫ (независимо от аудио) */}
                 {showSubs && (
                   <Accordion title={t("accordion.subs")} subtitle={subsStatus}>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {([["none", "comp.subsNone", "comp.subsNoneHint"], ["transcribe", "comp.subsOriginal", "comp.subsOriginalHint"], ["translate", "comp.subsTranslate", "comp.subsTranslateHint"]] as const).map(([sv, key, hint]) => (
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {([["none", "comp.subsNone", "comp.subsNoneHint"], ["transcribe", "comp.subsOriginal", "comp.subsOriginalHint"], ["translate", "comp.subsTranslate", "comp.subsTranslateHint"], ["bilingual", "comp.subsBilingual", "comp.subsBilingualHint"]] as const).map(([sv, key, hint]) => (
                         <button key={sv} onClick={() => chooseSubs(sv)} title={t(hint)}
                           className={`px-2 py-1.5 rounded-lg border text-[11px] font-medium transition-colors ${subs === sv ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_12%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
                           {t(key)}</button>
@@ -2479,10 +2481,12 @@ function Editor() {
         const ms = Math.max(0, Math.round(s * 1000)), z = (n: number, w = 2) => String(n).padStart(w, "0");
         return `${z(Math.floor(ms / 3600000))}:${z(Math.floor((ms % 3600000) / 60000))}:${z(Math.floor((ms % 60000) / 1000))},${z(ms % 1000, 3)}`;
       };
+      const isDub = p.mode === "dub" || p.mode === "voiceover";
+      const originalTop = p.subs.bilingual.order === "original_top";
       const own = new Map(p.captions.overrides.flatMap((o) => (o.text != null ? [[o.seg_id, o.text] as const] : [])));
       const content = p.segments
         .filter((s) => !s.hidden && !s.keep_original)
-        .map((s) => ({ s, text: (own.get(s.id) ?? (s.tgt_text || s.src_text) ?? "").trim() }))
+        .map((s) => ({ s, text: subtitleText({ src_text: s.src_text, tgt_text: own.get(s.id) ?? s.tgt_text }, p.subs.mode, isDub, originalTop) }))
         .filter(({ text }) => text)
         .map(({ s, text }, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${text}\n`).join("\n");
       await api.putProject(pid, p);
@@ -3164,12 +3168,7 @@ function Editor() {
           )}
           {!audioOnly && (
           <div className="flex items-center gap-1.5 shrink-0" title={t("comp.hint")}>
-            <select value={p.subs.mode} onChange={(e) => branch("subs_content", { value: e.target.value })}
-              className="bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[12px] text-[var(--color-text)] focus:border-[var(--color-accent)] focus:outline-none">
-              <option value="none">{t("comp.subsNone")}</option>
-              <option value="transcribe">{t("comp.subsOriginal")}</option>
-              <option value="translate">{t("comp.subsTranslate")}</option>
-            </select>
+            <SubsContentControl subs={p.subs} primaryColor={ss.color || "#FFFFFF"} onPatch={branch} />
             <button onClick={() => branch("subs_burn", { on: p.subs.burn === false })} title={t("comp.burnHint")} aria-pressed={p.subs.burn !== false}
               className={`px-2.5 py-1 rounded-md text-[12px] border transition-colors ${p.subs.burn !== false ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent font-medium" : "border-[var(--color-border)] text-[var(--color-muted)]"}`}>
               {t("comp.burn")}

@@ -137,7 +137,10 @@ fn op_subpos(p: &mut Project, edit: &Value) -> PatchResult {
 }
 
 /// mode — верхнеуровневый режим вывода. Порт api.set_mode:
-///   subtitles -> nodub + subs.translate; dub -> dub + subs.translate; funny -> dub + subs.translate + rewrite.
+///   subtitles -> nodub + subs.transcribe; dub, voiceover -> свой аудио-выход + subs.translate;
+///   transcribe -> transcribe + subs.transcribe; funny -> dub + subs.translate + rewrite.
+/// Язык субтитров, выбранный отдельно (subs_content), пресет не перебивает: «нет» — ни один пресет,
+/// «оба» и «оригинал» под дубляжем или закадром — dub, voiceover и funny.
 /// Помечает все сегменты dirty. ValueError (неизвестное значение) -> 400.
 fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
     let value = edit.get("value").and_then(|x| x.as_str()).unwrap_or_default();
@@ -146,9 +149,18 @@ fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
     // «subs=none всё равно прожигает субтитры» — через редактор). subs.mode остаётся под управлением
     // независимого subs_content-контрола, пресет задаёт лишь его дефолт, когда он НЕ «none».
     let keep_no_subs = p.subs.mode == "none";
+    // «Оригинал» в nodub/transcribe — собственный дефолт пресетов subtitles/transcribe, а не выбор под
+    // дубляж: при переходе к дубляжу он становится переводом. «Оба» ни один пресет не ставит.
+    let keep_dub_subs = p.subs.mode == "bilingual"
+        || (p.subs.mode == "transcribe" && matches!(p.mode.as_str(), "dub" | "voiceover"));
     let set_subs = |p: &mut Project, m: &str| {
         if !keep_no_subs {
             p.subs.mode = m.into();
+        }
+    };
+    let set_dub_subs = |p: &mut Project| {
+        if !keep_no_subs && !keep_dub_subs {
+            p.subs.mode = "translate".into();
         }
     };
     match value {
@@ -159,13 +171,13 @@ fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
         }
         "dub" => {
             p.mode = "dub".into();
-            set_subs(p, "translate");
+            set_dub_subs(p);
             p.audio.rewrite = None;
         }
         "voiceover" => {
             // закадровый: перевод+TTS поверх приглушённого оригинала (громкость — audio.voiceover_gain_db)
             p.mode = "voiceover".into();
-            set_subs(p, "translate");
+            set_dub_subs(p);
             p.audio.rewrite = None;
         }
         "transcribe" => {
@@ -176,7 +188,7 @@ fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
         }
         "funny" => {
             p.mode = "dub".into();
-            set_subs(p, "translate");
+            set_dub_subs(p);
             if p.audio.rewrite.is_none() {
                 p.audio.rewrite = Some("make it a funny, playful dub".into());
             }
@@ -214,17 +226,70 @@ fn op_subs_burn(p: &mut Project, edit: &Value) -> PatchResult {
 }
 
 /// subs_content — независимо задать содержимое субтитров: none (нет) | transcribe (язык оригинала) |
-/// translate (перевод). Развязывает субтитры от аудио-режима (перевод сабов без дубляжа и наоборот).
+/// translate (перевод) | bilingual (перевод и оригинал второй строкой). Развязывает субтитры от
+/// аудио-режима (перевод сабов без дубляжа, оригинал под дубляжем). Для двуязычных — order
+/// (translation_top | original_top) и secondary {size_pct 40..=100, color #RRGGBB, opacity 10..=100;
+/// null — как у основной строки}. Поля, которых нет, не меняются; всё проверяется до записи.
 fn op_subs_content(p: &mut Project, edit: &Value) -> PatchResult {
-    let v = s(edit, "value").unwrap_or_default();
-    match v.as_str() {
-        "none" | "transcribe" | "translate" => p.subs.mode = v,
-        other => return Err((400, format!("unknown subs content {other:?}"))),
+    let mode = match edit.get("value") {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(m @ ("none" | "transcribe" | "translate" | "bilingual")) => Some(m.to_string()),
+            _ => return Err((400, format!("unknown subs content {v}"))),
+        },
+    };
+    let mut bilingual = p.subs.bilingual.clone();
+    if let Some(v) = edit.get("order") {
+        match v.as_str() {
+            Some(o @ (dub_core::ORDER_TRANSLATION_TOP | dub_core::ORDER_ORIGINAL_TOP)) => bilingual.order = o.to_string(),
+            _ => return Err((400, format!("order is translation_top or original_top, not {v}"))),
+        }
     }
+    if let Some(sec) = edit.get("secondary") {
+        let sec = sec.as_object().ok_or((400, "secondary is an object {size_pct, color, opacity}".to_string()))?;
+        for key in sec.keys() {
+            if !matches!(key.as_str(), "size_pct" | "color" | "opacity") {
+                return Err((400, format!("secondary has no field {key:?}")));
+            }
+        }
+        if let Some(v) = sec.get("size_pct") {
+            match v.as_i64() {
+                Some(n) if (40..=100).contains(&n) => bilingual.secondary.size_pct = n,
+                _ => return Err((400, format!("secondary.size_pct is 40..100, not {v}"))),
+            }
+        }
+        if let Some(v) = sec.get("color") {
+            bilingual.secondary.color = match v {
+                Value::Null => None,
+                Value::String(c) if is_hex_rgb(c) => Some(c.to_uppercase()),
+                _ => return Err((400, format!("secondary.color is #RRGGBB or null, not {v}"))),
+            };
+        }
+        if let Some(v) = sec.get("opacity") {
+            bilingual.secondary.opacity = match (v, v.as_i64()) {
+                (Value::Null, _) => None,
+                (_, Some(n)) if (10..=100).contains(&n) => Some(n),
+                _ => return Err((400, format!("secondary.opacity is 10..100 or null, not {v}"))),
+            };
+        }
+    }
+    if mode.is_none() && edit.get("order").is_none() && edit.get("secondary").is_none() {
+        return Err((400, "subs_content needs value, order or secondary".into()));
+    }
+    if let Some(m) = mode {
+        p.subs.mode = m;
+    }
+    p.subs.bilingual = bilingual;
     Ok(())
 }
 
+/// #RRGGBB.
+fn is_hex_rgb(c: &str) -> bool {
+    c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
 /// translate — сменить целевой язык (+режим subs=translate; funny -> rewrite). Порт api.translate.
+/// Двуязычные субтитры остаются двуязычными: перевод в них и так основная строка.
 /// Помечает все сегменты dirty (перевод/дубляж перегенерятся на следующем analyze/render). Смена языка
 /// требует ре-перевода, но analyze здесь не запускаем — это GPU-джоба; PATCH лишь фиксирует намерение.
 fn op_translate(p: &mut Project, edit: &Value) -> PatchResult {
@@ -232,7 +297,13 @@ fn op_translate(p: &mut Project, edit: &Value) -> PatchResult {
     if let Some(lang) = s(edit, "lang") {
         p.tgt_lang = lang;
     }
-    p.subs.mode = "translate".into();
+    // Как в op_mode: выключенные субтитры остаются выключенными, «оба» и «оригинал» под дубляжем или
+    // закадром остаются; транскрипт проекта субтитров становится переводом.
+    let keep = matches!(p.subs.mode.as_str(), "none" | "bilingual")
+        || (p.subs.mode == "transcribe" && matches!(p.mode.as_str(), "dub" | "voiceover"));
+    if !keep {
+        p.subs.mode = "translate".into();
+    }
     if s(edit, "mode").as_deref() == Some("funny") {
         p.audio.rewrite = Some("make it a funny, playful dub".into());
     }
@@ -954,8 +1025,52 @@ mod tests {
     }
 
     #[test]
+    fn a_dub_mode_keeps_the_subtitle_language_chosen_for_the_dub() {
+        let mut p = proj_with_seg();
+        p.mode = "dub".into();
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"mode","value":"voiceover"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("voiceover", "bilingual"));
+
+        p.mode = "dub".into();
+        p.subs.mode = "transcribe".into();
+        apply(&mut p, &json!({"op":"mode","value":"funny"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("dub", "transcribe"));
+        apply(&mut p, &json!({"op":"mode","value":"voiceover"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe");
+
+        p.mode = "nodub".into();
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"mode","value":"dub"})).unwrap();
+        assert_eq!(p.subs.mode, "bilingual");
+
+        p.subs.mode = "none".into();
+        apply(&mut p, &json!({"op":"mode","value":"funny"})).unwrap();
+        assert_eq!(p.subs.mode, "none");
+    }
+
+    #[test]
+    fn a_dub_mode_after_the_subtitles_preset_shows_the_translation() {
+        let mut p = proj_with_seg();
+        p.subs.mode = "translate".into();
+        apply(&mut p, &json!({"op":"mode","value":"subtitles"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("nodub", "transcribe"));
+        apply(&mut p, &json!({"op":"mode","value":"dub"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("dub", "translate"));
+        apply(&mut p, &json!({"op":"mode","value":"transcribe"})).unwrap();
+        apply(&mut p, &json!({"op":"mode","value":"voiceover"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("voiceover", "translate"));
+
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"mode","value":"subtitles"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe", "пресет «Субтитры» — субтитры оригинала");
+    }
+
+    #[test]
     fn translate_sets_lang_and_dirty() {
         let mut p = proj_with_seg();
+        p.mode = "nodub".into();
+        p.subs.mode = "transcribe".into();
         apply(&mut p, &json!({"op":"translate","lang":"de"})).unwrap();
         assert_eq!(p.tgt_lang, "de");
         assert_eq!(p.subs.mode, "translate");
@@ -1105,6 +1220,64 @@ mod tests {
         assert!(p.captions.preset.name.is_none());
         apply(&mut p, &json!({"op":"blur_enable","on":false})).unwrap();
         assert!(!p.render.blur);
+    }
+
+    #[test]
+    fn subs_content_sets_bilingual_and_its_second_line() {
+        let mut p = Project::default();
+        apply(&mut p, &json!({"op":"subs_content","value":"bilingual"})).unwrap();
+        assert_eq!(p.subs.mode, "bilingual");
+        assert_eq!(p.subs.bilingual, dub_core::Bilingual::default());
+        apply(&mut p, &json!({"op":"subs_content","order":"original_top","secondary":{"size_pct":60,"color":"#ffd400","opacity":80}})).unwrap();
+        assert_eq!(p.subs.mode, "bilingual", "без value режим не меняется");
+        assert_eq!(p.subs.bilingual.order, "original_top");
+        assert_eq!(p.subs.bilingual.secondary.size_pct, 60);
+        assert_eq!(p.subs.bilingual.secondary.color.as_deref(), Some("#FFD400"));
+        assert_eq!(p.subs.bilingual.secondary.opacity, Some(80));
+        apply(&mut p, &json!({"op":"subs_content","secondary":{"color":null,"opacity":null}})).unwrap();
+        assert_eq!((p.subs.bilingual.secondary.color.clone(), p.subs.bilingual.secondary.opacity), (None, None));
+        assert_eq!(p.subs.bilingual.secondary.size_pct, 60, "поле, которого нет, не меняется");
+        apply(&mut p, &json!({"op":"subs_content","value":"transcribe"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe");
+        assert_eq!(p.subs.bilingual.order, "original_top", "настройки двуязычных сохраняются");
+    }
+
+    #[test]
+    fn a_new_target_language_keeps_bilingual_subtitles() {
+        let mut p = Project::default();
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"translate","lang":"de"})).unwrap();
+        assert_eq!((p.tgt_lang.as_str(), p.subs.mode.as_str()), ("de", "bilingual"));
+        p.mode = "nodub".into();
+        p.subs.mode = "transcribe".into();
+        apply(&mut p, &json!({"op":"translate","lang":"fr"})).unwrap();
+        assert_eq!(p.subs.mode, "translate", "the transcript of a subtitles project becomes the translation");
+        p.mode = "dub".into();
+        p.subs.mode = "transcribe".into();
+        apply(&mut p, &json!({"op":"translate","lang":"es"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe", "the original's language chosen under a dub stays");
+        p.subs.mode = "none".into();
+        apply(&mut p, &json!({"op":"translate","lang":"it"})).unwrap();
+        assert_eq!(p.subs.mode, "none", "subtitles switched off stay off");
+    }
+
+    #[test]
+    fn subs_content_refuses_bad_values_without_changing_anything() {
+        let mut p = Project::default();
+        for bad in [
+            json!({"op":"subs_content","value":"both"}),
+            json!({"op":"subs_content","value":"bilingual","order":"left"}),
+            json!({"op":"subs_content","value":"bilingual","secondary":{"size_pct":10}}),
+            json!({"op":"subs_content","value":"bilingual","secondary":{"color":"yellow"}}),
+            json!({"op":"subs_content","value":"bilingual","secondary":{"opacity":0}}),
+            json!({"op":"subs_content","value":"bilingual","secondary":{"font":"Arial"}}),
+            json!({"op":"subs_content"}),
+        ] {
+            let e = apply(&mut p, &bad).unwrap_err();
+            assert_eq!(e.0, 400, "{bad}");
+        }
+        assert_eq!(p.subs.mode, "none");
+        assert_eq!(p.subs.bilingual, dub_core::Bilingual::default());
     }
 
     #[test]

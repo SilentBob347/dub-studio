@@ -113,7 +113,7 @@ pub fn compose_captions(
 
     // ── caption-композит (pipeline.run:388-643) ────────────────────────────────
     // do_translate = dub || subs==translate; fresh_subs у нас всегда false (нет режима свежих сабов).
-    let do_translate = proj.mode == "dub" || proj.subs.mode == "translate";
+    let do_translate = proj.mode == "dub" || matches!(proj.subs.mode.as_str(), "translate" | "bilingual");
     let cctx = ComposeCtx {
         vw,
         vh,
