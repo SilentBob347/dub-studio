@@ -15,7 +15,7 @@ export type Allow = {
   skipFiles: ReadonlySet<string>;
 };
 
-const HUMAN_ATTRS = new Set(["title", "placeholder", "aria-label", "alt", "aria-description", "aria-placeholder", "label", "description", "hint", "tip", "tooltip", "caption", "heading"]);
+const HUMAN_ATTRS = new Set(["title", "placeholder", "aria-label", "alt", "aria-description", "aria-placeholder", "label", "description", "hint", "tip", "tooltip", "caption", "heading", "empty", "noResults", "subtitle", "localLabel", "emptyText", "message", "text", "confirmLabel", "cancelLabel", "orTitle"]);
 const CYR = /[Ѐ-ӿ]/;
 const LETTER = /\p{L}/u;
 const PROSE = /^[A-Z][A-Za-z]*(?:[ ,'’-][A-Za-z][A-Za-z'’-]*)+[.!?…:]?$/;

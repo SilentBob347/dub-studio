@@ -118,7 +118,9 @@
     "packMissing": "(paquete no encontrado)",
     "addSpeakerDone_one": "{{count}} línea → nuevo SPK {{spk}}",
     "addSpeakerDone_many": "{{count}} líneas → nuevo SPK {{spk}}",
-    "addSpeakerDone_other": "{{count}} líneas → nuevo SPK {{spk}}"
+    "addSpeakerDone_other": "{{count}} líneas → nuevo SPK {{spk}}",
+    "ageTeen": "adolescente",
+    "ageChild": "niño"
   },
   "remix": {
     "title": "Remix",
@@ -302,7 +304,9 @@
   "sel": {
     "pick": "Seleccionar:",
     "all": "Todos",
-    "count": "{{count}} seleccionados",
+    "count_one": "{{count}} seleccionado",
+    "count_many": "{{count}} seleccionados",
+    "count_other": "{{count}} seleccionados",
     "keep": "Original",
     "hide": "Ocultar",
     "del": "Eliminar"
@@ -338,7 +342,7 @@
   },
   "setup": {
     "title": "Primer inicio",
-    "subtitle": "Dub Studio needs a few components before the first dub. Pick what to download — it runs in the background.",
+    "subtitle": "Dub Studio necesita algunos componentes antes del primer doblaje. Todo lo necesario ya está marcado: solo pulsa «Descargar».",
     "download": "Descargar todo",
     "downloadOne": "Descargar",
     "cancel": "Cancelar",
@@ -528,7 +532,9 @@
   "units": {
     "gb": "GB",
     "mb": "MB",
-    "watt": "W"
+    "watt": "W",
+    "kb": "KB",
+    "b": "B"
   },
   "cloud": {
     "needKey": "Introduce abajo tu clave de OpenRouter (Ajustes de la nube)",

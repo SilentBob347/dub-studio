@@ -149,7 +149,9 @@
     "autoName": "Voice {{n}}",
     "packMissing": "(pack not found)",
     "addSpeakerDone_one": "{{count}} line → new SPK {{spk}}",
-    "addSpeakerDone_other": "{{count}} lines → new SPK {{spk}}"
+    "addSpeakerDone_other": "{{count}} lines → new SPK {{spk}}",
+    "ageTeen": "teen",
+    "ageChild": "child"
   },
   "remix": {
     "title": "Remix",
@@ -332,7 +334,8 @@
   "sel": {
     "pick": "Select:",
     "all": "All",
-    "count": "{{count}} selected",
+    "count_one": "{{count}} selected",
+    "count_other": "{{count}} selected",
     "keep": "Keep orig.",
     "hide": "Hide",
     "del": "Delete"
@@ -520,7 +523,9 @@
   "units": {
     "gb": "GB",
     "mb": "MB",
-    "watt": "W"
+    "watt": "W",
+    "kb": "KB",
+    "b": "B"
   },
   "cloud": {
     "needKey": "Enter your OpenRouter key below (Cloud settings)",

@@ -155,7 +155,9 @@
     "addSpeakerDone_one": "{{count}} фраза → новый SPK {{spk}}",
     "addSpeakerDone_few": "{{count}} фразы → новый SPK {{spk}}",
     "addSpeakerDone_many": "{{count}} фраз → новый SPK {{spk}}",
-    "addSpeakerDone_other": "{{count}} фразы → новый SPK {{spk}}"
+    "addSpeakerDone_other": "{{count}} фразы → новый SPK {{spk}}",
+    "ageTeen": "подросток",
+    "ageChild": "ребёнок"
   },
   "remix": {
     "title": "Ремикс",
@@ -340,7 +342,10 @@
   "sel": {
     "pick": "Выбрать:",
     "all": "Все",
-    "count": "Выбрано: {{count}}",
+    "count_one": "Выбрано: {{count}}",
+    "count_few": "Выбрано: {{count}}",
+    "count_many": "Выбрано: {{count}}",
+    "count_other": "Выбрано: {{count}}",
     "keep": "Оригинал",
     "hide": "Скрыть",
     "del": "Удалить"
@@ -536,7 +541,9 @@
   "units": {
     "gb": "ГБ",
     "mb": "МБ",
-    "watt": "Вт"
+    "watt": "Вт",
+    "kb": "КБ",
+    "b": "Б"
   },
   "cloud": {
     "needKey": "Введите ключ OpenRouter ниже (Облачные настройки)",

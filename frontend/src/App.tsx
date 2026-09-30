@@ -6,7 +6,7 @@ import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Downl
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
 import { api, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
-import { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
+import i18n, { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
 import { playSfx, sfxEnabled, setSfxEnabled } from "./lib/sfx";
@@ -288,7 +288,7 @@ function ModelsSection() {
             ) : (
               <select value={selv("or_tts_voice")} onChange={(e) => setSel("or_tts_voice", e.target.value)} className={orSelectCls}>
                 <option value="">{t("cloud.oneVoice")}</option>
-                {orVoices.map((v) => <option key={v.name} value={v.name}>{v.gender === "male" ? "♂" : v.gender === "female" ? "♀" : "•"} {v.name}{v.age === "teen" || v.age === "child" ? ` · ${v.age}` : ""}</option>)}
+                {orVoices.map((v) => <option key={v.name} value={v.name}>{v.gender === "male" ? "♂" : v.gender === "female" ? "♀" : "•"} {v.name}{v.age === "teen" ? ` · ${t("voice.ageTeen")}` : v.age === "child" ? ` · ${t("voice.ageChild")}` : ""}</option>)}
               </select>
             )}
           </div>
@@ -3901,12 +3901,11 @@ function FilesPanel() {
   );
 }
 
-// human byte size (GB/MB) for the setup component list
 function fmtBytes(n: number) {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(0)} MB`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
-  return `${n} B`;
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} ${i18n.t("units.gb")}`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(0)} ${i18n.t("units.mb")}`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} ${i18n.t("units.kb")}`;
+  return `${n} ${i18n.t("units.b")}`;
 }
 
 // Семейства квантов: разные варианты ОДНОЙ модели (выбор одного, «ИЛИ»). Явная карта по id — надёжнее
@@ -4600,6 +4599,7 @@ export default function App() {
   const setProject = useStore((s) => s.setProject);
   const setStage = useStore((s) => s.setStage);
   const [cap, setCap] = useState("");
+  const [capOffline, setCapOffline] = useState(false);
   useEffect(() => { api.capabilities().then((c) => {
     const base = (p?: string) => p ? (p.split(/[\\/]/).pop() || p).replace(/\.(gguf|onnx|bin|pt|safetensors)$/i, "") : "";
     // ASR в футере — из ФАКТИЧЕСКОГО выбора (active.json), не из статичного имени Parakeet-модели:
@@ -4611,7 +4611,7 @@ export default function App() {
     if (c.models?.tts) parts.push(`TTS ${c.models.tts}${c.tts_quant ? ` ${c.tts_quant}` : ""}`);
     parts.push("sep BSRoformer", "diar Sortformer", "OCR PP-OCR");   // фикс-движки пайплайна
     setCap(parts.join(" · "));
-  }).catch(() => setCap(t("status.backendOffline"))); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }).catch(() => setCapOffline(true)); }, []);
   // boot: resume ?pid=… project, else gate on /setup/status — missing required components -> «first run».
   useEffect(() => {
     const pid = new URLSearchParams(location.search).get("pid");
@@ -4631,7 +4631,7 @@ export default function App() {
       {stage === "multilang" && <MultiLangView />}
       {stage === "editor" && (projMode === "transcribe" ? <TranscriptView /> : <Editor />)}
       <footer className="mono h-6 px-4 flex items-center gap-2 text-[10px] text-[var(--color-muted)] border-t border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] shrink-0" /><span className="truncate" title={cap}>{cap}</span>
+        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] shrink-0" /><span className="truncate" title={capOffline ? t("status.backendOffline") : cap}>{capOffline ? t("status.backendOffline") : cap}</span>
       </footer>
       <FilesPanel />
       {(stage === "editor" || stage === "analyzing" || stage === "multilang" || stage === "batch") && <ResourceMonitor />}

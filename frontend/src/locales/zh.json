@@ -116,7 +116,9 @@
     "speakerName": "说话人 {{spk}}",
     "autoName": "声音 {{n}}",
     "packMissing": "（未找到语音包）",
-    "addSpeakerDone_other": "{{count}} 句 → 新 SPK {{spk}}"
+    "addSpeakerDone_other": "{{count}} 句 → 新 SPK {{spk}}",
+    "ageTeen": "青少年",
+    "ageChild": "儿童"
   },
   "remix": {
     "title": "改编",
@@ -298,7 +300,7 @@
   "sel": {
     "pick": "选择：",
     "all": "全部",
-    "count": "已选 {{count}} 项",
+    "count_other": "已选 {{count}} 项",
     "keep": "原声",
     "hide": "隐藏",
     "del": "删除"
@@ -334,7 +336,7 @@
   },
   "setup": {
     "title": "首次运行",
-    "subtitle": "Dub Studio needs a few components before the first dub. Pick what to download — it runs in the background.",
+    "subtitle": "首次配音前，Dub Studio 需要几个组件。所需内容已全部勾选——只需点击“下载”。",
     "download": "全部下载",
     "downloadOne": "下载",
     "cancel": "取消",
@@ -512,7 +514,9 @@
   "units": {
     "gb": "GB",
     "mb": "MB",
-    "watt": "瓦"
+    "watt": "瓦",
+    "kb": "KB",
+    "b": "B"
   },
   "cloud": {
     "needKey": "请在下方输入 OpenRouter 密钥（云端设置）",
