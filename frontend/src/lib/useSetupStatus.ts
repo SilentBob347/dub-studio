@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type DownloadJob, type SetupStatus } from "./api";
+import { useStore } from "../store";
 
 // Статус «Первого запуска» с фоновой закачкой: пока закачка идёт, опрашиваем /setup/status раз в секунду
 // (прогресс, скорость, ожидание сервера); onSettled — когда идущая закачка завершилась, встала на паузу или упала.
@@ -14,6 +15,13 @@ export function useSetupStatus(onSettled?: (job: DownloadJob, status: SetupStatu
     setStatus(s);
     setError(null);
     const running = s.active?.status === "downloading";
+    // Закачка идёт мимо очереди джоб: шапка узнаёт о ней отсюда, как о шаге «download».
+    if (running && s.active) {
+      const a = s.active;
+      useStore.getState().setProgress("download", "", a.total > 0 ? Math.round((a.downloaded / a.total) * 100) : null);
+    } else if (wasRunning.current) {
+      useStore.getState().setProgress("", "", null);
+    }
     if (wasRunning.current && !running && s.active) settled.current?.(s.active, s);
     wasRunning.current = running;
     return s;

@@ -89,25 +89,10 @@ fn start_or_reuse_service(repo_root: &std::path::Path) -> Result<u16, String> {
     Ok(port)
 }
 
-/// Прописать ORT_DYLIB_PATH (onnxruntime 1.28) в окружение ПРОЦЕССА до старта сервера (dub-asr трогает ort
-/// лениво; PATH под движок/инструменты добавит augment_path_for_tools внутри serve_blocking).
+/// Окружение сервера до старта: путь к onnxruntime 1.28 (PATH под движок/инструменты добавит
+/// augment_path_for_tools внутри serve_blocking).
 fn setup_server_env(repo_root: &PathBuf) {
-    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
-        let rt = repo_root.join("models").join("runtime");
-        for cand in [
-            // GPU-сборка (cuda13) приоритетнее — суперсет CPU+CUDA; переключение backend без рестарта.
-            rt.join("onnxruntime-win-x64-gpu_cuda13-1.28.2").join("lib").join("onnxruntime.dll"),
-            rt.join("onnxruntime-win-x64-1.28.2").join("lib").join("onnxruntime.dll"),
-            layout::executable_directory().join("onnxruntime.dll"),
-            rt.join("onnxruntime-1.28.dll"),
-            rt.join("onnxruntime.dll"),
-        ] {
-            if cand.is_file() {
-                std::env::set_var("ORT_DYLIB_PATH", cand);
-                break;
-            }
-        }
-    }
+    dub_server::set_ort_dylib_env(repo_root, &layout::executable_directory());
 }
 
 /// Проверка обновления на GitHub-релизе и (по согласию юзера) установка. Драйвится из Rust: фронт

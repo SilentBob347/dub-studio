@@ -215,6 +215,29 @@ pub fn augment_path_for_tools(repo_root: &Path) {
     }
 }
 
+/// Прописать ORT_DYLIB_PATH (onnxruntime 1.28) в окружение процесса до старта сервера: ort грузит dylib лениво,
+/// а по голому имени Windows нашла бы раньше PATH onnxruntime.dll другой версии из System32 (Windows AI).
+/// GPU-сборка (cuda13) приоритетнее — суперсет CPU+CUDA; `beside_exe` — копия рядом с exe (портатив).
+pub fn set_ort_dylib_env(repo_root: &Path, beside_exe: &Path) {
+    if std::env::var_os("ORT_DYLIB_PATH").is_some() {
+        return;
+    }
+    let rt = repo_root.join("models").join("runtime");
+    let found = [
+        rt.join("onnxruntime-win-x64-gpu_cuda13-1.28.2").join("lib").join("onnxruntime.dll"),
+        rt.join("onnxruntime-win-x64-1.28.2").join("lib").join("onnxruntime.dll"),
+        beside_exe.join("onnxruntime.dll"),
+        rt.join("onnxruntime-1.28.dll"),
+        rt.join("onnxruntime.dll"),
+    ]
+    .into_iter()
+    .find(|cand| cand.is_file());
+    match found {
+        Some(cand) => std::env::set_var("ORT_DYLIB_PATH", cand),
+        None => eprintln!("[ERROR] onnxruntime 1.28 не найден в {}: распознавание и диаризация не запустятся, пока не скачан компонент ONNX Runtime", rt.display()),
+    }
+}
+
 /// Маршрут прокси из models/active.json для всех HTTP-клиентов приложения (dub_llm::net): вызывать на старте.
 /// Сохранение формы прокси перестраивает его сразу, без рестарта.
 pub fn init_proxy_route(repo_root: &Path) {
