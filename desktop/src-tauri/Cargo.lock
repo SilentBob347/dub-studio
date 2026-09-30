@@ -1298,6 +1298,7 @@ dependencies = [
 name = "dub-asr"
 version = "2.0.0"
 dependencies = [
+ "dub-core",
  "hound",
  "ort",
  "parakeet-rs",
@@ -1311,6 +1312,7 @@ name = "dub-captions"
 version = "2.0.0"
 dependencies = [
  "ab_glyph",
+ "dub-core",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1329,6 +1331,7 @@ name = "dub-faces"
 version = "2.0.0"
 dependencies = [
  "dub-asr",
+ "dub-core",
  "hound",
  "image",
  "ndarray",
@@ -1343,6 +1346,7 @@ name = "dub-llm"
 version = "2.0.0"
 dependencies = [
  "base64 0.23.1",
+ "dub-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -1365,6 +1369,7 @@ dependencies = [
 name = "dub-sep"
 version = "2.0.0"
 dependencies = [
+ "dub-core",
  "hound",
  "thiserror 2.0.21",
 ]
@@ -1377,7 +1382,9 @@ dependencies = [
  "async-stream",
  "audiocpp",
  "axum",
+ "base64 0.23.1",
  "blake3",
+ "chrono",
  "cpal",
  "dub-asr",
  "dub-captions",
