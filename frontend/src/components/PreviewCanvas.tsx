@@ -117,7 +117,7 @@ export default function PreviewCanvas({ pid, project, scrub, rendered, lane, pla
       <div className="relative" style={{ width: disp.w, height: disp.h }}>
         {rendered
           ? <video src={previewSrc} controls className="absolute inset-0 w-full h-full rounded-lg" />
-          : <img src={imgSrc} alt="frame" onLoad={onFrameSettled} onError={onFrameSettled}
+          : <img src={imgSrc} alt={t("preview.frameAlt")} onLoad={onFrameSettled} onError={onFrameSettled}
                  className="absolute inset-0 w-full h-full rounded-lg" />}
         {!rendered && disp.w > 0 && (
           <Stage width={disp.w} height={disp.h} className="absolute inset-0"
@@ -178,7 +178,7 @@ export default function PreviewCanvas({ pid, project, scrub, rendered, lane, pla
             </Layer>
           </Stage>
         )}
-        {busy && <div className="absolute top-2 right-2 text-[11px] text-[var(--color-accent-2)] bg-black/60 px-2 py-0.5 rounded">updating…</div>}
+        {busy && <div className="absolute top-2 right-2 text-[11px] text-[var(--color-accent-2)] bg-black/60 px-2 py-0.5 rounded">{t("preview.updating")}</div>}
         {playing && !rendered && (
           <div className="absolute top-2 left-1/2 -translate-x-1/2 max-w-[92%] text-center text-[10.5px] leading-tight text-white/90 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-full pointer-events-none">
             {t("play.lagNotice")}

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 import { Move, PictureInPicture2, Minimize2 } from "lucide-react";
 import { api, type HwSnapshot } from "../lib/api";
 import { useFloatable, dockSlot } from "../lib/useFloatable";
 
 const gb = (n: number) => n / 1024 ** 3;
-const fmtGb = (n: number) => `${gb(n).toFixed(1)} ГБ`;
 
 function heat(pct: number): string {
   if (pct >= 90) return "var(--color-danger, #ef4444)";
@@ -37,6 +37,9 @@ function Bar({ label, pct, right }: { label: string; pct: number; right: string 
 }
 
 export default function ResourceMonitor() {
+  const { t } = useTranslation();
+  const unitGb = t("units.gb");
+  const fmtGb = (n: number) => `${gb(n).toFixed(1)} ${unitGb}`;
   const [hw, setHw] = useState<HwSnapshot | null>(null);
   const [ok, setOk] = useState(true);
   const [, force] = useState(0);
@@ -68,7 +71,7 @@ export default function ResourceMonitor() {
     const slot = dockSlot();
     if (!slot) return null;
     return createPortal(
-      <button onClick={fl.pop} title="Оторвать монитор ресурсов"
+      <button onClick={fl.pop} title={t("monitor.popOut")}
         className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 px-2.5 h-8 rounded-md bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:border-[var(--color-accent)] transition-colors">
         <Dot pct={lead} />
         {hasGpu && <span className="mono text-[11px] tabular-nums">{Math.round(hw.gpuUtilization)}%</span>}
@@ -87,9 +90,9 @@ export default function ResourceMonitor() {
           className={`flex items-center gap-2 px-3 py-2 ${fl.dragging ? "cursor-grabbing" : "cursor-grab"} border-b border-white/5`}>
           <Move size={12} className="text-[var(--color-muted)]" />
           <Dot pct={lead} />
-          <span className="text-[12px] font-semibold truncate flex-1">{hasGpu ? hw.gpuName.replace(/NVIDIA GeForce /i, "") : "Ресурсы"}</span>
+          <span className="text-[12px] font-semibold truncate flex-1">{hasGpu ? hw.gpuName.replace(/NVIDIA GeForce /i, "") : t("monitor.title")}</span>
           {hasGpu && <span className="mono text-[11px] text-[var(--color-muted)]">{Math.round(hw.temperature)}°</span>}
-          <button onClick={fl.dock} title="Вернуть в шапку" className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><Minimize2 size={13} /></button>
+          <button onClick={fl.dock} title={t("float.dock")} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><Minimize2 size={13} /></button>
         </div>
         <div className="px-3 pb-3 pt-2 space-y-2.5">
           {hasGpu && (
@@ -97,8 +100,8 @@ export default function ResourceMonitor() {
               <Bar label="GPU" pct={hw.gpuUtilization} right={`${Math.round(hw.gpuUtilization)}%`} />
               <Bar label="VRAM" pct={vramPct} right={`${fmtGb(hw.usedVram)} / ${fmtGb(hw.totalVram)}`} />
               <div className="flex items-center justify-between text-[11px]">
-                <span className="text-[var(--color-muted)]">Питание</span>
-                <span className="mono tabular-nums">{Math.round(hw.powerDraw)} / {Math.round(hw.powerLimit)} Вт</span>
+                <span className="text-[var(--color-muted)]">{t("monitor.power")}</span>
+                <span className="mono tabular-nums">{Math.round(hw.powerDraw)} / {Math.round(hw.powerLimit)} {t("units.watt")}</span>
               </div>
               <div className="h-1 rounded-full bg-white/8 overflow-hidden">
                 <div className="h-full rounded-full transition-[width] duration-500" style={{ width: `${Math.min(100, powerPct)}%`, background: heat(powerPct) }} />
@@ -107,7 +110,7 @@ export default function ResourceMonitor() {
           )}
           <Bar label="RAM" pct={ramPct} right={`${fmtGb(hw.usedRam)} / ${fmtGb(hw.totalRam)}`} />
           <div className="flex items-center justify-between text-[10px] text-[var(--color-muted)]">
-            <span>Процесс</span><span className="mono tabular-nums">{fmtGb(hw.processRam)}</span>
+            <span>{t("monitor.process")}</span><span className="mono tabular-nums">{fmtGb(hw.processRam)}</span>
           </div>
         </div>
       </div>
