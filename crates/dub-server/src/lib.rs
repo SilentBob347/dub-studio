@@ -30,6 +30,7 @@ mod record;
 mod render;
 mod setup;
 mod spa;
+mod studio_settings;
 mod subimport;
 mod translate;
 mod voice_slots;
@@ -357,6 +358,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{pid}/casting/library", post(casting_library_save))
         .route("/casting/library/{slug}", delete(casting_library_delete))
         .route("/casting/library/{slug}/avatar", get(casting_library_avatar))
+        .route("/settings/launch", get(studio_settings::launch_get).patch(studio_settings::launch_patch))
+        .route("/app/paths", get(studio_settings::app_paths))
         .route("/fonts", get(endpoints::fonts))
         .route("/voices", get(voices_list))
         .route("/presets", get(endpoints::presets))
@@ -1368,6 +1371,13 @@ async fn list_projects(State(st): State<AppState>) -> Response {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            // Время создания = рождение каталога проекта (mtime project.json меняет каждая правка).
+            // ФС без времени рождения -> null, окно сортирует такой проект последним.
+            let created = std::fs::metadata(&dir)
+                .and_then(|m| m.created())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
             // Имя: исходный файл из name.txt (новые проекты), иначе basename meta.video (старые).
             let video = std::fs::read_to_string(dir.join("name.txt"))
                 .ok()
@@ -1393,6 +1403,7 @@ async fn list_projects(State(st): State<AppState>) -> Response {
                 "height": proj.meta.height,
                 "duration": proj.meta.duration,
                 "segments": proj.segments.len(),
+                "created": created,
                 "audio_only": audio_only,
                 "mtime": mtime,
                 "done": done,

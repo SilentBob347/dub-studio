@@ -125,6 +125,16 @@ export const api = {
   hwPresets: () => getJson<{ presets: { id: string; title: string; subtitle: string }[]; hardware: { gpuName: string; totalVramGb: number; totalRamGb: number; hasGpu: boolean; recommended: string; reason: string } }>("/engine/presets"),
   applyPreset: (id: string) => postJson<{ ok: boolean; id: string; applied: { key: string; value: string }[] }>("/engine/preset", { id }),
   voices: () => getJson<{ voices: string[] }>("/voices"),
+  // Дефолты запуска дубляжа (форма стартового экрана) хранит сервис: одни на все окна и агента.
+  launchDefaults: () => getJson<LaunchDefaultsState>("/settings/launch"),
+  saveLaunchDefaults: (patch: Partial<LaunchDefaults>) =>
+    fetch(`${BASE}/settings/launch`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify(patch) }).then(j<LaunchDefaultsState>),
+  appPaths: () => getJson<AppPaths>("/app/paths"),
+  // Отвечает ли сервис вообще: любой HTTP-ответ — да; false — только сетевая ошибка (на порту никого).
+  serverReachable: () => fetch(`${BASE}/health`, { cache: "no-store" }).then(() => true, (e: unknown) => {
+    if (e instanceof TypeError) return false;
+    throw e;
+  }),
   recordDevices: () => getJson<{ devices: string[] }>("/record/devices"),
   recordLevel: () => getJson<{ level: number }>("/record/level"),
   recordStart: (name: string, device?: string) => postJson<{ ok: boolean; name?: string; error?: string }>("/record/start", { name, device }),
@@ -159,7 +169,7 @@ export const api = {
   saveCastingToLibrary: (pid: string, name: string) => postJson<{ slug: string }>(`/projects/${pid}/casting/library`, { name }),
   deleteCastingLibrary: (slug: string) => fetch(`${BASE}/casting/library/${encodeURIComponent(slug)}`, { method: "DELETE" }).then(j<{ ok: boolean }>),
   castingLibraryAvatarUrl: (slug: string, id: string) => `${BASE}/casting/library/${encodeURIComponent(slug)}/avatar?id=${encodeURIComponent(id)}`,
-  listProjects: () => getJson<{ projects: ProjectSummary[] }>("/projects"),   // недавние/сохранённые проекты для экрана «Открыть»
+  listProjects: () => getJson<{ projects: ProjectListing[] }>("/projects"),   // недавние/сохранённые проекты для экрана «Открыть»
   getProject: (pid: string) => getJson<Project>(`/projects/${pid}`),
   deleteProject: (pid: string) => fetch(`${BASE}/projects/${pid}`, { method: "DELETE" }).then(j<{ ok: boolean }>),   // удалить проект (стирает workspace/<pid>) — кнопка в «Недавних»
   putProject: (pid: string, project: Project) =>   // undo/redo: serialize through the SAME chain as patch() (no race)
@@ -202,3 +212,19 @@ export const api = {
       es.onerror = () => { if (es.readyState === EventSource.CLOSED) reject(new Error(i18n.t("common.streamLost"))); };
     }),
 };
+
+// created — рождение каталога проекта (секунды эпохи); null, если ФС его не хранит.
+export type ProjectListing = ProjectSummary & { created: number | null };
+export type LaunchDefaults = {
+  audio: "nodub" | "dub" | "voiceover" | "transcribe";
+  subs: "none" | "transcribe" | "translate";
+  burn: boolean; detect_text: boolean;
+  src_lang: string; tgt_lang: string | null;   // tgt_lang null — язык интерфейса окна
+  casting: boolean; casting_ref: string; content_type: "auto" | "real" | "anime";
+  vo_gain_db: number;
+  tr_style: "" | "technical" | "literary" | "casual" | "custom"; tr_style_custom: string;
+  sub_blur: boolean; keep_orig: boolean; container: "mp4" | "mkv";
+  voice_src: "clone" | "library"; voice_slots_m: string[]; voice_slots_f: string[];
+};
+export type LaunchDefaultsState = { defaults: LaunchDefaults; saved: boolean };
+export type AppPaths = { data_dir: string; projects_dir: string; models_dir: string };

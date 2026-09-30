@@ -212,6 +212,93 @@
     "delete": "Delete project",
     "deleteConfirm": "Delete project «{{video}}»? Its files will be permanently erased."
   },
+  "prefs": {
+    "title": "Settings",
+    "close": "Close",
+    "done": "Done",
+    "sections": {
+      "models": "Models",
+      "modelsHint": "Local engines, quants and the hardware preset",
+      "cloud": "Cloud",
+      "cloudHint": "OpenRouter key and parallel requests",
+      "quality": "Quality",
+      "qualityHint": "Voice checks, takes and diagnostics",
+      "network": "Network",
+      "networkHint": "Proxy for model downloads and the cloud",
+      "interface": "Language & sounds",
+      "interfaceHint": "Interface language and notification sounds",
+      "agent": "Agent (MCP)",
+      "agentHint": "Connect an AI agent to the studio",
+      "about": "About",
+      "aboutHint": "Version, links and the data folder"
+    },
+    "voiceGroup": "Voice generation",
+    "diagnostics": "Diagnostics",
+    "loadFailed": "Couldn't read the settings: {{error}}",
+    "saveFailed": "Couldn't save the setting: {{error}}",
+    "uiLanguage": "Interface language",
+    "uiLanguageHint": "Buttons, hints and messages of the studio",
+    "soundsHint": "A short sound when a job finishes or fails",
+    "links": "Useful links",
+    "repo": "Source code",
+    "issues": "Report a problem",
+    "releases": "Releases",
+    "license": "License (MIT)",
+    "modelLicenses": "Model licenses",
+    "dataTitle": "Data folder",
+    "dataHint": "Projects, models and settings of the studio are stored here",
+    "dataDir": "Studio folder",
+    "projectsDir": "Projects",
+    "modelsDir": "Models and settings",
+    "copyPath": "Copy path",
+    "copied": "Copied",
+    "pathsFailed": "Couldn't get the data folder: {{error}}"
+  },
+  "projects": {
+    "title": "All projects",
+    "all": "All projects ({{n}})",
+    "count_one": "{{count}} project",
+    "count_other": "{{count}} projects",
+    "countFiltered": "{{shown}} of {{total}}",
+    "search": "Search by name, language or mode",
+    "empty": "No projects yet",
+    "noMatch": "No projects match the search and filters",
+    "created": "created {{date}}",
+    "edited": "edited {{ago}}",
+    "more_one": "Show {{count}} more",
+    "more_other": "Show {{count}} more",
+    "deleteConfirm": "Delete",
+    "loadFailed": "Couldn't load the project list: {{error}}",
+    "openFailed": "Couldn't open the project: {{error}}",
+    "sort": {
+      "label": "Sort: {{order}}",
+      "title": "Sort by",
+      "newest": "Newest first",
+      "oldest": "Oldest first",
+      "edited": "Recently edited",
+      "nameAsc": "Name A–Z",
+      "nameDesc": "Name Z–A",
+      "longest": "Longest first",
+      "shortest": "Shortest first"
+    },
+    "filter": {
+      "status": "Filter by status",
+      "all": "All",
+      "done": "Ready",
+      "pending": "Not ready",
+      "reset": "Reset filters"
+    }
+  },
+  "offline": {
+    "title": "The studio service isn't responding",
+    "body": "This window can't reach the Dub Studio service on this computer. If you closed the app, start it again; if it stopped by itself, restart it. The page comes back on its own as soon as the service answers.",
+    "retrying": "Checking every 2 s · {{seconds}} s",
+    "retry": "Check now"
+  },
+  "launch": {
+    "loadFailed": "Couldn't read the saved launch settings, the form shows the built-in ones: {{error}}",
+    "saveFailed": "Couldn't save the launch settings: {{error}}"
+  },
   "multilang": {
     "title": "Multiple languages",
     "exportTitle": "Export to other languages",
@@ -523,7 +610,7 @@
     "watt": "W"
   },
   "cloud": {
-    "needKey": "Enter your OpenRouter key below (Cloud settings)",
+    "needKey": "Needs an OpenRouter key — click to open the Cloud section",
     "ttsNoRussian": "⚠ This model does not support Russian — pick another one for Russian dubbing.",
     "autocast": "Auto-cast voices",
     "beta": "beta",

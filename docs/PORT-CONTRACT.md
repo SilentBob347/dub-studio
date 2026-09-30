@@ -46,6 +46,10 @@ data: {"type":"error", "error": "..."}
 | GET | `/projects/{pid}/output?dl=` | **done** | Отдать output.mp4 (Range через tower-http ServeFile → 206); dl=1 → Content-Disposition attachment |
 | GET | `/projects/{pid}/original?t=` | **done** | ОДИН PNG-кадр оригинала на t (порт app.py.original → source_frame; ComparePane вставляет как `<img src>`). Джоба source_frame → PNG, timeout 60с. **ИСПРАВЛЕНО (раунд 5): раньше отдавал Range-видео — это ломало ComparePane (broken img). Сырое видео для плеера — /dub.** (endpoints.rs::original_frame) |
 | GET | `/projects/{pid}/dub` | **done** | Проигрываемое видео: output.mp4, иначе analyzed.mp4 (Range) |
+| GET | `/projects` | **done** | {projects: [{pid, video, tgt_lang, mode, width, height, duration, segments, created, audio_only, mtime, done}]}, новые правки сверху. `created` — рождение каталога проекта (сек. эпохи; null, если ФС его не хранит), `mtime` — последняя правка project.json (lib.rs::list_projects) |
+| GET | `/settings/launch` | **done** | Дефолты запуска дубляжа (форма стартового экрана): {defaults: {audio, subs, burn, detect_text, src_lang, tgt_lang\|null, casting, casting_ref, content_type, vo_gain_db, tr_style, tr_style_custom, sub_blur, keep_orig, container, voice_src, voice_slots_m, voice_slots_f}, saved}. Файл `models/launch_defaults.json`; нет файла — встроенные дефолты и saved=false (studio_settings.rs) |
+| PATCH | `/settings/launch` | **done** | Частичная правка тех же полей; незнакомое поле или неверное значение — 400 целиком, файл не меняется; запись атомарная. Ответ как у GET, saved=true |
+| GET | `/app/paths` | **done** | {data_dir, projects_dir, models_dir} — где лежат данные студии (раздел «О программе») |
 | — (fallback) | `/{spa_path}` | **done** | SPA: реальный статик-файл (с защитой от path-traversal), иначе index.html |
 
 ## PATCH `/projects/{pid}` — операции `op` (все синхронные, без GPU) — **todo**
