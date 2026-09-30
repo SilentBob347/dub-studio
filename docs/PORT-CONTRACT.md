@@ -305,4 +305,4 @@ compose всегда даёт титру bbox (матч ИЛИ fallback цент
 | DELETE | `/engine/openrouter/settings` | Удалить сохранённый ключ; ответ как у GET. `environment_key` 409 |
 | GET | `/engine/proxy/settings` | `{on, url, password_set}` — адрес без пароля |
 | PUT | `/engine/proxy/settings` | `{on?, url?, password?}`: `password` нет или `""` — оставить сохранённый, `null` — удалить, строка — заменить; пароль, вписанный в адрес, уходит в хранилище; `url: ""` — убрать прокси. Коды: `proxy_password_without_user`, `invalid_proxy_url`, `invalid_proxy_password`, `invalid_proxy_on` 400, `store_failed` 500 |
-| POST | `/engine/proxy/test` | `{url, password?}`: адрес с логином без пароля проверяется с паролем из тела или из хранилища |
+| POST | `/engine/proxy/test` | `{url, password?}`: адрес с логином без пароля проверяется с паролем из тела; сохранённый пароль подставляется, только если `url` совпадает с сохранённым адресом |

@@ -80,11 +80,13 @@ pub async fn openrouter_verify(State(st): State<AppState>, Json(body): Json<Valu
 // Пробуем достучаться до HF (закачка моделей) и OpenRouter (облако) через указанный прокси. Пустой url ->
 // проверка ПРЯМОГО доступа (без прокси): юзер сразу видит, нужен ли ему прокси вообще. http_status_as_error
 // выключаем — меряем транспорт (дошли до сервера через прокси), а не HTTP-статус ответа.
-pub async fn proxy_test(Json(body): Json<Value>) -> Response {
-    let url = body.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
-    // Форма не держит сохранённый пароль: адрес с логином без пароля проверяем с паролем из тела или из хранилища.
-    let typed = body.get("password").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
-    let url = crate::models::proxy_with_password(&url, typed.or_else(crate::credentials::proxy_password).as_deref());
+pub async fn proxy_test(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
+    let url = crate::secrets_api::proxy_test_address(
+        &st.models_root,
+        crate::credentials::secrets_dir().as_deref(),
+        body.get("url").and_then(Value::as_str).unwrap_or(""),
+        body.get("password").and_then(Value::as_str),
+    );
     let res = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let agent: ureq::Agent = if url.is_empty() {
             ureq::Agent::config_builder().http_status_as_error(false).build().into()

@@ -95,6 +95,25 @@ pub(crate) fn proxy_view(models_root: &Path, secrets: &Path) -> Value {
     })
 }
 
+/// Адрес для POST /engine/proxy/test. Пароль из тела подставляется в любой адрес, сохранённый — только в
+/// сохранённый адрес: в чужой он ушёл бы хосту из тела запроса (Proxy-Authorization, SOCKS-логин).
+pub(crate) fn proxy_test_address(models_root: &Path, secrets: Option<&Path>, url: &str, typed: Option<&str>) -> String {
+    let url = url.trim();
+    let password = match typed.map(str::trim).filter(|typed| !typed.is_empty()) {
+        Some(typed) => Some(typed.to_string()),
+        None => {
+            let selection = crate::models::load_selection(models_root);
+            let saved = selection.get("proxy_url").and_then(Value::as_str).map(str::trim);
+            if saved == Some(url) {
+                secrets.and_then(credentials::proxy_password_in)
+            } else {
+                None
+            }
+        }
+    };
+    crate::models::proxy_with_password(url, password.as_deref())
+}
+
 #[derive(Debug)]
 pub(crate) struct FormError {
     status: StatusCode,
@@ -241,6 +260,38 @@ mod tests {
         apply_proxy_form(&models, &secrets, &json!({ "url": "" })).unwrap();
         assert!(crate::models::load_selection(&models).get("proxy_url").is_none());
         assert_eq!(credentials::proxy_password_in(&secrets), None);
+
+        std::fs::remove_dir_all(&models).unwrap();
+        std::fs::remove_dir_all(&secrets).unwrap();
+    }
+
+    #[test]
+    fn the_saved_proxy_password_goes_only_to_the_saved_address() {
+        let models = scratch("probe-models");
+        let secrets = scratch("probe-secrets");
+        apply_proxy_form(&models, &secrets, &json!({ "on": false, "url": "http://alice:hunter2@proxy.lan:3128" })).unwrap();
+        let probe = |url: &str, typed: Option<&str>| proxy_test_address(&models, Some(&secrets), url, typed);
+
+        assert_eq!(probe("http://alice@proxy.lan:3128", None), "http://alice:hunter2@proxy.lan:3128");
+        assert_eq!(probe(" http://alice@proxy.lan:3128 ", Some("  ")), "http://alice:hunter2@proxy.lan:3128");
+        for foreign in [
+            "http://alice@attacker.example:3128",
+            "socks5://alice@attacker.example:1080",
+            "https://alice@proxy.lan:3128",
+            "http://alice@proxy.lan:3129",
+            "alice@proxy.lan:3128",
+        ] {
+            assert_eq!(probe(foreign, None), foreign, "the saved password must not reach {foreign}");
+        }
+        assert_eq!(probe("http://alice@attacker.example:3128", Some("typed")), "http://alice:typed@attacker.example:3128");
+        assert_eq!(probe("http://alice@proxy.lan:3128", Some("typed")), "http://alice:typed@proxy.lan:3128");
+        assert_eq!(probe("http://alice:own@attacker.example:3128", None), "http://alice:own@attacker.example:3128");
+        assert_eq!(probe("", None), "");
+        assert_eq!(proxy_test_address(&models, None, "http://alice@proxy.lan:3128", None), "http://alice@proxy.lan:3128");
+
+        apply_proxy_form(&models, &secrets, &json!({ "url": "http://alice@proxy2.lan:3128" })).unwrap();
+        assert_eq!(probe("http://alice@proxy.lan:3128", None), "http://alice@proxy.lan:3128");
+        assert_eq!(probe("http://alice@proxy2.lan:3128", None), "http://alice:hunter2@proxy2.lan:3128");
 
         std::fs::remove_dir_all(&models).unwrap();
         std::fs::remove_dir_all(&secrets).unwrap();
