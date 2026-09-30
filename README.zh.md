@@ -52,7 +52,7 @@
 ## 功能
 
 - **声音克隆** —— 克隆原始音色并说出新语言（原生 [Higgs Audio v3](https://huggingface.co/bosonai) 引擎，GGUF）。按说话人自动分配或使用自带声音包。
-- **说话人分离** —— 谁在何时说话（NVIDIA **Sortformer** v2，最多 4 个声音），每个说话人不同声音。
+- **说话人分离** —— 谁在何时说话（NVIDIA **Nemotron 3 Diarization**，最多 8 个声音），每个说话人不同声音。
 - **角色选角（测试版）** —— 一个角色就是**「人脸 + 声音」的配对**。应用在整段视频中收集人脸、识别同一个人，并**按共同出现把他绑定到某个说话人**（近景出镜者获得声音，背景旁听者则否）；自动挑选最清晰的一帧作头像，并**为整部剧集保存选角档案** —— 声音和角色描述只需指定一次，**下一集自动套用**。**「真实人脸 / 卡通·动漫」**开关按内容切换人脸识别。
 - **可选 ASR 引擎** —— 用 **Parakeet-TDT**（GPU，默认）或 **Whisper**（[Purfview faster-whisper 独立版](https://github.com/Purfview/whisper-standalone-win)，可在 CPU 上运行）转写 —— 在设置里直接选择模型大小（tiny … large-v3-turbo）和量化（compute type）。
 - **导入现成字幕** —— 用你自己的 `.srt`/`.ass` 作为精确文稿：文本和时间轴直接取自文件，而非自动识别（说话人仍由声纹分离自动分配）。勾选 **“字幕已是目标语言”** 可连翻译一起跳过 —— 英文视频 + 你的俄语字幕 → 直接生成俄语配音，无需识别与翻译。
@@ -95,7 +95,7 @@
 - **WebView2** —— Windows 11 预装（Windows 10 自动安装）
 - **磁盘：** 约 15 GB 用于模型、引擎与运行库（首次运行下载），外加项目空间
 
-在有 NVIDIA 的机器上，唯一需要手动安装的是较新的 **[NVIDIA 驱动](https://www.nvidia.com/Download/index.aspx)**。其余一切 —— 模型（Higgs Audio v3、Gemma-4 12B + vision、Parakeet-TDT、Sortformer、Mel-Band Roformer）、引擎、CUDA 运行库与 ffmpeg —— 应用在首次运行时一键下载。
+在有 NVIDIA 的机器上，唯一需要手动安装的是较新的 **[NVIDIA 驱动](https://www.nvidia.com/Download/index.aspx)**。其余一切 —— 模型（Higgs Audio v3、Gemma-4 12B + vision、Parakeet-TDT、Nemotron 3 Diarization、Mel-Band Roformer）、引擎、CUDA 运行库与 ffmpeg —— 应用在首次运行时一键下载。
 
 ## 快速开始
 
@@ -110,7 +110,7 @@
 
 `analyze()` 是固定的第一遍：分离 → 带词级时间戳的 ASR → 说话人分离 → 上下文翻译 + 视觉（字幕风格 / 标题 / 品牌）→ OCR（排布 / 模糊框）。产出一个可编辑的 **Project** 文档。每次编辑都是对它的补丁，约 0.17 秒/帧预览；导出只重跑**被弄脏的阶段**。
 
-**技术栈：** 原生 **Tauri 2（Rust）** 外壳在本地端口启动 `dub-server`（axum），并把窗口打开到 SPA —— React 19 + Vite + Tailwind + react-konva 覆盖 JASSUB。引擎：Parakeet-TDT 或 Whisper（ASR）· Sortformer（分离）· Gemma-4-12B GGUF（翻译 + 视觉，llama.cpp）· Higgs Audio v3（TTS）· Mel-Band Roformer（人声分离，BSRoformer.cpp）· PP-OCR（ONNX）· ffmpeg/NVENC。**运行时没有任何 Python 进程。**
+**技术栈：** 原生 **Tauri 2（Rust）** 外壳在本地端口启动 `dub-server`（axum），并把窗口打开到 SPA —— React 19 + Vite + Tailwind + react-konva 覆盖 JASSUB。引擎：Parakeet-TDT 或 Whisper（ASR）· Nemotron 3 Diarization（说话人分离）· Gemma-4-12B GGUF（翻译 + 视觉，llama.cpp）· Higgs Audio v3（TTS）· Mel-Band Roformer（人声分离，BSRoformer.cpp）· PP-OCR（ONNX）· ffmpeg/NVENC。**运行时没有任何 Python 进程。**
 
 ### 从源码构建
 
@@ -139,7 +139,9 @@ cd desktop && npm install && npx tauri build            # 3) 桌面外壳 (Tauri
 ## 致谢
 
 - **[Boson AI](https://huggingface.co/bosonai)** —— Higgs Audio v3 模型；**[drbaph / Higgs-Audio-v3-Studio](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio)** —— GGUF 量化与原生 `audiocpp_engine.dll`。
-- **[NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)** 与 **[Sortformer](https://huggingface.co/nvidia)** —— ASR 与说话人分离；ONNX 权重来自 [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) 与 [altunenes/parakeet-rs](https://github.com/altunenes/parakeet-rs)。
+- **[NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)**（CC-BY-4.0）—— ASR；ONNX 权重来自 [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx)，运行时 [altunenes/parakeet-rs](https://github.com/altunenes/parakeet-rs)。
+- **[Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra)**，由 **[Moondream](https://huggingface.co/moondream)** 基于 NVIDIA 的 parakeet-tdt-0.6b-v3 微调（CC-BY-4.0）—— 可选的微调 ASR，识别错误更少；ONNX 导出来自 [altunenes/parakeet-rs](https://huggingface.co/altunenes/parakeet-rs)。
+- **[NVIDIA Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization)**（Streaming Sortformer v3，[OpenMDW-1.1](https://openmdw.ai/license/1-1/)）—— 说话人分离，最多 8 个说话人；ONNX 导出来自 [altunenes/parakeet-rs](https://huggingface.co/altunenes/parakeet-rs)。
 - **[Google Gemma](https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf)** —— Gemma-4 12B（翻译 + 视觉），经 [llama.cpp](https://github.com/ggml-org/llama.cpp)。
 - **[chenmozhijin / BSRoformer.cpp](https://github.com/chenmozhijin/BSRoformer.cpp)** 与 **[GaboxR67](https://huggingface.co/GaboxR67)** —— 原生引擎与 Mel-Band Roformer 模型。
 
@@ -155,4 +157,4 @@ cd desktop && npm install && npx tauri build            # 3) 桌面外壳 (Tauri
 
 ## 许可证
 
-应用代码采用 [MIT](LICENSE)。模型权重保留各自许可证（Higgs Audio v3 —— Boson AI 研究/非商业；Gemma —— Gemma Terms 等）—— 每次发布前审核。
+应用代码采用 [MIT](LICENSE)。模型权重保留各自许可证（Higgs Audio v3 —— Boson AI 研究/非商业；Gemma —— Gemma Terms；Parakeet 与 Parakeet Ultra —— CC-BY-4.0；Nemotron 3 Diarization —— OpenMDW-1.1 等）—— 每次发布前审核。
