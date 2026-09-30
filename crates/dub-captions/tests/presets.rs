@@ -351,6 +351,74 @@ fn karaoke_lights_only_the_translation() {
     assert!(s2.ends_with("Where were you?"), "{s2}");
 }
 
+/// Вертикальный охват (верх, низ) плашек KP с цветом заливки `color`.
+fn plate_spans(ass: &str, color: &str) -> Vec<(f64, f64)> {
+    let fill = format!("\\1c{color}");
+    ass.lines()
+        .filter(|l| l.starts_with("Dialogue: 0,") && l.contains(",KP,") && l.contains("\\p1") && l.contains(&fill))
+        .map(|l| {
+            let nums: Vec<f64> = l.rsplit('}').next().unwrap().split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            let ys: Vec<f64> = nums.iter().skip(1).step_by(2).copied().collect();
+            (ys.iter().copied().fold(f64::INFINITY, f64::min), ys.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+        })
+        .collect()
+}
+
+fn inline_fs(line: &str) -> i64 {
+    let i = line.find("\\fs").unwrap() + 3;
+    line[i..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap()
+}
+
+fn style_font(ass: &str, style: &str) -> String {
+    let head = format!("Style: {style},");
+    ass.lines().find(|l| l.starts_with(&head)).unwrap().split(',').nth(1).unwrap().to_string()
+}
+
+#[test]
+fn in_a_look_the_original_takes_the_look_font_and_its_own_plate() {
+    let ass = gen_bilingual(Some("karaoke"), &Secondary::default(), vec![bi_sub()]);
+    assert_eq!(style_font(&ass, "S2"), "Oswald");
+    let kt = ass.lines().find(|l| l.contains(",KT,")).unwrap();
+    let sec = ass.lines().find(|l| l.contains(",S2,")).unwrap();
+    assert!(kt.contains("\\fnOswald") && sec.contains("\\fnOswald"), "{kt}\n{sec}");
+    let ratio = inline_fs(sec) as f64 / inline_fs(kt) as f64;
+    assert!((ratio - 0.7).abs() < 0.02, "кегль второй строки — 70 % основной в том же шрифте: {ratio}");
+    let plates = plate_spans(&ass, "&H181818&");
+    assert_eq!(plates.len(), 2, "плашка лука под каждой строкой:\n{ass}");
+    assert!(plates[0].1 < plates[1].0 || plates[1].1 < plates[0].0, "плашки не налезают: {plates:?}");
+    let ev = events(&ass);
+    for style in ["KT", "S2"] {
+        let y = ev.iter().find(|e| e.2 == style).unwrap().3 as f64;
+        assert!(plates.iter().any(|&(lo, hi)| lo < y && y < hi), "строка {style} ({y}) не на плашке: {plates:?}");
+    }
+}
+
+#[test]
+fn a_dark_look_keeps_the_original_on_its_bright_plate() {
+    let ass = gen_bilingual(Some("bubble"), &Secondary::default(), vec![bi_sub()]);
+    assert_eq!(style_font(&ass, "S2"), "Caveat");
+    let sec = ass.lines().find(|l| l.contains(",S2,")).unwrap();
+    assert!(sec.contains("\\1c&H181020&") && sec.contains("\\3c&HFFFFFF&"), "тёмный текст лука с белой обводкой: {sec}");
+    let y2 = events(&ass).iter().find(|e| e.2 == "S2").unwrap().3 as f64;
+    let plates = plate_spans(&ass, "&HA25DFF&");
+    assert!(plates.iter().any(|&(lo, hi)| lo < y2 && y2 < hi), "вторая строка ({y2}) лежит на розовой плашке: {plates:?}");
+}
+
+#[test]
+fn in_a_look_the_original_keeps_its_own_colour_and_opacity() {
+    let secondary = Secondary { below: true, size_pct: 70, color: Some("#FFD400".into()), opacity: Some(80) };
+    let ass = gen_bilingual(Some("hormozi"), &secondary, vec![bi_sub()]);
+    let sec = ass.lines().find(|l| l.contains(",S2,")).unwrap();
+    assert!(sec.contains("\\fnRusso One"), "{sec}");
+    assert!(sec.contains("\\1c&H00D4FF&\\alpha&H33&"), "свой цвет и 80 % непрозрачности: {sec}");
+    assert!(sec.contains("\\3c&H101010&"), "светлому тексту — тёмная обводка: {sec}");
+    assert_eq!(plate_spans(&ass, "&H0C0C0C&").len(), 2, "{ass}");
+    assert!(
+        ass.lines().filter(|l| l.contains(",KP,") && l.contains("\\p1")).all(|l| !l.contains("\\alpha")),
+        "плашки лука остаются непрозрачными:\n{ass}"
+    );
+}
+
 #[test]
 fn without_the_second_line_the_ass_has_no_s2() {
     let ass = gen(None, Some(&SubStyle::default()));

@@ -216,24 +216,20 @@ pub fn styled_extent(look: &ResolvedLook, screen: &[String], fs: i64, width: i64
     (top_rel - pady, bot_rel + pady)
 }
 
-/// Один субтитр-экран в разрешённом луке (плашка Layer 0 + текст Layer 1) — порт _emit_styled.
-/// `timed` — (начало, конец) каждого слова экрана по реальной речи (word_align); None — по длине слов.
+/// Плашка лука под экраном (KP, Layer 0) и ведущие теги его текста: позиция, шрифт, кегль, обводка.
 #[allow(clippy::too_many_arguments)]
-pub fn emit_styled(
-    out: &mut Vec<String>,
+fn styled_frame(
     look: &ResolvedLook,
     a: f64,
     b: f64,
     screen: &[String],
-    timed: Option<&[(f64, f64)]>,
     cx: i64,
     cy: i64,
     fs: i64,
     width: i64,
     bold: bool,
-) {
-    let (reveal0, plate, fontname) = (&look.reveal, &look.plate, &look.font);
-    let (base6, accent6, plate6) = (&look.base, &look.accent6, &look.plate6);
+) -> (Vec<String>, String) {
+    let (plate, fontname) = (&look.plate, &look.font);
     let (fs_font, ink_w, top_rel, bot_rel) = styled_geom(look, screen, fs, width);
     let padx = (fs_font as f32 * 0.55) as i64;
     let pady = (fs_font as f32 * 0.30) as i64;
@@ -251,7 +247,58 @@ pub fn emit_styled(
         let shad = ((fs_font as f32 * 0.06) as i64).max(2);
         lead.push_str(&format!("\\bord{bord}\\shad{shad}\\4c&H000000&"));
     }
-    out.extend(plate_events(plate, x0 as f64, y0 as f64, x1 as f64, y1 as f64, plate6, accent6, a, b));
+    let plates = plate_events(plate, x0 as f64, y0 as f64, x1 as f64, y1 as f64, &look.plate6, &look.accent6, a, b);
+    (plates, lead)
+}
+
+/// Экран в луке целиком, без пословной подсветки, стилем `style` — вторая строка двуязычных субтитров:
+/// своя плашка, шрифт и обводка лука, цвет текста `look.base`, `extra` — теги после цвета.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_styled_line(
+    out: &mut Vec<String>,
+    look: &ResolvedLook,
+    a: f64,
+    b: f64,
+    screen: &[String],
+    cx: i64,
+    cy: i64,
+    fs: i64,
+    width: i64,
+    bold: bool,
+    style: &str,
+    extra: &str,
+) {
+    let (plates, lead) = styled_frame(look, a, b, screen, cx, cy, fs, width, bold);
+    out.extend(plates);
+    out.push(format!(
+        "Dialogue: 1,{},{},{style},,0,0,0,,{{{lead}\\1c{}{extra}}}{}",
+        ts(a),
+        ts(b),
+        look.base,
+        screen.join("\\N")
+    ));
+}
+
+/// Один субтитр-экран в разрешённом луке (плашка Layer 0 + текст Layer 1) — порт _emit_styled.
+/// `timed` — (начало, конец) каждого слова экрана по реальной речи (word_align); None — по длине слов.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_styled(
+    out: &mut Vec<String>,
+    look: &ResolvedLook,
+    a: f64,
+    b: f64,
+    screen: &[String],
+    timed: Option<&[(f64, f64)]>,
+    cx: i64,
+    cy: i64,
+    fs: i64,
+    width: i64,
+    bold: bool,
+) {
+    let (base6, accent6) = (&look.base, &look.accent6);
+    let (plates, lead) = styled_frame(look, a, b, screen, cx, cy, fs, width, bold);
+    out.extend(plates);
+    let reveal0 = &look.reveal;
 
     let spans = match timed {
         Some(t) => timed_spans(screen, t),
