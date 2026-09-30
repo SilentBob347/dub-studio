@@ -981,7 +981,8 @@
     "noSubs": "No subtitles made by people",
     "subsHint": "Subtitles made by people come into the project as imported subtitles — more accurate than speech recognition.",
     "subsAuto": "The site's automatic subtitles are not taken: the studio's speech recognition is more accurate.",
-    "download": "Download and open",
+    "download": "Download",
+    "ready": "The video is ready: choose the mode below and press “{{start}}” — or “{{manual}}” to work on the subtitles by hand.",
     "rights": "Download only what you have the right to use: the author of the video and the site's rules decide.",
     "header": "Downloading by link: {{title}}",
     "logStarted": "Download by link started: {{title}}",
@@ -1005,7 +1006,7 @@
       "download": "Downloading the video…",
       "merge": "Joining video and sound…",
       "extract": "Taking out the sound…",
-      "subtitles": "Converting the subtitles…",
+      "subtitles": "Downloading the subtitles…",
       "project": "Creating the project…",
       "done": "Downloaded"
     },

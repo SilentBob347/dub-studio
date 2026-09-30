@@ -26,6 +26,8 @@ const KEEP: usize = 20;
 const COOKIES_LIMIT: u64 = 1024 * 1024;
 /// Проба ссылки (`-J`) дольше этого — сайт не отвечает.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(180);
+/// Шаг субтитров площадки дольше этого — сайт не отвечает (при устаревших адресах yt-dlp заново читает страницу).
+const SUBS_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -429,9 +431,6 @@ impl Fetches {
         let mut cmd = tool.command(&fetch.url);
         cmd.arg("--load-info-json").arg(&info_path).args(fetch.quality.args());
         cmd.arg("-P").arg(&dir).args(["-o", "source.%(ext)s"]);
-        if let Some(lang) = &subs_lang {
-            cmd.args(["--write-subs", "--no-write-auto-subs", "--sub-langs", lang, "--convert-subs", "srt", "-o", "subtitle:subs.%(ext)s"]);
-        }
         with_cookies(&mut cmd);
         cmd.args(["--newline", "--progress", "--progress-template", ytdlp::PROGRESS_TEMPLATE, "--progress-template", ytdlp::POSTPROCESS_TEMPLATE, "--print", ytdlp::FILE_TEMPLATE]);
         let (media, stderr) = self.download(id, cmd, expected, stop)?;
@@ -443,17 +442,56 @@ impl Fetches {
             None => find_media(&dir).ok_or_else(|| UrlError::new("ytdlp_failed", format!("yt-dlp закончил, но файла видео нет в {}: {}", dir.display(), ytdlp::last_error_line(&stderr))))?,
         };
 
-        // Проект из скачанного файла, как из выбранного на диске; субтитры площадки — импортом субтитров.
-        self.update(id, |f| f.phase = "project".into());
-        let subs = subs_lang.as_ref().and_then(|_| find_subs(&dir));
-        if subs_lang.is_some() && subs.is_none() {
-            let detail = format!("yt-dlp не отдал субтитры «{}»: {}", subs_lang.clone().unwrap_or_default(), ytdlp::last_error_line(&stderr));
-            self.update(id, |f| {
-                f.warning = Some("subs_failed".into());
-                f.warning_detail = Some(detail);
-            });
+        // Субтитры площадки — отдельным вызовом после видео: в общем вызове yt-dlp пишет их до медиа, и их ошибка
+        // бросает всю загрузку.
+        self.after_media(id, &media, &probe.title, subs_lang.as_deref(), stop, |lang| {
+            let mut cmd = tool.command(&fetch.url);
+            cmd.arg("--load-info-json").arg(&info_path).args(fetch.quality.args()).arg("--skip-download");
+            cmd.args(["--write-subs", "--no-write-auto-subs", "--sub-langs", lang, "--convert-subs", "srt"]);
+            cmd.arg("-P").arg(&dir).args(["-o", "source.%(ext)s", "-o", "subtitle:subs.%(ext)s"]);
+            with_cookies(&mut cmd);
+            let stop_subs = stop.clone();
+            ytdlp::run_captured(cmd, &move || stop_subs.load(Ordering::SeqCst), Some(SUBS_TIMEOUT))
+        })
+    }
+
+    /// Видео скачано: субтитры площадки (если выбраны) шагом `fetch_subs`, затем проект из файла, как из выбранного
+    /// на диске, с субтитрами площадки импортом субтитров. Сбой шага субтитров — предупреждение subs_failed, а не
+    /// провал: проект создаётся без них. Остановка остаётся остановкой.
+    fn after_media(
+        &self,
+        id: &str,
+        media: &Path,
+        title: &str,
+        subs_lang: Option<&str>,
+        stop: &Arc<AtomicBool>,
+        fetch_subs: impl FnOnce(&str) -> Result<ytdlp::Captured, UrlError>,
+    ) -> Result<(), UrlError> {
+        let dir = self.dir(id);
+        let subs = match subs_lang {
+            Some(lang) => {
+                self.update(id, |f| f.phase = "subtitles".into());
+                match fetch_subs(lang).and_then(|out| subs_file(&dir, out)) {
+                    Ok(p) => Some(p),
+                    Err(e) if e.code == "cancelled" => return Err(e),
+                    Err(e) => {
+                        tracing::warn!("субтитры «{lang}» загрузки {id}: {} ({})", e.detail, e.code);
+                        let detail = format!("субтитры «{lang}» не скачались ({}): {}", e.code, e.detail);
+                        self.update(id, |f| {
+                            f.warning = Some("subs_failed".into());
+                            f.warning_detail = Some(detail);
+                        });
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        if stop.load(Ordering::SeqCst) {
+            return Err(UrlError::new("cancelled", "остановлено"));
         }
-        let made = make_project(&self.inner.root, &media, &probe.title, subs.as_deref())?;
+        self.update(id, |f| f.phase = "project".into());
+        let made = make_project(&self.inner.root, media, title, subs.as_deref())?;
         if let Some((code, detail)) = made.warning {
             self.update(id, |f| {
                 f.warning = Some(code.into());
@@ -513,7 +551,6 @@ impl Fetches {
                     // Имена обработчиков yt-dlp — класс без FFmpeg и PP: FFmpegMergerPP -> Merger.
                     "Merger" => "merge",
                     "ExtractAudio" => "extract",
-                    "SubtitlesConvertor" => "subtitles",
                     _ => return,
                 };
                 self.update(id, |f| {
@@ -655,6 +692,20 @@ fn find_subs(dir: &Path) -> Option<PathBuf> {
     std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
         name.starts_with("subs.") && name.ends_with(".srt") && p.is_file()
+    })
+}
+
+/// Файл, который оставил шаг субтитров yt-dlp; его провал — код по тексту yt-dlp.
+fn subs_file(dir: &Path, out: ytdlp::Captured) -> Result<PathBuf, UrlError> {
+    if !out.success {
+        return Err(ytdlp::classify(&out.stderr));
+    }
+    find_subs(dir).ok_or_else(|| {
+        let said = [ytdlp::last_error_line(&out.stderr), ytdlp::last_error_line(&String::from_utf8_lossy(&out.stdout))]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or_default();
+        UrlError::new("ytdlp_failed", format!("yt-dlp закончил без файла субтитров в {}: {said}", dir.display()))
     })
 }
 
@@ -1007,6 +1058,83 @@ mod tests {
         std::fs::write(dir.join("empty.srt"), "garbage").unwrap();
         let made = make_project(&fetch_root, &dir.join("source.m4a"), "a", Some(&dir.join("empty.srt"))).unwrap();
         assert_eq!((made.subs_imported, made.warning.map(|w| w.0)), (false, Some("subs_empty")));
+    }
+
+    fn downloaded(f: &Fetches, id: &str) -> PathBuf {
+        lock(&f.inner.list).push(fetch(id, FetchStatus::Downloading));
+        let dir = f.dir(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("source.mp4"), b"not really a video").unwrap();
+        dir.join("source.mp4")
+    }
+
+    fn ran(success: bool, stderr: &str) -> ytdlp::Captured {
+        ytdlp::Captured { success, code: Some(i32::from(!success)), stdout: Vec::new(), stderr: stderr.into() }
+    }
+
+    #[test]
+    fn a_failed_subtitles_step_completes_the_download_without_them() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("workspace");
+        let f = Fetches::open(root.path(), &ws);
+        let stop = Arc::new(AtomicBool::new(false));
+        let media = downloaded(&f, "url7");
+        let mut asked = None;
+        let res = f.after_media("url7", &media, "clip", Some("en"), &stop, |lang| {
+            asked = Some(lang.to_string());
+            Ok(ran(false, "[info] Writing video subtitles to: source.en.vtt\nERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"))
+        });
+        f.finish("url7", res, false);
+        let x = f.get("url7").unwrap();
+        assert_eq!(asked.as_deref(), Some("en"));
+        assert_eq!((x.status, x.error_code.as_deref(), x.warning.as_deref()), (FetchStatus::Completed, None, Some("subs_failed")));
+        assert!(x.warning_detail.as_deref().unwrap().contains("rate_limited"), "{:?}", x.warning_detail);
+        assert!(!x.subs_imported);
+        let p = ws.join(x.pid.unwrap());
+        assert!(p.join("source.mp4").is_file() && p.join("project.json").is_file() && !p.join("import_subs.srt").exists());
+        assert!(!f.dir("url7").exists(), "the download's folder goes once the project has the file");
+
+        let media = downloaded(&f, "url8");
+        let res = f.after_media("url8", &media, "clip", Some("en"), &stop, |_| Err(UrlError::new("network", "yt-dlp не ответил за 180 с")));
+        f.finish("url8", res, false);
+        assert_eq!((f.get("url8").unwrap().status, f.get("url8").unwrap().warning.as_deref()), (FetchStatus::Completed, Some("subs_failed")));
+
+        let media = downloaded(&f, "url9");
+        let res = f.after_media("url9", &media, "clip", Some("en"), &stop, |_| Ok(ran(true, "")));
+        f.finish("url9", res, false);
+        let x = f.get("url9").unwrap();
+        assert_eq!((x.status, x.warning.as_deref()), (FetchStatus::Completed, Some("subs_failed")), "a step without its file is a warning too");
+    }
+
+    #[test]
+    fn the_sites_subtitles_come_after_the_video_and_a_stop_stays_a_stop() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("workspace");
+        let f = Fetches::open(root.path(), &ws);
+        let stop = Arc::new(AtomicBool::new(false));
+        let media = downloaded(&f, "url4");
+        let dir = f.dir("url4");
+        let res = f.after_media("url4", &media, "clip", Some("en"), &stop, |_| {
+            assert!(dir.join("source.mp4").is_file(), "the subtitles are fetched once the video is on disk");
+            std::fs::write(dir.join("subs.en.srt"), "1\n00:00:01,000 --> 00:00:02,500\nHello there\n\n").unwrap();
+            Ok(ran(true, ""))
+        });
+        f.finish("url4", res, false);
+        let x = f.get("url4").unwrap();
+        assert_eq!((x.status, x.subs_imported, x.warning.as_deref()), (FetchStatus::Completed, true, None));
+        assert!(ws.join(x.pid.unwrap()).join("import_subs.srt").is_file());
+
+        let media = downloaded(&f, "url5");
+        let res = f.after_media("url5", &media, "clip", None, &stop, |_| panic!("no subtitles were asked for"));
+        f.finish("url5", res, false);
+        assert_eq!(f.get("url5").unwrap().status, FetchStatus::Completed);
+
+        let media = downloaded(&f, "url6");
+        let res = f.after_media("url6", &media, "clip", Some("en"), &stop, |_| Err(UrlError::new("cancelled", "остановлено")));
+        assert_eq!(res.as_ref().unwrap_err().code, "cancelled");
+        f.finish("url6", res, false);
+        let x = f.get("url6").unwrap();
+        assert_eq!((x.status, x.pid.as_deref()), (FetchStatus::Cancelled, None));
     }
 
     #[test]

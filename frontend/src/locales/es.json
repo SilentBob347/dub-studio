@@ -993,7 +993,8 @@
     "noSubs": "No hay subtítulos hechos por personas",
     "subsHint": "Los subtítulos hechos por personas entran en el proyecto como subtítulos importados: más precisos que el reconocimiento de voz.",
     "subsAuto": "No se usan los subtítulos automáticos del sitio: el reconocimiento de voz del estudio es más preciso.",
-    "download": "Descargar y abrir",
+    "download": "Descargar",
+    "ready": "El vídeo está listo: elige el modo abajo y pulsa «{{start}}», o «{{manual}}» para trabajar los subtítulos a mano.",
     "rights": "Descarga solo lo que tienes derecho a usar: deciden el autor del vídeo y las normas del sitio.",
     "header": "Descargando por enlace: {{title}}",
     "logStarted": "Descarga por enlace iniciada: {{title}}",
@@ -1017,7 +1018,7 @@
       "download": "Descargando el vídeo…",
       "merge": "Uniendo vídeo y sonido…",
       "extract": "Extrayendo el sonido…",
-      "subtitles": "Convirtiendo los subtítulos…",
+      "subtitles": "Descargando los subtítulos…",
       "project": "Creando el proyecto…",
       "done": "Descargado"
     },

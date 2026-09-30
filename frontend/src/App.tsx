@@ -13,7 +13,7 @@ import { motion } from "motion/react";
 import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, llmProviderOf, slot, SetupError, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectListing, type LaunchDefaults, type Character, type DownloadJob } from "./lib/api";
+import { api, llmProviderOf, slot, SetupError, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectListing, type LaunchDefaults, type Character, type DownloadJob, type UrlFetch } from "./lib/api";
 import { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
@@ -859,6 +859,14 @@ function DropZone() {
   const [subsFile, setSubsFile] = useState<File | null>(null);                  // опц. готовые субтитры (SRT/ASS) -> текст+тайминг вместо ASR
   const [subsTranslated, setSubsTranslated] = useState(false);                  // сабы уже на языке перевода -> tgt из них, MT пропустить (Даб Студио только озвучивает)
   const [subsAlign, setSubsAlign] = useState(false);
+  // Видео, скачанное по ссылке, — уже проект на сервере. Ждёт здесь, как выбранный файл: «Начать обработку»
+  // запускает по нему analyze с настройками этого экрана, «Ручной режим» открывает его в редакторе.
+  const [fetched, setFetched] = useState<{ pid: string; title: string; duration: number | null; audioOnly: boolean; subsLang: string | null } | null>(null);
+  const pickFile = (f: File) => { setFile(f); setFetched(null); };
+  const takeFetched = (f: UrlFetch & { pid: string }) => {
+    setFile(null); setSubsFile(null); setSubsTranslated(false); setSubsAlign(false);
+    setFetched({ pid: f.pid, title: f.title ?? f.url, duration: f.duration, audioOnly: f.quality === "audio", subsLang: f.subsImported ? f.subsLang : null });
+  };
   // Композируемые опции обработки (независимы, любые комбинации). audio = аудио-выход; subs = содержимое
   // субтитров; burn = вжигать ли их на видео; funnyOn+funny = шуточный ремикс (сочетается с дубляжом/голосом).
   const [audio, setAudio] = useState<LaunchDefaults["audio"]>("dub");
@@ -935,7 +943,9 @@ function DropZone() {
   const [voiceLib, setVoiceLib] = useState<string[]>([]);                        // имена голосов из GET /voices (для селектов слотов)
   useEffect(() => { api.voices().then((r) => setVoiceLib(r.voices)).catch(() => {}); }, []);
   const [preview, setPreview] = useState<string | null>(null);                  // objectURL превью выбранного видео (первый кадр)
-  const audioOnly = !!file && isAudioFile(file);                                // вход без видео -> режим «только аудио»
+  const audioOnly = file ? isAudioFile(file) : !!fetched?.audioOnly;            // вход без видео -> режим «только аудио»
+  // Субтитры проекта: выбранный вместе с видео файл или субтитры площадки, легшие в проект при загрузке по ссылке.
+  const hasSubs = !audioOnly && (fetched ? !!fetched.subsLang : !!subsFile);
   useEffect(() => {                                                             // создаём/освобождаем objectURL под выбранный файл
     if (!file) { setPreview(null); return; }
     const url = URL.createObjectURL(file);
@@ -983,6 +993,7 @@ function DropZone() {
   }
 
   async function runManual() {
+    if (fetched) { await openProject(fetched.pid); return; }
     if (!file) return;
     try {
       useStore.getState().pushActivity(t("manual.starting"), "work");
@@ -1002,7 +1013,8 @@ function DropZone() {
   }
 
   async function run() {
-    if (!file) return;
+    const source: { pid: string } | { file: File } | null = fetched ? { pid: fetched.pid } : file ? { file } : null;
+    if (!source) return;
     s.setStage("analyzing");
     s.setAudioOnly(audioOnly);               // «Анализируем аудио» вместо «видео» для аудио-входа
     // Шаги степпера — только те, что реально будут в ЭТОЙ джобе (жалоба: «Находим текст на экране»
@@ -1028,7 +1040,8 @@ function DropZone() {
     s.setProgress("", "", null);             // fresh stepper for this run
     s.clearResumed();
     try {
-      const { project_id } = await api.createProject(file, isAudioFile(file) ? null : subsFile);   // сабы — только для видео
+      const project_id = "pid" in source ? source.pid
+        : (await api.createProject(source.file, isAudioFile(source.file) ? null : subsFile)).project_id;   // сабы — только для видео
       s.setPid(project_id);
       // Стиль перевода (#112): передаём ПАРАМЕТРОМ analyze (patch до analyze невозможен — project.json ещё
       // не создан; стиль читается стадией перевода ВНУТРИ analyze).
@@ -1036,7 +1049,6 @@ function DropZone() {
       // subtitles = ОРИГИНАЛ: исходная дорожка + субтитры на языке оригинала (без дубляжа, без перевода);
       // voiceover = закадровый (перевод+TTS, оригинал слышно приглушённым); transcribe = транскрипт+диаризация.
       // Композируемо: аудио-выход, содержимое субтитров, шуточный ремикс — независимы.
-      const audioOnly = isAudioFile(file);                          // вход без видео -> нет субтитров/бёрна/OCR
       const eMode = audio;                                          // nodub | dub | voiceover | transcribe
       const eSubs = audioOnly ? "none" : audio === "transcribe" ? "transcribe" : subs;   // none | transcribe(оригинал) | translate
       const eRewrite = funnyOn && (audio === "dub" || audio === "voiceover") ? funny.trim() : "";
@@ -1059,7 +1071,7 @@ function DropZone() {
         keepOriginal: keepOrig && !audioOnly && voiced ? { container } : undefined,
         voiceSlots: voiceSrc === "library" && voiced && (slotsM.length || slotsF.length) ? { male: slotsM, female: slotsF } : undefined,
       };
-      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType, !audioOnly && !!subsFile && !subsTranslated && subsAlign, post);
+      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, hasSubs && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType, hasSubs && !subsTranslated && subsAlign, post);
       // Ошибка -> «Продолжить» с места остановки, не сброс. Для dub/voiceover озвучка готовится здесь же, на
       // экране загрузки (rendered остаётся false: /dub отдаёт готовый дуб, кадры — покадровое превью).
       await finishAnalyze(project_id, await watchWithResume(project_id, "analyze", job_id));
@@ -1136,7 +1148,7 @@ function DropZone() {
           <div
             onDragOver={(e) => { e.preventDefault(); setOver(true); }}
             onDragLeave={() => setOver(false)}
-            onDrop={(e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer.files?.[0]; if (f) setFile(f); }}
+            onDrop={(e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer.files?.[0]; if (f) pickFile(f); }}
             onClick={() => inputRef.current?.click()}
             className={`group relative aspect-[4/3] rounded-2xl border grid place-items-center cursor-pointer overflow-hidden transition-all duration-200
               ${over ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_9%,var(--color-surface))] shadow-[0_0_0_4px_color-mix(in_oklab,var(--color-accent)_18%,transparent)]"
@@ -1148,16 +1160,32 @@ function DropZone() {
                 <div className="absolute inset-0 bg-black/45" />
               </>
             )}
+            {fetched && !fetched.audioOnly && (
+              <>
+                <img src={api.originalUrl(fetched.pid, Math.min(1, (fetched.duration || 3) / 3))} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                <div className="absolute inset-0 bg-black/45" />
+              </>
+            )}
             <span className={`${corner} top-3 left-3 border-l border-t`} />
             <span className={`${corner} top-3 right-3 border-r border-t`} />
             <span className={`${corner} bottom-3 left-3 border-l border-b`} />
             <span className={`${corner} bottom-3 right-3 border-r border-b`} />
             <div className="relative z-10 text-center px-6">
               <div className={`mx-auto grid place-items-center w-16 h-16 rounded-2xl border transition-all duration-200
-                ${over ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent" : file && preview ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent shadow-lg" : "bg-[var(--color-surface-2)] text-[var(--color-accent)] border-[var(--color-border)] group-hover:scale-105"}`}>
-                {file ? <Check size={26} strokeWidth={2.5} /> : <Upload size={26} strokeWidth={2} />}
+                ${over ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent" : (file && preview) || fetched ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent shadow-lg" : "bg-[var(--color-surface-2)] text-[var(--color-accent)] border-[var(--color-border)] group-hover:scale-105"}`}>
+                {file || fetched ? <Check size={26} strokeWidth={2.5} /> : <Upload size={26} strokeWidth={2} />}
               </div>
-              {file ? (
+              {fetched ? (
+                <>
+                  <div className={`mt-5 text-lg font-semibold break-words line-clamp-3 px-2 ${fetched.audioOnly ? "" : "text-white drop-shadow"}`}>{fetched.title}</div>
+                  <div className={`mt-1.5 text-sm ${fetched.audioOnly ? "text-[var(--color-muted)]" : "text-white/80"}`}>{t("url.phase.done")} · {t("drop.change")}</div>
+                  {audioOnly && (
+                    <div className="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[color-mix(in_oklab,var(--color-accent)_16%,transparent)] text-[var(--color-accent)] text-[12px] font-medium">
+                      <AudioLines size={13} /> {t("drop.audioMode")}
+                    </div>
+                  )}
+                </>
+              ) : file ? (
                 <>
                   <div className={`mt-5 text-lg font-semibold break-all px-2 ${preview && !audioOnly ? "text-white drop-shadow" : ""}`}>{file.name}</div>
                   <div className={`mt-1.5 text-sm ${preview && !audioOnly ? "text-white/80" : "text-[var(--color-muted)]"}`}>{(file.size / 1048576).toFixed(1)} {t("units.mb")} · {t("drop.change")}</div>
@@ -1177,7 +1205,7 @@ function DropZone() {
               )}
             </div>
           </div>
-          <UrlImport onOpen={(pid) => { void openProject(pid); }} />
+          <UrlImport staged={fetched ? fetched.pid : null} onReady={takeFetched} />
           <div className="mt-3.5 flex items-center justify-center gap-2 text-[12px]">
             <Languages size={14} className="text-[var(--color-accent-2)]" />
             <Combobox value={src} onChange={chooseSrc}
@@ -1192,26 +1220,42 @@ function DropZone() {
             ? <p className="mt-1 text-center text-[10px] text-[var(--color-accent-2)] leading-tight">{t("comp.asrSwitched", { lang: asrNote })}</p>
             : <p className="mt-1 text-center text-[10px] text-[var(--color-muted)] leading-tight">{t("comp.langHint")}</p>}
           {/* Импорт готовых субтитров (SRT/ASS): точный текст+тайминг вместо авто-распознавания (ASR skip). */}
-          {!(file && isAudioFile(file)) && (
-            <div className="mt-2 flex flex-col items-center gap-0.5">
-              <label className={`inline-flex items-center gap-1.5 text-[11px] cursor-pointer transition-colors ${subsFile ? "text-[var(--color-accent-2)]" : "text-[var(--color-muted)] hover:text-[var(--color-accent-2)]"}`}>
-                <Captions size={13} />
-                {subsFile ? subsFile.name : t("import.subs")}
-                <input type="file" accept=".srt,.ass,.ssa" className="hidden"
-                  onChange={(e) => { const f = e.target.files?.[0] ?? null; setSubsFile(f); e.currentTarget.value = ""; }} />
-              </label>
-              {subsFile
-                ? <div className="flex flex-col items-center gap-1 mt-0.5">
-                    <label className="inline-flex items-center gap-1.5 text-[10px] text-[var(--color-muted)] cursor-pointer" title={t("import.translatedHint")}>
-                      <input type="checkbox" checked={subsTranslated} onChange={(e) => setSubsTranslated(e.target.checked)} className="accent-[var(--color-accent)]" />
-                      {t("import.translated")}
-                    </label>
-                    {!subsTranslated && <SubsAlignToggle checked={subsAlign} onChange={setSubsAlign} />}
-                    <button onClick={() => { setSubsFile(null); setSubsTranslated(false); setSubsAlign(false); }} className="inline-flex items-center gap-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={10} />{t("import.subsClear")}</button>
-                  </div>
-                : <span className="text-[10px] text-[var(--color-muted)] leading-tight text-center max-w-[300px]">{t("import.subsHint")}</span>}
-            </div>
-          )}
+          {(() => {
+            const subsChoice = (
+              <>
+                <label className="inline-flex items-center gap-1.5 text-[10px] text-[var(--color-muted)] cursor-pointer" title={t("import.translatedHint")}>
+                  <input type="checkbox" checked={subsTranslated} onChange={(e) => setSubsTranslated(e.target.checked)} className="accent-[var(--color-accent)]" />
+                  {t("import.translated")}
+                </label>
+                {!subsTranslated && <SubsAlignToggle checked={subsAlign} onChange={setSubsAlign} />}
+              </>
+            );
+            // Субтитры площадки уже лежат в скачанном проекте: выбрать другой файл к нему нельзя, только как их брать.
+            if (fetched) {
+              return hasSubs && (
+                <div className="mt-2 flex flex-col items-center gap-1">
+                  <span className="inline-flex items-center gap-1.5 text-[11px] text-[var(--color-accent-2)]"><Captions size={13} />{t("url.subs")} · <span className="mono">{fetched.subsLang}</span></span>
+                  {subsChoice}
+                </div>
+              );
+            }
+            return !audioOnly && (
+              <div className="mt-2 flex flex-col items-center gap-0.5">
+                <label className={`inline-flex items-center gap-1.5 text-[11px] cursor-pointer transition-colors ${subsFile ? "text-[var(--color-accent-2)]" : "text-[var(--color-muted)] hover:text-[var(--color-accent-2)]"}`}>
+                  <Captions size={13} />
+                  {subsFile ? subsFile.name : t("import.subs")}
+                  <input type="file" accept=".srt,.ass,.ssa" className="hidden"
+                    onChange={(e) => { const f = e.target.files?.[0] ?? null; setSubsFile(f); e.currentTarget.value = ""; }} />
+                </label>
+                {subsFile
+                  ? <div className="flex flex-col items-center gap-1 mt-0.5">
+                      {subsChoice}
+                      <button onClick={() => { setSubsFile(null); setSubsTranslated(false); setSubsAlign(false); }} className="inline-flex items-center gap-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={10} />{t("import.subsClear")}</button>
+                    </div>
+                  : <span className="text-[10px] text-[var(--color-muted)] leading-tight text-center max-w-[300px]">{t("import.subsHint")}</span>}
+              </div>
+            );
+          })()}
           {/* АУДИО-ВЫХОД (независимо от субтитров) */}
           <div className="mt-3 flex items-center gap-1.5 text-[11px] uppercase tracking-[0.1em] text-[var(--color-muted)] mb-1">{t("comp.audioLabel")}<span title={t("comp.optionsHelp")} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span></div>
           <div className="grid grid-cols-2 gap-1.5">
@@ -1427,11 +1471,11 @@ function DropZone() {
             );
           })()}
           <div className="mt-2.5 flex items-center gap-2">
-            <button onClick={run} disabled={!file || (funnyOn && (audio === "dub" || audio === "voiceover") && !funny.trim())}
+            <button onClick={run} disabled={(!file && !fetched) || (funnyOn && (audio === "dub" || audio === "voiceover") && !funny.trim())}
               className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-sm font-semibold disabled:opacity-40 hover:brightness-105 transition">
               {t("drop.start")} <ArrowRight size={16} />
             </button>
-            <button onClick={runManual} disabled={!file} title={t("manual.tip")}
+            <button onClick={runManual} disabled={!file && !fetched} title={t("manual.tip")}
               className="inline-flex flex-col items-center justify-center px-3 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-text)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-40 transition-colors">
               <span className="text-[12px] font-semibold flex items-center gap-1"><Sliders size={13} /> {t("manual.label")}</span>
               <span className="text-[9px] text-[var(--color-muted)] font-normal leading-none mt-0.5">{t("manual.sub")}</span>
@@ -1455,7 +1499,7 @@ function DropZone() {
           onConfirm={async () => { await deleteProject(deleting.pid); setDeleting(null); }} />
       )}
       <input ref={inputRef} type="file" accept={MEDIA_ACCEPT} className="hidden"
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) setFile(f); }} />
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) pickFile(f); }} />
       <input ref={batchRef} type="file" multiple accept={MEDIA_ACCEPT} className="hidden"
         onChange={(e) => { const fs = [...(e.target.files || [])]; if (fs.length) { batchState.files = fs; batchState.tgt = tgt; batchState.src = src; batchState.audio = audio; batchState.subs = subs; batchState.burn = burn; batchState.detectText = detectText; batchState.funnyOn = funnyOn; batchState.funny = funny; batchState.voGain = voGain; batchState.trStyle = resolveTrStyle(trStyle, trStyleCustom); batchState.keepOrig = keepOrig; batchState.container = container; batchState.voiceSrc = voiceSrc; batchState.slotsM = slotsM; batchState.slotsF = slotsF; s.setStage("batch"); } }} />
     </div>

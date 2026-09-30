@@ -993,7 +993,8 @@
     "noSubs": "Sem legendas feitas por pessoas",
     "subsHint": "Legendas feitas por pessoas entram no projeto como legendas importadas: mais precisas que o reconhecimento de fala.",
     "subsAuto": "As legendas automáticas do site não são usadas: o reconhecimento de fala do estúdio é mais preciso.",
-    "download": "Baixar e abrir",
+    "download": "Baixar",
+    "ready": "O vídeo está pronto: escolha o modo abaixo e clique em “{{start}}” — ou em “{{manual}}” para trabalhar as legendas à mão.",
     "rights": "Baixe só o que você tem direito de usar: decidem o autor do vídeo e as regras do site.",
     "header": "Baixando pelo link: {{title}}",
     "logStarted": "Download pelo link iniciado: {{title}}",
@@ -1017,7 +1018,7 @@
       "download": "Baixando o vídeo…",
       "merge": "Juntando vídeo e som…",
       "extract": "Extraindo o som…",
-      "subtitles": "Convertendo as legendas…",
+      "subtitles": "Baixando as legendas…",
       "project": "Criando o projeto…",
       "done": "Baixado"
     },

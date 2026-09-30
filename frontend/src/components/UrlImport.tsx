@@ -78,8 +78,9 @@ function useUrlText() {
 }
 
 // Поле «Вставить ссылку» стартового экрана: проба ссылки -> карточка (превью, качество, субтитры площадки,
-// cookies.txt) -> загрузка в фоне мимо очереди джоб -> проект открывается сам.
-export default function UrlImport({ onOpen }: { onOpen: (pid: string) => void }) {
+// cookies.txt) -> загрузка в фоне мимо очереди джоб -> скачанный проект уходит в onReady и ждёт на стартовом
+// экране, как выбранный файл, «Начать обработку» или «Ручной режим».
+export default function UrlImport({ staged, onReady }: { staged: string | null; onReady: (fetch: UrlFetch & { pid: string }) => void }) {
   const { t } = useTranslation();
   const text = useUrlText();
   const [tool, setTool] = useState<UrlTool | null>(null);
@@ -146,7 +147,7 @@ export default function UrlImport({ onOpen }: { onOpen: (pid: string) => void })
     if (job.status === "completed" && job.pid) {
       log(t("url.logDone", { title: job.title ?? job.url }), "done");
       if (job.warning) log(`${text.warning(job.warning)}${job.warningDetail ? ` · ${job.warningDetail}` : ""}`, "error");
-      onOpen(job.pid);
+      onReady({ ...job, pid: job.pid });
     } else if (job.status === "failed") {
       log(t("url.logFailed", { error: `${text.error(job.errorCode ?? "generic")}${job.error ? ` · ${job.error}` : ""}` }), "error");
     }
@@ -375,6 +376,12 @@ export default function UrlImport({ onOpen }: { onOpen: (pid: string) => void })
               {job.speedBps > 0 && <span>{t("downloads.speed", { speed: fmtBytes(job.speedBps) })}</span>}
               {job.etaS != null && job.etaS > 0 && <span>{t("url.eta", { time: clock(job.etaS) })}</span>}
             </div>
+          )}
+          {job.status === "completed" && job.pid && job.pid === staged && (
+            <p className="mt-1 text-[11px] leading-snug text-[var(--color-accent-2)]">{t("url.ready", { start: t("drop.start"), manual: t("manual.label") })}</p>
+          )}
+          {job.status === "completed" && job.warning && (
+            <p className="mt-1 text-[10.5px] leading-snug text-[var(--color-warn)] break-words" title={job.warningDetail ?? undefined}>{text.warning(job.warning)}</p>
           )}
           {job.status === "failed" && job.error && <div className="mt-1 mono text-[10.5px] text-[var(--color-muted)] break-words">{job.error}</div>}
           {job.status === "failed" && job.errorCode && actions(job.errorCode)}
