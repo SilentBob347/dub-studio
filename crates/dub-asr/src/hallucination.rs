@@ -57,23 +57,58 @@ fn known_phrases() -> &'static std::collections::HashSet<&'static str> {
     KNOWN.get_or_init(|| HALLUCINATIONS.lines().map(str::trim).filter(|line| !line.is_empty()).collect())
 }
 
-/// Является ли распознанный сегмент заполнением паузы, а не сказанными словами: известная галлюцинация
-/// целиком, титр субтитровщика, звук, записанный как субтитр («[Music]», «♪»), крик капсом (только
-/// Whisper) или текст без слов.
-pub fn is_hallucination(text: &str, rules: HallucinationRules) -> bool {
+/// Почему сегмент похож на галлюцинацию.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HallucinationKind {
+    /// Текст без слов (« 1.», «...»).
+    Wordless,
+    /// Звук, записанный как субтитр: «[Music]», «(laughs)», «♪».
+    Bracketed,
+    /// Титр субтитровщика («Субтитры сделал DimaTorzok», «Amara.org»).
+    Credit,
+    /// Крик капсом (только Whisper): так Whisper пишет звуки — «ВЕСЕЛАЯ МУЗЫКА».
+    Shouted,
+    /// Фраза из списка целиком. Среди них и обычные реплики диалога («come on», «thank you»,
+    /// «watch out»): Whisper пишет их в тишине, но люди их и правда говорят.
+    KnownPhrase,
+}
+
+impl HallucinationKind {
+    /// Признак почти не встречается в настоящей речи — годится для решения без свидетельства голоса.
+    pub fn is_strong(self) -> bool {
+        matches!(self, HallucinationKind::Wordless | HallucinationKind::Bracketed | HallucinationKind::Credit)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HallucinationKind::Wordless => "wordless",
+            HallucinationKind::Bracketed => "bracketed",
+            HallucinationKind::Credit => "credit",
+            HallucinationKind::Shouted => "shouted",
+            HallucinationKind::KnownPhrase => "known_phrase",
+        }
+    }
+}
+
+/// Почему распознанный сегмент — заполнение паузы, а не сказанные слова; None — обычная реплика.
+pub fn hallucination_kind(text: &str, rules: HallucinationRules) -> Option<HallucinationKind> {
     let trimmed = text.trim();
     let wordless = match rules {
         HallucinationRules::Whisper => !trimmed.chars().any(char::is_alphabetic),
         HallucinationRules::CaseAware => !trimmed.chars().any(char::is_alphanumeric),
     };
     if wordless {
-        return true;
+        return Some(HallucinationKind::Wordless);
     }
     let bracketed = (trimmed.starts_with('[') && trimmed.ends_with(']'))
         || (trimmed.starts_with('(') && trimmed.ends_with(')'))
         || trimmed.starts_with('♪');
     if bracketed {
-        return true;
+        return Some(HallucinationKind::Bracketed);
+    }
+    let plain = normalised(trimmed);
+    if CREDIT_MARKERS.iter().any(|marker| plain.contains(marker)) {
+        return Some(HallucinationKind::Credit);
     }
     if rules == HallucinationRules::Whisper {
         let letters: Vec<char> = trimmed.chars().filter(|c| c.is_alphabetic()).collect();
@@ -81,14 +116,15 @@ pub fn is_hallucination(text: &str, rules: HallucinationRules) -> bool {
             && letters.iter().all(|c| !c.is_lowercase())
             && letters.iter().any(|c| c.is_uppercase());
         if shouted {
-            return true;
+            return Some(HallucinationKind::Shouted);
         }
     }
-    let plain = normalised(trimmed);
-    if CREDIT_MARKERS.iter().any(|marker| plain.contains(marker)) {
-        return true;
-    }
-    known_phrases().contains(plain.as_str())
+    known_phrases().contains(plain.as_str()).then_some(HallucinationKind::KnownPhrase)
+}
+
+/// Является ли распознанный сегмент заполнением паузы, а не сказанными словами (см. HallucinationKind).
+pub fn is_hallucination(text: &str, rules: HallucinationRules) -> bool {
+    hallucination_kind(text, rules).is_some()
 }
 
 #[cfg(test)]
@@ -132,6 +168,19 @@ mod tests {
         assert!(!is_hallucination("2024.", C));
         assert!(is_hallucination("...", C));
         assert!(is_hallucination("(laughs)", C));
+    }
+
+    #[test]
+    fn the_kind_says_how_sure_the_text_alone_is() {
+        let k = |t: &str, r| hallucination_kind(t, r);
+        assert_eq!(k("Субтитры сделал DimaTorzok", W), Some(HallucinationKind::Credit));
+        assert_eq!(k("[Music]", C), Some(HallucinationKind::Bracketed));
+        assert_eq!(k("...", C), Some(HallucinationKind::Wordless));
+        assert_eq!(k("ВЕСЕЛАЯ МУЗЫКА", W), Some(HallucinationKind::Shouted));
+        assert_eq!(k("Watch out!", C), Some(HallucinationKind::KnownPhrase));
+        assert!(HallucinationKind::Credit.is_strong());
+        assert!(!HallucinationKind::KnownPhrase.is_strong());
+        assert!(!HallucinationKind::Shouted.is_strong());
     }
 
     #[test]

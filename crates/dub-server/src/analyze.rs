@@ -856,8 +856,8 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     };
 
     // Галлюцинации ASR (титры субтитровщиков, «Продолжение следует», звуки в скобках): текстовое правило
-    // находит кандидатов, голос на интервале решает «скрыть» или «только пометить». Импорт субтитров —
-    // текст пользователя, его не трогаем.
+    // находит кандидатов, звук на интервале (отделённый вокал, реплики диаризации или сырой микс) решает
+    // «скрыть» или «только пометить». Импорт субтитров — текст пользователя, его не трогаем.
     if paths.import_subs.is_none() {
         let rules = match (&paths.asr, crate::models::openrouter_asr_on(&paths.models_root)) {
             (crate::models::AsrChoice::Whisper { .. }, false) => dub_asr::HallucinationRules::Whisper,
@@ -865,7 +865,7 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         };
         let clean = (asr_wav != vocals16).then_some(asr_wav.as_path());
         let turns: &[dub_asr::Turn] = diar.as_ref().map(|d| d.turns.as_slice()).unwrap_or(&[]);
-        let evidence = crate::asr_filter::VoiceEvidence::build(clean, turns)
+        let evidence = crate::asr_filter::VoiceEvidence::build(clean, turns, &vocals16)
             .map_err(|e| format!("фильтр галлюцинаций ASR: {e}"))?;
         let report = crate::asr_filter::apply(&mut segments, rules, &evidence);
         if !report.hidden.is_empty() {

@@ -14,7 +14,7 @@ mod segment;
 mod speaker_global;
 mod whisper;
 mod window;
-pub use hallucination::{is_hallucination, HallucinationRules};
+pub use hallucination::{hallucination_kind, is_hallucination, HallucinationKind, HallucinationRules};
 pub use reconcile::{speaker_for_overlap, DiarIndex};
 pub use speaker_global::{
     cluster_embeddings, cosine, map_local_to_global, Embedding, LocalSpeaker, NullEmbedder,

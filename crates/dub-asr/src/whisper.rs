@@ -8,7 +8,7 @@
 //! глушим `HF_HUB_OFFLINE=1` (оффлайн-first). Диаризация остаётся на Sortformer (как у Parakeet): для
 //! per-speaker раскладываем слова whole-clip по репликам, затем сегментируем внутри каждой.
 
-use crate::hallucination::{is_hallucination, HallucinationRules};
+use crate::hallucination::{hallucination_kind, is_hallucination, HallucinationRules};
 use crate::segment::{segment_words, Segment, Word, SEG_MAX_GAP, SEG_MAX_DUR};
 use crate::{load_wav_16k_mono, AsrEngine, AsrError, SpeakerSegment, Turn, TARGET_SR};
 use std::path::{Path, PathBuf};
@@ -454,8 +454,9 @@ impl AsrEngine for WhisperAsr {
     /// Пакет: ОДИН сабпроцесс на весь список (filelist .txt — Purfview поддерживает; старт процесса
     /// дорогой, поэтому не по-файлово). JSONы читаем по stem'ам входных файлов. Сбой пакета -> все None
     /// (вызывающий QC это переживает: непроверенные сегменты просто не ретраятся по ASR-критерию).
-    /// Сегменты-галлюцинации (титры, «Продолжение следует» на тихом клипе) в текст не входят: иначе
-    /// фантомная фраза давала бы ложное сходство с ожидаемым текстом.
+    /// Сегменты с сильным признаком галлюцинации (титр субтитровщика, звук в скобках, текст без слов) в
+    /// текст не входят: иначе фантомная фраза на тихом клипе давала бы ложное сходство с ожидаемым.
+    /// Фразы из списка («Thank you.», «Watch out!») остаются: перевод их и правда содержит.
     fn transcribe_many(&mut self, files: &[PathBuf], lang: &str) -> Vec<Option<String>> {
         let Ok(batch) = self.run_filelist(files, lang, false) else {
             return files.iter().map(|_| None).collect();
@@ -469,7 +470,7 @@ impl AsrEngine for WhisperAsr {
                 Some(
                     segs.iter()
                         .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
-                        .filter(|t| !is_hallucination(t, HallucinationRules::Whisper))
+                        .filter(|t| !hallucination_kind(t, HallucinationRules::Whisper).is_some_and(|k| k.is_strong()))
                         .collect::<Vec<_>>()
                         .join(" ")
                         .trim()
@@ -481,8 +482,8 @@ impl AsrEngine for WhisperAsr {
         out
     }
 
-    /// Пакет со словными таймингами (один сабпроцесс на список, как transcribe_many). Сегменты-
-    /// галлюцинации отброшены целиком: слов в клипе они не дают.
+    /// Пакет со словными таймингами (один сабпроцесс на список, как transcribe_many). Слова всех
+    /// сегментов: в озвученной фразе «Watch out!» — настоящая реплика, а не галлюцинация.
     fn transcribe_many_words(&mut self, files: &[PathBuf], lang: &str) -> Vec<Result<Vec<Word>, AsrError>> {
         let batch = match self.run_filelist(files, lang, true) {
             Ok(b) => b,
@@ -494,7 +495,7 @@ impl AsrEngine for WhisperAsr {
         let out = batch
             .jsons
             .into_iter()
-            .map(|j| j.map(|txt| parse_whisper_json(&txt).words))
+            .map(|j| j.map(|txt| parse_whisper_json(&txt).into_segments().into_iter().flat_map(|s| s.words).collect()))
             .collect();
         let _ = std::fs::remove_dir_all(&batch.out_dir);
         out
