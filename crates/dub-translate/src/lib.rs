@@ -58,8 +58,9 @@ pub enum TranslateError {
     Frame(String),
     #[error("audio ctx: {0}")]
     Audio(String),
-    #[error("MT returned empty for all {0} segments")]
-    Empty(usize),
+    /// Ни одна строка не переведена; второе поле — причина последнего отказа.
+    #[error("MT returned empty for all {0} segments: {1}")]
+    Empty(usize, String),
     #[error("ответ модели: {0}")]
     Contract(String),
 }

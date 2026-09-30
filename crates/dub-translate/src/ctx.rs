@@ -11,7 +11,7 @@ use serde_json::Value;
 use dub_core::GlossaryEntry;
 use dub_llm::{strip_think, ChatClient, Message, Part, Sampling};
 
-use crate::contract::{rule as contract_rule, Answer, Contract, Format, LineCheck};
+use crate::contract::{label, rule as contract_rule, Answer, Contract, Format, LineCheck};
 use crate::seg::Seg;
 use crate::vision;
 use crate::TranslateError;
@@ -260,20 +260,27 @@ fn translate_lines(
     let bounds = chunk_bounds(line_texts);
     // Авто-пары имён — ТОЛЬКО на длинном скрипте (>1 чанка), как в HEAD: на коротком единый вызов без них
     // (питон-паритет). Их сбой перевод не валит — строка в журнал.
-    let glossary = if bounds.len() > 1 {
+    let names = if bounds.len() > 1 {
         let texts = line_texts.iter().map(|s| s.as_str());
         match crate::translate::glossary_pairs(llm, texts, &crate::translate::name_src(""), tgt, Some(6), &job.glossary) {
-            Ok(pairs) => crate::gloss::with_auto(&job.glossary, pairs, job.tgt_code),
+            Ok(pairs) => pairs,
             Err(e) => {
                 log(&format!("  ctx translate: авто-глоссарий имён пропущен ({e})"));
-                job.glossary.clone()
+                Vec::new()
             }
         }
     } else {
-        job.glossary.clone()
+        Vec::new()
     };
+    let glossary = &job.glossary;
     if bounds.len() > 1 {
-        log(&format!("  ctx translate: {} строк -> {} чанков (глоссарий: {} терм.)", line_texts.len(), bounds.len(), glossary.len()));
+        log(&format!(
+            "  ctx translate: {} строк -> {} чанков (глоссарий: {} терм., имён: {})",
+            line_texts.len(),
+            bounds.len(),
+            glossary.len(),
+            names.len()
+        ));
     }
 
     let contract = Contract::for_client(llm);
@@ -286,6 +293,7 @@ line — stay within it: if it doesn't fit, drop filler words and repetitions, k
 Do NOT copy the (\u{2264}NN) marker into your output.";
     let style_c = crate::translate::style_clause(job.style);
     let gloss_rule = if glossary.is_empty() { "" } else { crate::gloss::RULE };
+    let names_c = crate::gloss::names_clause(&names);
     // Неизменная часть — инструкция, стиль, правило глоссария, формат и контекст сцены: одинакова для
     // всех пакетов джобы, llama-server переиспользует её KV-кэш. Меняется только сообщение со строками.
     let system = |fmt: Format| -> String {
@@ -295,12 +303,12 @@ Do NOT copy the (\u{2264}NN) marker into your output.";
                 "You are a creative scriptwriter writing a BRAND-NEW voice-over script in {tgt} for this video. \
 IGNORE the literal meaning of the source lines — they are ONLY a rhythm/length template. Write a completely NEW \
 script whose CONTENT follows this instruction: \"{instr}\". Every line must fit the instruction, NOT translate the \
-source. Keep the SAME number of lines and each line about the SAME LENGTH (it will be dubbed to fit the timing).{budget_rule}{style_c}{gloss_rule} \
+source. Keep the SAME number of lines and each line about the SAME LENGTH (it will be dubbed to fit the timing).{budget_rule}{style_c}{names_c}{gloss_rule} \
 {rule} Use the scene/audio context below for tone.\n\n{ctx}"
             ),
             None => format!(
                 "Translate EACH numbered line into natural, spoken {tgt} for dubbing — keep the order and the \
-numbering, match tone/slang/intent.{budget_rule}{style_c}{gloss_rule} {rule} Use ALL the context below and with the lines \
+numbering, match tone/slang/intent.{budget_rule}{style_c}{names_c}{gloss_rule} {rule} Use ALL the context below and with the lines \
 (what the words alone don't convey).\n\n{ctx}"
             ),
         }
@@ -309,17 +317,18 @@ numbering, match tone/slang/intent.{budget_rule}{style_c}{gloss_rule} {rule} Use
 
     let log_cell = std::cell::RefCell::new(log);
     let mut ask = |idx: &[usize], done: &std::collections::HashMap<usize, String>| -> Result<Answer, TranslateError> {
-        // Локальная нумерация 1..len (маленькие номера надёжнее больших). После номера — мягкий лимит
-        // символов «(≤NN)» из бюджета строки (#107); у строк без бюджета (тайтлы) лимита нет.
-        let numbered = idx
-            .iter()
-            .enumerate()
-            .map(|(k, &gi)| match budgets.get(gi).copied().flatten() {
-                Some(lim) => format!("{}. (\u{2264}{lim}) {}", k + 1, line_texts[gi]),
-                None => format!("{}. {}", k + 1, line_texts[gi]),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Локальная нумерация 1..len (маленькие номера надёжнее больших; label формата). После номера — мягкий
+        // лимит символов «(≤NN)» из бюджета строки (#107); у строк без бюджета (тайтлы) лимита нет.
+        let numbered = |fmt: Format| {
+            idx.iter()
+                .enumerate()
+                .map(|(k, &gi)| match budgets.get(gi).copied().flatten() {
+                    Some(lim) => format!("{}. (\u{2264}{lim}) {}", label(fmt, k + 1, idx.len()), line_texts[gi]),
+                    None => format!("{}. {}", label(fmt, k + 1, idx.len()), line_texts[gi]),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         // Скользящий контекст: CTX_BEFORE уже-переведённых строк перед пакетом (src -> tgt) + CTX_AFTER сырых
         // строк после него. Только как СПРАВКА для связности, НЕ переводить их.
         let (lo, hi) = (idx[0], idx[idx.len() - 1]);
@@ -338,11 +347,11 @@ numbering, match tone/slang/intent.{budget_rule}{style_c}{gloss_rule} {rule} Use
             ctx_block += &format!("=== UPCOMING LINES (context only — do NOT translate) ===\n{}\n\n", after.join("\n"));
         }
         let texts: Vec<&str> = idx.iter().map(|&gi| line_texts[gi].as_str()).collect();
-        let gloss_block = crate::gloss::block(&glossary, &texts);
+        let gloss_block = crate::gloss::block(glossary, &texts);
         let messages = |fmt: Format| {
             vec![
                 Message::system(system(fmt)),
-                Message::user_text(format!("{gloss_block}{ctx_block}{lines_title}\n{numbered}\n\n{}", contract_rule(fmt, tgt))),
+                Message::user_text(format!("{gloss_block}{ctx_block}{lines_title}\n{}\n\n{}", numbered(fmt), contract_rule(fmt, tgt))),
             ]
         };
         // mt (макс. выход) капим — не резервировать гигантский n_predict из контекста на большой пакет.
@@ -350,16 +359,16 @@ numbering, match tone/slang/intent.{budget_rule}{style_c}{gloss_rule} {rule} Use
         let s = Sampling::new(0.2, 0.95, mt).top_k(64);
         let mut answer = contract.ask(llm, &messages, &s, idx.len(), &mut |m: &str| (log_cell.borrow_mut())(m))?;
         for line in answer.lines.iter_mut().flatten() {
-            *line = crate::gloss::term_lock(line, &glossary);
+            *line = crate::gloss::term_lock(line, glossary, &names);
         }
         Ok(answer)
     };
     let check = |gi: usize, line: Option<&str>, cut: bool| {
-        LineCheck { src: &line_texts[gi], budget: budgets[gi], tgt_lang: job.tgt_code, glossary: &glossary, rewrite: job.rewrite.is_some() }
+        LineCheck { src: &line_texts[gi], budget: budgets[gi], tgt_lang: job.tgt_code, glossary, rewrite: job.rewrite.is_some() }
             .check(line, cut)
     };
     let chunks: Vec<Vec<usize>> = bounds.iter().map(|&(a, b)| (a..b).collect()).collect();
-    let out = crate::batch::drive(chunks, &mut ask, &check, &|gi| gi + 1, &mut |m: &str| (log_cell.borrow_mut())(m));
+    let out = crate::batch::drive(chunks, &mut ask, &check, &|gi| gi + 1, &mut |m: &str| (log_cell.borrow_mut())(m))?;
     if line_texts.len() > SHORT_LINES || !out.failed.is_empty() || !out.flawed.is_empty() {
         (log_cell.borrow_mut())(&format!(
             "  ctx translate: готово — {} строк переведено ({} с замечанием), {} на исходнике",

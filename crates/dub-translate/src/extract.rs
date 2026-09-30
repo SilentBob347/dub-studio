@@ -107,7 +107,9 @@ product names); `note` says briefly what it is. Leave out ordinary words. Reply 
         let messages = [Message::user_text(prompt)];
         let schema = schema();
         let done = match llm.complete(&messages, &s, with_schema.then_some(&schema)) {
-            Err(LlmError::Rejected { code: 400 | 422, status, .. }) if with_schema && llm.structured_output() == StructuredOutput::Untested => {
+            Err(LlmError::Rejected { code, status, body })
+                if with_schema && crate::contract::schema_refused(llm, code, &body, llm.structured_output() == StructuredOutput::Untested) =>
+            {
                 log(&format!("глоссарий: сервер отверг ответ по JSON-схеме ({status}) — прошу JSON текстом"));
                 with_schema = false;
                 llm.complete(&messages, &s, None)?

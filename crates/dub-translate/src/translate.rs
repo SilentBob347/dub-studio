@@ -3,14 +3,14 @@
 //! глоссарий пиннит термины и повторяющиеся ИМЕНА. Ответ — по контракту contract.rs (JSON-схема или
 //! нумерованные строки), каждая строка проверяется, непрошедшие переспрашиваются (batch::drive).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dub_core::glossary::{for_target, manual_first, normalize};
 use dub_core::GlossaryEntry;
 use dub_llm::{strip_think, ChatClient, Message, Sampling};
 use regex::Regex;
 
-use crate::contract::{rule as contract_rule, Answer, Contract, Format, LineCheck};
+use crate::contract::{label, rule as contract_rule, Answer, Contract, Format, LineCheck};
 use crate::seg::Seg;
 use crate::TranslateError;
 
@@ -39,9 +39,18 @@ fn has_cjk(s: &str) -> bool {
     s.chars().any(|c| ('\u{3040}'..='\u{30FF}').contains(&c) || ('\u{4E00}'..='\u{9FFF}').contains(&c))
 }
 
+/// Слово на позиции `at` строки начинает предложение: перед ним только пробелы, кавычки, тире и скобки, а перед
+/// ними — начало строки или конец предложения.
+fn sentence_start(t: &str, at: usize) -> bool {
+    let before = t[..at].trim_end_matches(|c: char| c.is_whitespace() || "\"'«»“”„‘’([¿¡-–—".contains(c));
+    before.is_empty() || before.ends_with(['.', '!', '?', '…', ':'])
+}
+
 /// _glossary — пары (имя_src -> имя_tgt) для повторяющихся собственных ИМЁН (заглавные, от 3 повторов).
-/// Разовый проход: один короткий вызов модели на имя. `limit` — сколько самых частых имён (None — все);
-/// имена, уже известные глоссарию, не спрашиваются. Первый сбой вызова обрывает проход с ошибкой.
+/// Имя — слово, которое хоть раз стоит с заглавной не в начале предложения и ни разу не пишется со строчной:
+/// «You», «What», «The» в начале реплик — служебные слова. Разовый проход: один короткий вызов модели на имя.
+/// `limit` — сколько самых частых имён (None — все); имена, уже известные глоссарию, не спрашиваются. Первый
+/// сбой вызова обрывает проход с ошибкой.
 pub(crate) fn glossary_pairs<'a>(
     llm: &ChatClient,
     texts: impl Iterator<Item = &'a str>,
@@ -52,17 +61,24 @@ pub(crate) fn glossary_pairs<'a>(
 ) -> Result<Vec<(String, String)>, TranslateError> {
     // counts по \b[A-Z][a-z]{2,}\b
     let re = Regex::new(r"\b[A-Z][a-z]{2,}\b").unwrap();
+    let lower_re = Regex::new(r"\b[a-z]{3,}\b").unwrap();
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut order: Vec<String> = Vec::new(); // порядок ПЕРВОГО появления (Counter сохраняет вставку)
+    let mut mid: HashSet<String> = HashSet::new();
+    let mut lower: HashSet<String> = HashSet::new();
     for t in texts {
         for m in re.find_iter(t) {
             let w = m.as_str().to_string();
+            if !sentence_start(t, m.start()) {
+                mid.insert(w.clone());
+            }
             let e = counts.entry(w.clone()).or_insert(0);
             if *e == 0 {
                 order.push(w);
             }
             *e += 1;
         }
+        lower.extend(lower_re.find_iter(t).map(|m| m.as_str().to_string()));
     }
     // most_common(limit), c>=3 — по счёту убыв.; ничья -> порядок появления (стабильная сортировка), НЕ алфавит
     let mut items: Vec<(String, usize)> = order.iter().map(|w| (w.clone(), counts[w])).collect();
@@ -70,8 +86,8 @@ pub(crate) fn glossary_pairs<'a>(
     let known: Vec<String> = known.iter().map(|e| normalize(&e.term)).collect();
     let terms: Vec<String> = items
         .into_iter()
+        .filter(|(w, c)| *c >= 3 && mid.contains(w) && !lower.contains(&w.to_lowercase()) && !known.contains(&normalize(w)))
         .take(limit.unwrap_or(usize::MAX))
-        .filter(|(w, c)| *c >= 3 && !known.contains(&normalize(w)))
         .map(|(w, _)| w)
         .collect();
 
@@ -103,16 +119,16 @@ fn nonempty_idxs_and_nspk(segs: &[Seg]) -> (Vec<usize>, usize) {
     (idxs, nspk)
 }
 
-/// Нумерованный блок "1. текст\n2. текст…" для пакета индексов (общий для run/rewrite). С мягким лимитом
-/// длины (#107): после номера «(≤NN)» из бюджета символов сегмента (14 симв/сек × длит.), у сегментов без
-/// таймингов лимита нет. Лимит вычищается из ответа защитно (strip_budget_marker при разборе).
-fn numbered_block(texts: &[String], budgets: &[Option<usize>], chunk: &[usize]) -> String {
+/// Нумерованный блок "1. текст\n2. текст…" для пакета индексов (общий для run/rewrite; номера — label формата).
+/// С мягким лимитом длины (#107): после номера «(≤NN)» из бюджета символов сегмента (14 симв/сек × длит.), у
+/// сегментов без таймингов лимита нет. Лимит вычищается из ответа защитно (strip_budget_marker при разборе).
+fn numbered_block(texts: &[String], budgets: &[Option<usize>], chunk: &[usize], fmt: Format) -> String {
     chunk
         .iter()
         .enumerate()
         .map(|(j, &gi)| match budgets[gi] {
-            Some(lim) => format!("{}. (\u{2264}{lim}) {}", j + 1, texts[gi]),
-            None => format!("{}. {}", j + 1, texts[gi]),
+            Some(lim) => format!("{}. (\u{2264}{lim}) {}", label(fmt, j + 1, chunk.len()), texts[gi]),
+            None => format!("{}. {}", label(fmt, j + 1, chunk.len()), texts[gi]),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -169,6 +185,8 @@ struct Flat<'a> {
     tgt_code: &'a str,
     tgt_name: String,
     glossary: Vec<GlossaryEntry>,
+    /// Авто-пары повторяющихся имён: подсказка и term-lock, не проверка.
+    names: Vec<(String, String)>,
     rewrite: bool,
 }
 
@@ -179,15 +197,15 @@ impl Flat<'_> {
         system: &dyn Fn(Format) -> String,
         sampling: &dyn Fn(usize) -> Sampling,
         log: &mut dyn FnMut(&str),
-    ) -> crate::batch::Outcome {
+    ) -> Result<crate::batch::Outcome, TranslateError> {
         let contract = Contract::for_client(self.llm);
         contract.announce(self.llm, log);
         let log_cell = std::cell::RefCell::new(log);
         let mut ask = |idx: &[usize], _: &HashMap<usize, String>| -> Result<Answer, TranslateError> {
             let texts: Vec<&str> = idx.iter().map(|&i| self.texts[i].as_str()).collect();
             let gloss_block = if self.rewrite { String::new() } else { crate::gloss::block(&self.glossary, &texts) };
-            let numbered = numbered_block(&self.texts, &self.budgets, idx);
             let messages = |fmt: Format| {
+                let numbered = numbered_block(&self.texts, &self.budgets, idx, fmt);
                 vec![
                     Message::system(system(fmt)),
                     Message::user_text(format!("{gloss_block}{numbered}\n\n{}", contract_rule(fmt, &self.tgt_name))),
@@ -196,7 +214,7 @@ impl Flat<'_> {
             let mut answer = contract.ask(self.llm, &messages, &sampling(idx.len()), idx.len(), &mut |m: &str| (log_cell.borrow_mut())(m))?;
             if !self.rewrite {
                 for line in answer.lines.iter_mut().flatten() {
-                    *line = crate::gloss::term_lock(line, &self.glossary);
+                    *line = crate::gloss::term_lock(line, &self.glossary, &self.names);
                 }
             }
             Ok(answer)
@@ -228,11 +246,11 @@ pub fn run_with(llm: &ChatClient, segs: &mut [Seg], o: &FlatOpts, log: &mut dyn 
     let tgt_name = lang_name(o.tgt, o.tgt);
     let mut glossary = for_target(o.glossary, o.tgt);
     manual_first(&mut glossary);
-    let glossary = match glossary_pairs(llm, segs.iter().map(|s| s.text.as_str()), &name_src(o.src), &tgt_name, Some(6), &glossary) {
-        Ok(pairs) => crate::gloss::with_auto(&glossary, pairs, o.tgt),
+    let names = match glossary_pairs(llm, segs.iter().map(|s| s.text.as_str()), &name_src(o.src), &tgt_name, Some(6), &glossary) {
+        Ok(pairs) => pairs,
         Err(e) => {
             log(&format!("  перевод: авто-глоссарий имён пропущен ({e})"));
-            glossary
+            Vec::new()
         }
     };
     let extra = if o.spoken {
@@ -254,6 +272,7 @@ pub fn run_with(llm: &ChatClient, segs: &mut [Seg], o: &FlatOpts, log: &mut dyn 
         String::new()
     };
     let gloss_rule = if glossary.is_empty() { "" } else { crate::gloss::RULE };
+    let names_c = crate::gloss::names_clause(&names);
     // Инструкция одна на все пакеты (KV-кэш llama-server); стиль (#112) и глоссарий — ПЕРЕД форматом ответа,
     // он остаётся финальным и приоритетным.
     let system = |fmt: Format| {
@@ -264,7 +283,7 @@ pub fn run_with(llm: &ChatClient, segs: &mut [Seg], o: &FlatOpts, log: &mut dyn 
              SAME LENGTH as its source so it fits the dub timing. After each number, a parenthesis like \
              (\u{2264}45) gives a soft character limit for that line — stay within it: if it doesn't fit, drop \
              filler words and repetitions, keep the meaning, invent nothing. Do NOT copy the (\u{2264}NN) marker \
-             into your output.{extra}{style_c}{gloss_rule} {} No reasoning, no English, no notes.",
+             into your output.{extra}{style_c}{names_c}{gloss_rule} {} No reasoning, no English, no notes.",
             contract_rule(fmt, &tgt_name)
         )
     };
@@ -276,9 +295,11 @@ pub fn run_with(llm: &ChatClient, segs: &mut [Seg], o: &FlatOpts, log: &mut dyn 
         tgt_code: o.tgt,
         tgt_name: tgt_name.clone(),
         glossary,
+        names,
         rewrite: false,
     };
-    let out = flat.run(&idxs, &system, &sampling, log);
+    let out = flat.run(&idxs, &system, &sampling, log)?;
+    let last_failure = out.failed.last().map(|f| f.1.clone());
     for (i, t) in out.accepted {
         segs[i].tgt = crate::fix_translation(&t, o.tgt);
     }
@@ -288,7 +309,7 @@ pub fn run_with(llm: &ChatClient, segs: &mut [Seg], o: &FlatOpts, log: &mut dyn 
         segs[gi].tgt = segs[gi].text.trim().to_string();
     }
     if !idxs.is_empty() && empty.len() == idxs.len() {
-        return Err(TranslateError::Empty(idxs.len()));
+        return Err(TranslateError::Empty(idxs.len(), last_failure.unwrap_or_else(|| "причина не записана".into())));
     }
     Ok(())
 }
@@ -341,9 +362,10 @@ pub fn rewrite(
         tgt_code: tgt,
         tgt_name: tgt_name.clone(),
         glossary: Vec::new(),
+        names: Vec::new(),
         rewrite: true,
     };
-    let out = flat.run(&idxs, &system, &sampling, &mut |m: &str| eprintln!("[remix] {}", m.trim()));
+    let out = flat.run(&idxs, &system, &sampling, &mut |m: &str| eprintln!("[remix] {}", m.trim()))?;
     for &gi in &idxs {
         // строка, которую так и не удалось переписать, остаётся исходной (не пустая озвучка).
         segs[gi].tgt = match out.accepted.get(&gi) {
@@ -400,7 +422,7 @@ mod tests {
     #[test]
     fn numbered_block_has_budget_when_timed() {
         let texts = vec!["hello world".to_string(), "no timing".to_string()];
-        let block = numbered_block(&texts, &[Some(42), None], &[0, 1]);
+        let block = numbered_block(&texts, &[Some(42), None], &[0, 1], Format::Json);
         assert_eq!(block, "1. (≤42) hello world\n2. no timing");
     }
 
@@ -462,10 +484,65 @@ mod tests {
             supported_parameters: vec!["structured_outputs".into()],
             ..Default::default()
         }));
-        let mut s = segs(&["Harry came", "Harry left", "Harry is back"]);
+        let mut s = segs(&["I saw Harry", "Then Harry left", "Harry is back"]);
         let mut log = Vec::new();
         run_with(&llm, &mut s, &FlatOpts { src: "en", tgt: "ru", spoken: false, style: "", glossary: &[] }, &mut |m: &str| log.push(m.to_string())).unwrap();
         assert_eq!(s[2].tgt, "Гарри вернулся");
         assert!(log.iter().any(|l| l.contains("авто-глоссарий имён пропущен")), "{log:?}");
+    }
+
+    #[test]
+    fn sentence_openers_are_not_names() {
+        let server = serve(vec![reply("Гарри")]);
+        let llm = ChatClient::new(server.base()).unwrap();
+        let texts = ["You know it.", "You again?", "What? You did it.", "Well, Harry is here.", "I told Harry.", "Harry! What now?", "so what"];
+        let pairs = glossary_pairs(&llm, texts.into_iter(), "English", "Russian", None, &[]).unwrap();
+        assert_eq!(pairs, vec![("Harry".to_string(), "Гарри".to_string())]);
+        assert_eq!(server.count(), 1);
+        let at = |t: &str, w: &str| t.find(w).unwrap();
+        assert!(sentence_start("«Stop!» You", at("«Stop!» You", "You")));
+        assert!(sentence_start("  — You", at("  — You", "You")));
+        assert!(!sentence_start("I told Harry", at("I told Harry", "Harry")));
+    }
+
+    #[test]
+    fn auto_names_are_a_hint_and_never_a_required_term() {
+        let server = serve(vec![
+            reply("Гарри"),
+            reply(r#"{"1":"Ты знаешь его","2":"Ты видел Гарри","3":"Снова ты и он"}"#),
+        ]);
+        let llm = ChatClient::new(server.base()).unwrap();
+        let mut s = segs(&["You know Harry", "You saw Harry", "You and Harry again"]);
+        run_with(&llm, &mut s, &FlatOpts { src: "en", tgt: "ru", spoken: false, style: "", glossary: &[] }, &mut |_: &str| {}).unwrap();
+        assert_eq!(server.count(), 2, "one name asked, one batch, no retries");
+        assert_eq!(body_json(&server.request(0))["messages"][1]["content"], "Harry");
+        let batch = body_json(&server.request(1));
+        assert!(batch["messages"][0]["content"].as_str().unwrap().contains("Keep these names consistent: Harry=Гарри."));
+        assert!(!batch["messages"][1]["content"].as_str().unwrap().contains("GLOSSARY"));
+        assert_eq!(s[0].tgt, "Ты знаешь его");
+    }
+
+    #[test]
+    fn a_dead_or_refusing_server_stops_the_translation_with_its_cause() {
+        let server = serve(vec![Reply::json(401, r#"{"error":"invalid key"}"#)]);
+        let llm = ChatClient::new(server.base()).unwrap();
+        let mut s = segs(&["one line", "two lines", "three lines"]);
+        let err = run_with(&llm, &mut s, &FlatOpts { src: "en", tgt: "ru", spoken: false, style: "", glossary: &[] }, &mut |_: &str| {}).unwrap_err();
+        assert!(err.to_string().contains("401") && err.to_string().contains("invalid key"), "{err}");
+        assert_eq!(server.count(), 1);
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let llm = ChatClient::new(format!("http://127.0.0.1:{port}")).unwrap().with_retries(0);
+        let err = run_with(&llm, &mut s, &FlatOpts { src: "en", tgt: "ru", spoken: false, style: "", glossary: &[] }, &mut |_: &str| {}).unwrap_err();
+        assert!(err.to_string().contains("chat failed"), "{err}");
+    }
+
+    #[test]
+    fn nothing_translated_names_the_last_cause() {
+        let server = serve(vec![reply(r#"{"1":"one line"}"#), reply(r#"{"1":"one line"}"#)]);
+        let llm = ChatClient::new(server.base()).unwrap();
+        let mut s = segs(&["one line"]);
+        let err = run_with(&llm, &mut s, &FlatOpts { src: "en", tgt: "ru", spoken: false, style: "", glossary: &[] }, &mut |_: &str| {}).unwrap_err();
+        assert!(matches!(&err, TranslateError::Empty(1, why) if why.contains("исходник")), "{err}");
     }
 }

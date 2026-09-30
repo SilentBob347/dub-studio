@@ -310,8 +310,16 @@ impl ChatClient {
                     ("frequency_penalty", defaults.frequency_penalty.map(|v| json!(v))),
                     ("presence_penalty", defaults.presence_penalty.map(|v| json!(v))),
                 ];
+                // С ответом по схеме require_parameters оставляет только провайдеров, принимающих каждый параметр
+                // запроса, а supported_parameters каталога — объединение по всем провайдерам модели: лишний
+                // параметр сэмплинга мог бы не оставить ни одного. Поэтому тогда — только temperature и top_p.
+                let strict = schema.is_some();
                 for (name, value) in ours {
-                    let known = self.profile.is_some() || matches!(name, "temperature" | "top_p");
+                    let essential = matches!(name, "temperature" | "top_p");
+                    if strict && !essential {
+                        continue;
+                    }
+                    let known = self.profile.is_some() || essential;
                     if let (Some(value), true) = (value, known && profile.accepts(name)) {
                         body.insert(name.into(), value);
                     }
@@ -506,6 +514,24 @@ mod tests {
         let body = body_json(&cloud.request(0));
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
         assert_eq!(body["provider"], json!({ "require_parameters": true }));
+
+        let rich = serve(vec![answer("{\"1\":\"Hola\"}", "stop"), answer("1. Hola", "stop")]);
+        let profile = ModelProfile {
+            supported_parameters: ["structured_outputs", "temperature", "top_p", "top_k", "repetition_penalty", "reasoning"].map(String::from).to_vec(),
+            reasoning: Some(ReasoningSupport::default()),
+            ..ModelProfile::default()
+        };
+        let client = ChatClient::openrouter_at(&rich.base(), "k", "vendor/m").unwrap().with_profile(Some(profile));
+        let sampling = Sampling::new(0.2, 0.95, 50).top_k(20).repeat_penalty(1.05);
+        client.complete(&[Message::user_text("ping")], &sampling, Some(&schema)).unwrap();
+        let body = body_json(&rich.request(0));
+        assert!(body.get("temperature").is_some() && body.get("top_p").is_some(), "{body}");
+        assert_eq!(body["reasoning"], json!({ "enabled": false }));
+        assert_eq!(body["provider"], json!({ "require_parameters": true }));
+        assert!(body.get("top_k").is_none() && body.get("repetition_penalty").is_none(), "only what the schema request needs: {body}");
+        client.complete(&[Message::user_text("ping")], &sampling, None).unwrap();
+        let body = body_json(&rich.request(1));
+        assert_eq!((body["top_k"].clone(), body.get("provider")), (json!(20), None), "without a schema — the whole sampling");
 
         let plain = ChatClient::openrouter_at(&cloud.base(), "k", "vendor/m").unwrap()
             .with_profile(Some(ModelProfile { supported_parameters: vec!["temperature".into()], ..ModelProfile::default() }));

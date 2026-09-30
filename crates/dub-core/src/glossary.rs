@@ -155,6 +155,23 @@ pub fn merge_under(primary: &[GlossaryEntry], secondary: &[GlossaryEntry]) -> Ve
     out
 }
 
+/// Слить импорт TSV в глоссарий: у записи о том же термине меняются только колонки TSV (перевод, keep,
+/// произношение) — варианты распознавания, примечание, источник и язык остаются; новые термины — в конец.
+pub fn merge_tsv(imported: &[GlossaryEntry], current: &[GlossaryEntry]) -> Vec<GlossaryEntry> {
+    let mut out = current.to_vec();
+    for new in imported {
+        match out.iter_mut().find(|e| e.overlaps(new)) {
+            Some(e) => {
+                e.translation = new.translation.clone();
+                e.keep = new.keep;
+                e.pronunciation = new.pronunciation.clone();
+            }
+            None => out.push(new.clone()),
+        }
+    }
+    out
+}
+
 // ── поиск термина в тексте ────────────────────────────────────────────────
 
 /// Письмо без пробелов между словами: термин ищется подстрокой, а не по словам.
@@ -480,6 +497,19 @@ mod tests {
         es.lang = "es".into();
         assert_eq!(merge_under(&[ru.clone()], &[es.clone()]).len(), 2, "other languages live side by side");
         assert_eq!(merge_under(&[ru], &[entry("Harry", "")]).len(), 1);
+    }
+
+    #[test]
+    fn a_tsv_import_changes_only_its_columns() {
+        let mut harry = entry("Harry", "Гарри");
+        harry.asr_fix = vec!["hairy".into()];
+        harry.note = "hero".into();
+        harry.source = GlossarySource::Auto;
+        harry.lang = "ru".into();
+        let merged = merge_tsv(&[entry("harry", "Гарри Поттер"), entry("Ron", "Рон")], std::slice::from_ref(&harry));
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0], GlossaryEntry { translation: "Гарри Поттер".into(), ..harry });
+        assert_eq!(merged[1].term, "Ron");
     }
 
     #[test]

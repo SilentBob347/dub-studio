@@ -1567,7 +1567,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "glossary_set",
-                description: "Set the project's glossary: entries (the whole list, as glossary_get gives it) or tsv (term, translation, keep 1/0, pronunciation per line; a header line is optional). merge: true adds them to the glossary instead, a term already there taking the new entry. An entry without lang takes the project's target language. The translation is not redone: the answer says stale when project_retranslate should run.",
+                description: "Set the project's glossary: entries (the whole list, as glossary_get gives it) or tsv (term, translation, keep 1/0, pronunciation per line; a header line is optional). merge: true adds them to the glossary instead, a term already there taking the new entry (from tsv only its columns: asr_fix, note, source and lang stay). An entry without lang takes the project's target language. The translation is not redone: the answer says stale when project_retranslate should run.",
                 schema: || {
                     object(
                         json!({

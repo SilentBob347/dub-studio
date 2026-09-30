@@ -3,12 +3,14 @@
 //! Формат выбирается по возможностям модели один раз на джобу: JSON-объект {"1": "...", …, "N": "..."} по
 //! схеме (response_format json_schema: свой llama-server строит из неё грамматику; модель OpenRouter —
 //! если заявляет structured_outputs) или прежние нумерованные строки «N. перевод». Свой OpenAI-совместимый
-//! сервер пробует схему; отказ 400/422 переводит джобу на нумерованный формат со строкой в журнале.
+//! сервер пробует схему; отказ 400/422 переводит джобу на нумерованный формат со строкой в журнале. Так же
+//! и OpenRouter, когда у модели не нашлось провайдера с ответом по схеме (404) или схему отвергли (400/422).
 
 use std::cell::Cell;
+use std::collections::HashMap;
 
 use dub_core::glossary::{contains_in_translation, normalize, GlossaryEntry};
-use dub_llm::{strip_think, ChatClient, LlmError, Message, Sampling, StructuredOutput};
+use dub_llm::{strip_think, ChatClient, Endpoint, LlmError, Message, Sampling, StructuredOutput};
 use serde_json::{json, Map, Value};
 
 use crate::TranslateError;
@@ -81,11 +83,12 @@ impl Contract {
                     let lines = parse_json(&raw, n).map_err(|e| TranslateError::Contract(format!("{e}; ответ: {}", preview(&raw))))?;
                     return Ok(Answer { lines, finish_reason: done.finish_reason });
                 }
-                Err(LlmError::Rejected { code: 400 | 422, status, body }) if self.probing.get() => {
+                Err(LlmError::Rejected { code, status, body }) if schema_refused(llm, code, &body, self.probing.get()) => {
                     self.format.set(Format::Numbered);
                     self.probing.set(false);
                     log(&format!(
-                        "  перевод: сервер отверг ответ по JSON-схеме ({status}: {}) — дальше нумерованные строки",
+                        "  перевод: {} отверг ответ по JSON-схеме ({status}: {}) — дальше нумерованные строки",
+                        llm.model().unwrap_or("сервер"),
                         preview(&body)
                     ));
                 }
@@ -98,12 +101,34 @@ impl Contract {
     }
 }
 
+/// Отказ сервера — отказ от ответа по схеме, а не сбой запроса. Свой сервер, пока схема не проверена: 400/422.
+/// OpenRouter: 404 (ни один провайдер модели не принимает запрос со схемой) или 400/422 о response_format.
+pub(crate) fn schema_refused(llm: &ChatClient, code: u16, body: &str, probing: bool) -> bool {
+    match llm.endpoint() {
+        Endpoint::OpenRouter => {
+            let b = body.to_ascii_lowercase();
+            code == 404 || (matches!(code, 400 | 422) && ["response_format", "json_schema", "structured"].iter().any(|k| b.contains(k)))
+        }
+        Endpoint::OpenAiCompatible | Endpoint::LlamaServer => probing && matches!(code, 400 | 422),
+    }
+}
+
+/// Номер k-й строки (с 1) пакета из n строк — перед строкой в промпте и ключом ответа. В JSON номера одной
+/// ширины ("01".."12"): serde_json без preserve_order пишет ключи объекта по алфавиту, а грамматика
+/// llama-server и strict-схема требуют свойства в порядке схемы — так он совпадает с порядком строк.
+pub(crate) fn label(fmt: Format, k: usize, n: usize) -> String {
+    match fmt {
+        Format::Json => format!("{k:0w$}", w = n.to_string().len()),
+        Format::Numbered => k.to_string(),
+    }
+}
+
 /// Правило формата ответа для инструкции модели.
 pub(crate) fn rule(fmt: Format, lang: &str) -> String {
     match fmt {
         Format::Json => format!(
-            "Reply with ONLY a JSON object whose keys are the line numbers as strings (\"1\", \"2\", …) and whose \
-values are the {lang} lines — every number, nothing else."
+            "Reply with ONLY a JSON object whose keys are the line numbers exactly as written before the lines \
+(\"1\", \"2\", … or \"01\", \"02\", …) and whose values are the {lang} lines — every number, nothing else."
         ),
         Format::Numbered => format!("Output ONLY 'N. <{lang} line>' per line, one per line, nothing else."),
     }
@@ -118,9 +143,10 @@ fn preview(s: &str) -> String {
     }
 }
 
-/// Схема ответа на n строк: объект с ключами "1".."n", все строки и все обязательны, лишних ключей нет.
+/// Схема ответа на n строк: объект с ключами-номерами 1..n (label), все строки и все обязательны, лишних
+/// ключей нет.
 pub(crate) fn schema(n: usize) -> Value {
-    let keys: Vec<String> = (1..=n).map(|k| k.to_string()).collect();
+    let keys: Vec<String> = (1..=n).map(|k| label(Format::Json, k, n)).collect();
     let props: Map<String, Value> = keys.iter().map(|k| (k.clone(), json!({ "type": "string" }))).collect();
     json!({ "type": "object", "properties": props, "required": keys, "additionalProperties": false })
 }
@@ -130,8 +156,8 @@ fn clean_line(s: &str) -> String {
     crate::translate::strip_budget_marker(s.trim()).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// JSON-ответ -> строки 1..n. Объект ищется между первой «{» и последней «}» (модель могла обернуть его в
-/// блок кода json). Не объект — ошибка.
+/// JSON-ответ -> строки 1..n; ключ — номер с ведущими нулями или без. Объект ищется между первой «{» и
+/// последней «}» (модель могла обернуть его в блок кода json). Не объект — ошибка.
 pub(crate) fn parse_json(raw: &str, n: usize) -> Result<Vec<Option<String>>, String> {
     let (Some(a), Some(b)) = (raw.find('{'), raw.rfind('}')) else {
         return Err("ответ не содержит JSON-объекта".into());
@@ -140,8 +166,14 @@ pub(crate) fn parse_json(raw: &str, n: usize) -> Result<Vec<Option<String>>, Str
         return Err("ответ не содержит JSON-объекта".into());
     }
     let map: Map<String, Value> = serde_json::from_str(&raw[a..=b]).map_err(|e| format!("ответ не разобран как JSON: {e}"))?;
+    let mut by_num: HashMap<usize, &Value> = HashMap::new();
+    for (key, value) in &map {
+        if let Ok(k) = key.trim().parse::<usize>() {
+            by_num.entry(k).or_insert(value);
+        }
+    }
     Ok((1..=n)
-        .map(|k| map.get(&k.to_string()).and_then(Value::as_str).map(clean_line).filter(|t| !t.is_empty()))
+        .map(|k| by_num.get(&k).and_then(|v| v.as_str()).map(clean_line).filter(|t| !t.is_empty()))
         .collect())
 }
 
@@ -393,6 +425,23 @@ mod tests {
     }
 
     #[test]
+    fn the_schema_keys_go_in_the_order_of_the_lines() {
+        let server = serve(vec![Reply::json(200, r#"{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}"#)]);
+        let llm = ChatClient::new(server.base()).unwrap();
+        let msgs = |_: Format| vec![Message::user_text("x")];
+        Contract::for_client(&llm).ask(&llm, &msgs, &Sampling::new(0.2, 0.9, 50), 12, &mut |_: &str| {}).unwrap();
+        let raw = server.request(0);
+        let keys: Vec<usize> = regex::Regex::new(r#""(\d+)":\{"type":"string"\}"#)
+            .unwrap()
+            .captures_iter(&raw)
+            .map(|c| c[1].parse().unwrap())
+            .collect();
+        assert_eq!(keys, (1..=12).collect::<Vec<_>>());
+        assert_eq!((label(Format::Json, 3, 12), label(Format::Json, 3, 9), label(Format::Numbered, 3, 12)), ("03".into(), "3".into(), "3".into()));
+        assert_eq!(parse_json(r#"{"01":"Раз","2":"Два"}"#, 2).unwrap(), vec![Some("Раз".into()), Some("Два".into())], "with or without zeros");
+    }
+
+    #[test]
     fn a_json_answer_is_read_even_in_a_fence() {
         let raw = "```json\n{\"1\": \" (≤20) Привет,   мир \", \"2\": \"\", \"3\": \"Пока\"}\n```";
         let lines = parse_json(raw, 3).unwrap();
@@ -495,6 +544,26 @@ mod tests {
         let a = c.ask(&llm, &msgs, &Sampling::new(0.2, 0.9, 50), 1, &mut |_: &str| {}).unwrap();
         assert_eq!(a.lines, vec![Some("Hola".into())]);
         assert_eq!(body_json(&own.request(0))["response_format"]["json_schema"]["schema"]["required"], json!(["1"]));
+
+        let cloud = serve(vec![
+            Reply::json(404, r#"{"error":{"message":"No endpoints found that can handle the requested parameters."}}"#),
+            Reply::json(200, r#"{"choices":[{"message":{"content":"1. Hola"},"finish_reason":"stop"}]}"#),
+        ]);
+        let profile = dub_llm::openrouter::ModelProfile { supported_parameters: vec!["structured_outputs".into()], ..Default::default() };
+        let llm = ChatClient::openrouter_at(&cloud.base(), "k", "vendor/m").unwrap().with_profile(Some(profile.clone()));
+        let c = Contract::for_client(&llm);
+        let mut log: Vec<String> = vec![];
+        let a = c.ask(&llm, &msgs, &Sampling::new(0.2, 0.9, 50), 1, &mut |m: &str| log.push(m.to_string())).unwrap();
+        assert_eq!(a.lines, vec![Some("Hola".into())]);
+        assert_eq!(c.format(), Format::Numbered);
+        assert!(log.len() == 1 && log[0].contains("404") && log[0].contains("vendor/m"), "{log:?}");
+        assert!(body_json(&cloud.request(1)).get("response_format").is_none());
+
+        let other = serve(vec![Reply::json(400, r#"{"error":{"message":"maximum context length exceeded"}}"#)]);
+        let llm = ChatClient::openrouter_at(&other.base(), "k", "vendor/m").unwrap().with_profile(Some(profile));
+        let c = Contract::for_client(&llm);
+        assert!(c.ask(&llm, &msgs, &Sampling::new(0.2, 0.9, 50), 1, &mut |_: &str| {}).is_err(), "not about the schema");
+        assert_eq!(c.format(), Format::Json);
 
         let bad = serve(vec![Reply::json(400, r#"{"error":"bad"}"#)]);
         let llm = ChatClient::new(bad.base()).unwrap();

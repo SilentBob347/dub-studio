@@ -8,7 +8,7 @@ use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use dub_core::glossary::{for_target, from_tsv, merge_under, to_tsv, validate};
+use dub_core::glossary::{for_target, from_tsv, merge_tsv, merge_under, to_tsv, validate};
 use dub_core::{GlossaryEntry, Project};
 use serde_json::{json, Value};
 
@@ -46,8 +46,9 @@ fn wants_tsv(q: &HashMap<String, String>) -> Result<bool, String> {
     }
 }
 
-/// Тело PUT: весь список entries или текст tsv; merge — влить в имеющиеся (присланное главнее) вместо замены;
-/// lang — язык записей TSV и записей без языка с переводом или произношением.
+/// Тело PUT: весь список entries или текст tsv; merge — влить в имеющиеся (присланное главнее) вместо замены,
+/// у имеющихся терминов TSV меняет только свои колонки; lang — язык записей TSV и записей без языка с
+/// переводом или произношением.
 #[derive(serde::Deserialize)]
 pub struct Put {
     entries: Option<Vec<GlossaryEntry>>,
@@ -59,6 +60,7 @@ pub struct Put {
 
 fn incoming(body: Put, default_lang: &str, current: &[GlossaryEntry]) -> Result<Vec<GlossaryEntry>, String> {
     let lang = body.lang.as_deref().unwrap_or(default_lang).trim().to_string();
+    let is_tsv = body.tsv.is_some();
     let new = match (body.entries, body.tsv) {
         (Some(entries), None) => entries,
         (None, Some(text)) => from_tsv(&text, &lang)?,
@@ -74,7 +76,11 @@ fn incoming(body: Put, default_lang: &str, current: &[GlossaryEntry]) -> Result<
             e
         })
         .collect();
-    let merged = if body.merge { merge_under(&new, current) } else { new };
+    let merged = match (body.merge, is_tsv) {
+        (false, _) => new,
+        (true, false) => merge_under(&new, current),
+        (true, true) => merge_tsv(&new, current),
+    };
     validate(merged)
 }
 
@@ -300,8 +306,20 @@ mod tests {
         assert_eq!(merged.iter().map(|e| e.translation.as_str()).collect::<Vec<_>>(), vec!["Хэрри", "Рон"]);
         let from_tsv = incoming(put(None, Some("term\ttranslation\tkeep\tpronunciation\nNvidia\t\t1\tЭнвидиа\n"), true), "ru", &current).unwrap();
         assert_eq!(from_tsv.len(), 3);
-        assert!(from_tsv[0].keep && from_tsv[0].lang == "ru");
+        assert!(from_tsv[2].keep && from_tsv[2].lang == "ru");
         assert!(incoming(put(None, None, false), "ru", &current).is_err());
         assert!(incoming(put(Some(vec![entry(" ", "x")]), None, false), "ru", &current).unwrap_err().contains("пустой"));
+    }
+
+    #[test]
+    fn export_then_import_keeps_asr_variants_and_notes() {
+        let mut harry = GlossaryEntry { lang: "ru".into(), note: "hero".into(), asr_fix: vec!["hairy".into()], ..entry("Harry", "Гарри") };
+        harry.source = dub_core::glossary::GlossarySource::Auto;
+        let current = vec![harry.clone(), GlossaryEntry { lang: "ru".into(), note: "friend".into(), ..entry("Ron", "Рон") }];
+        let edited = to_tsv(&current).replace("Гарри", "Гарри Поттер");
+        let back = incoming(put(None, Some(&edited), true), "ru", &current).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0], GlossaryEntry { translation: "Гарри Поттер".into(), ..harry });
+        assert_eq!(back[1], current[1]);
     }
 }
