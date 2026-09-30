@@ -966,7 +966,7 @@ fn tools() -> &'static [Tool] {
                     object(
                         json!({
                             "pid": pid(),
-                            "tgt_lang": { "type": "string", "description": "language code to dub into (studio://languages)" },
+                            "tgt_lang": { "type": "string", "description": "language code to dub into (studio://languages); not needed for mode transcribe" },
                             "mode": { "type": "string", "enum": ["auto", "dub", "voiceover", "nodub", "transcribe"] },
                             "src_lang": { "type": "string" },
                             "subs": { "type": "string", "enum": ["auto", "none", "transcribe", "translate"] },
@@ -979,13 +979,14 @@ fn tools() -> &'static [Tool] {
                             "content_type": { "type": "string", "enum": ["auto", "real", "anime"] },
                             "import_translated": { "type": "boolean" },
                         }),
-                        &["pid", "tgt_lang"],
+                        &["pid"],
                     )
                 },
                 call: |args| {
                     let path = project_path(args, "/analyze")?;
+                    let tgt_lang = if given(args, "mode").as_deref() == Some("transcribe") { given(args, "tgt_lang") } else { Some(text(args, "tgt_lang")?) };
                     let tail = query(&[
-                        ("tgt_lang", Some(text(args, "tgt_lang")?)),
+                        ("tgt_lang", tgt_lang),
                         ("mode", given(args, "mode")),
                         ("src_lang", given(args, "src_lang")),
                         ("subs", given(args, "subs")),
@@ -2199,6 +2200,9 @@ mod tests {
         }
         let call = (find("project_analyze").call)(&json!({ "pid": "p1", "tgt_lang": "ru", "mode": "voiceover", "burn": false, "casting": true, "rewrite": "make it rhyme & shine" })).unwrap();
         assert_eq!(call.path, "/projects/p1/analyze?tgt_lang=ru&mode=voiceover&rewrite=make%20it%20rhyme%20%26%20shine&burn=0&casting=1");
+        let call = (find("project_analyze").call)(&json!({ "pid": "p1", "mode": "transcribe" })).unwrap();
+        assert_eq!(call.path, "/projects/p1/analyze?mode=transcribe");
+        assert!((find("project_analyze").call)(&json!({ "pid": "p1", "mode": "dub" })).is_err(), "a dub needs tgt_lang");
         let call = (find("project_frame").call)(&json!({ "pid": "p1", "t": 12.5, "source": "original" })).unwrap();
         assert_eq!(call.path, "/projects/p1/original?t=12.5");
         let call = (find("jobs_list").call)(&json!({})).unwrap();
