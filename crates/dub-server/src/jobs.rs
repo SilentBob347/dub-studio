@@ -629,10 +629,11 @@ impl JobQueue {
         Ok(job_id)
     }
 
-    /// Поставить джобу в очередь; вернуть job_id. Персистентная джоба сначала пишет job.json.
+    /// Поставить джобу в очередь; вернуть job_id. Персистентная джоба сначала пишет job.json. Её сохранения
+    /// проекта — автора запроса, который её поставил (mcp::carry_job).
     pub async fn enqueue(&self, meta: JobMeta, fn_: JobFn) -> Result<String, EnqueueError> {
         let job_id = self.insert(meta, None).await?;
-        let _ = self.submit_tx.send((job_id.clone(), fn_));
+        let _ = self.submit_tx.send((job_id.clone(), crate::mcp::carry_job(fn_)));
         Ok(job_id)
     }
 
@@ -644,7 +645,7 @@ impl JobQueue {
     ) -> Result<(String, oneshot::Receiver<Result<Value, String>>), EnqueueError> {
         let (res_tx, res_rx) = oneshot::channel();
         let job_id = self.insert(meta, Some(res_tx)).await?;
-        let _ = self.submit_tx.send((job_id.clone(), fn_));
+        let _ = self.submit_tx.send((job_id.clone(), crate::mcp::carry_job(fn_)));
         Ok((job_id, res_rx))
     }
 

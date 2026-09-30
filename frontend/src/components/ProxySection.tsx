@@ -124,7 +124,7 @@ export default function ProxySection() {
           <input type="text" value={url} disabled={!loaded} onChange={(e) => setUrl(e.target.value)}
             placeholder={t("secrets.proxyUrlPlaceholder")} aria-label={t("secrets.proxyUrl")} autoComplete="off" spellCheck={false} className={`${fieldCls} w-full`} />
           <div className="flex gap-2">
-            <input type={show ? "text" : "password"} value={password} disabled={!loaded} onChange={(e) => setPassword(e.target.value)}
+            <input type={show ? "text" : "password"} data-mcp-secret value={password} disabled={!loaded} onChange={(e) => setPassword(e.target.value)}
               placeholder={passwordSet ? t("secrets.proxyPasswordSaved") : t("secrets.proxyPasswordPlaceholder")} aria-label={t("secrets.proxyPassword")}
               autoComplete="new-password" className={fieldCls} />
             <button onClick={() => setShow((s) => !s)} aria-label={show ? t("secrets.hide") : t("secrets.show")} title={show ? t("secrets.hide") : t("secrets.show")}

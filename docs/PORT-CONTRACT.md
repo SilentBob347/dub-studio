@@ -14,7 +14,7 @@
 - Снапшот `OPTS` берётся в момент постановки джобы (иммунитет к конкурентному `PATCH /engine/opts`).
 - В Rust: `crates/dub-server/src/jobs.rs` — единый воркер (`spawn_blocking`), broadcast-канал на SSE,
   oneshot для синхронного ожидания (preview/original). У джобы есть вид (analyze|retranslate|remix|
-  dub_audio|render|export_lang|download|voices_pack|frame), проект, время и последнее событие.
+  dub_audio|render|export_lang|download|voices_pack|frame|align|separate|detect_text), проект, время и последнее событие.
   Завершённые джобы живут в истории 10 мин (не больше 50), читать результат можно сколько угодно раз.
 - Джобы проекта (analyze/retranslate/remix/dub_audio/render/export_lang) пишут `workspace/<pid>/job.json`
   ДО постановки: {kind, args, state queued|running|failed|interrupted|done|cancelled, stage,
@@ -23,6 +23,17 @@
 - Повторная постановка джобы того же класса по тому же проекту, пока первая не завершена → 409
   `{"error":"job_conflict","job_id":..,"kind":..}`. Классы: text = analyze/retranslate/remix,
   audio = dub_audio/render/export_lang.
+- Автор и ревизия (mcp/window.rs::track, слой на весь `api`): запрос окна несёт `x-dub-window: <метка окна>`,
+  вызов MCP-инструмента — `x-dub-agent`; остальное — `api`. Каждая запись project.json (`save_project_atomic`)
+  поднимает ревизию проекта и оповещает окна `{changed:"project", pid, rev, by, job}`; запись джобы приписывается
+  автору запроса, поставившего её в очередь (`job: true`; `JobQueue::enqueue` оборачивает каждую джобу в `mcp::carry_job`), а не тому, кто
+  поставил следующую джобу проекта. Ответы, которые и есть проект (GET/PATCH/PUT
+  `/projects/{pid}`), несут `x-project-rev`. PUT `/projects/{pid}` несёт в
+  `x-project-rev` ревизию, на которой снят записываемый снимок (undo/redo окна; без своей — последнюю известную окну);
+  если после неё проект сохранял кто-то, кроме автора PUT (агент, API, другое окно, джоба не этого окна), или такой
+  ревизии сервер не достигал (рестарт) → 409 `{error:"project_changed", detail}`: undo окна не затирает правки агента
+  или другого окна, даже когда своя более поздняя правка окна уже принесла ему их. Создание/удаление проектов, настройки, голоса, кастинг и старт джоб (`{changed:"jobs", job_id,
+  kind, pid}`) тоже оповещают окна.
 
 ## SSE — формат событий (`GET /jobs/{id}/events`)  — **done**
 
@@ -82,7 +93,10 @@ translated.json, ocr.json, casting.json в cache.json), render синтезир�
 | POST | `/projects/{pid}/separate` | **done** | Голос и фон проекта (stems/vocals.wav, stems/instrumental.wav — кэш, общий с analyze/render): есть — {cached: true, vocals, background} без джобы; нет модели сепаратора — 409; иначе джоба вида separate (audio_hq.wav 44.1k → dub_sep::separate) с результатом {vocals, background} → {job_id}; незавершённая separate проекта → 409 `{"error":"job_conflict","job_id","kind"}`; джоба, поставленная второй после конца первой, отдаёт её stems без пересчёта (atomic.rs::separate) |
 | POST | `/projects/{pid}/detect-text` | **done** | Вшитый текст кадра с параметрами детекции analyze (caption_fps, min_dur .3, iou .3, pad 8, jitter 20, score .4): text_regions.json есть — {cached: true, ...}; аудио-проект или нет моделей OCR — 409; иначе джоба вида detect_text → {job_id}; незавершённая detect_text проекта → 409 job_conflict; поставленная второй после конца первой отдаёт прочитанное. Результат {file, width, height, fps, count, regions: [{text, x, y, w, h, t0, t1}]}, пишется tmp+rename в text_regions.json (atomic.rs::detect_text) |
 | POST | `/mcp` | **done** | MCP-сервер (Streamable HTTP, stateless JSON-RPC): каждый tool зовёт маршрут этой таблицы внутри процесса; skill — docs/mcp-skill.md (mcp.rs::handle). Порядок в build_router как в YuE2: `mcp::install(api.clone())` до гарда Origin/Host, гард — снаружи `api` вместе с `/mcp` и `/mcp/status`; внутренние запросы инструментов несут `Host: 127.0.0.1` (mcp.rs::call_route_raw) и проходят гард, где бы он ни стоял |
-| GET | `/mcp/status` | **done** | {agent_connected, agent_last_call, agent_seconds_ago, agent_calls} для раздела настроек «Агент (MCP)» (mcp.rs::status) |
+| GET | `/mcp/status` | **done** | {agent_connected, agent_last_call, agent_seconds_ago, agent_calls, window_open} для раздела настроек «Агент (MCP)» (mcp.rs::status) |
+| GET | `/mcp/window` | **done** | SSE окна: первое событие `{window: n}`, дальше команды `{id, window, command, args}` для окна, к которому пользователь повернулся последним, и оповещения `{changed, pid?, rev?, by, job?, job_id?, kind?, project_id?}` всем окнам (mcp/window.rs::window_events). Отставшее окно получает `{changed: "everything"}` |
+| POST | `/mcp/window/result` | **done** | ответ окна на команду: `{id, result}` или `{id, error}` → 204; неизвестный id → 404 (window_result). Инструменты ui_* / editor_* ждут его 15–30 с; окна нет — сразу понятная ошибка инструмента |
+| POST | `/mcp/window/focus` | **done** | `{window}` — окно, к которому повернулся пользователь, получает следующие команды (window_focus) |
 | GET | `/projects` | **done** | {projects: [{pid, video, tgt_lang, mode, width, height, duration, segments, created, audio_only, mtime, done, source}]}, новые правки сверху. `source` — agent (проект из файла от инструмента агента, agent.json с project_id этого проекта) или window. `created` — рождение каталога проекта (сек. эпохи; null, если ФС его не хранит), `mtime` — последняя правка project.json (lib.rs::list_projects) |
 | GET | `/settings/launch` | **done** | Дефолты запуска дубляжа (форма стартового экрана): {defaults: {audio, subs, burn, detect_text, src_lang, tgt_lang\|null, casting, casting_ref, content_type, vo_gain_db, tr_style, tr_style_custom, sub_blur, keep_orig, container, voice_src, voice_slots_m, voice_slots_f}, saved}. Файл `models/launch_defaults.json`; нет файла — встроенные дефолты и saved=false (studio_settings.rs) |
 | PATCH | `/settings/launch` | **done** | Частичная правка тех же полей; незнакомое поле или неверное значение — 400 целиком, файл не меняется; запись атомарная. Ответ как у GET, saved=true |
@@ -127,6 +141,8 @@ translated.json, ocr.json, casting.json в cache.json), render синтезир�
 | `recast` | voice_mode?, voice_name? | recast (сменить режим/голос дубляжа) |
 | `regen` | id | пометить сегмент dirty → ре-TTS только его на /render |
 | `regen_all` | — | пометить все dirty → ре-TTS всего дубляжа |
+| `split_segment` ✅ | id, at, tgt_text?, tgt_text_2?, new_id? | разрезать фразу в момент at: слова ASR и исходный текст — по времени, перевод — из полей или в той же доле; вторая часть `<id>.2`; обе dirty; at не внутри фразы → 400, занятый new_id → 409 |
+| `merge_segments` ✅ | ids[] | склеить соседние по списку фразы: id, спикер и голос первой, время от раннего начала до позднего конца, тексты и слова подряд; не соседи → 400 |
 
 ## Защита от path-traversal (SPA)  — **done**
 

@@ -21,6 +21,10 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 mod atomic;
+mod window;
+
+pub use window::{window_events, window_focus, window_result};
+pub(crate) use window::{carry, carry_job, save_with_revision, track, REV_HEADER};
 
 /// The studio's API router, set once the service has built it.
 static API: OnceLock<Router> = OnceLock::new();
@@ -53,6 +57,9 @@ enum Payload {
     Json(Value),
     /// Multipart form fields and files, as the page uploads them.
     Form { fields: Vec<(String, String)>, files: Vec<(String, PathBuf, String)> },
+    /// A command for the studio's window: what is on screen, the controls, the editor. Answered by
+    /// the page itself.
+    Window { command: &'static str, args: Value, seconds: u64 },
 }
 
 struct Call {
@@ -253,6 +260,56 @@ fn compact_project(project: &Value, args: &Value) -> Value {
     })
 }
 
+/// A project's words as a transcript: each line's id, time, speaker and text - the recognised
+/// original (text src, the default) or the translation (tgt) - narrowed by from and to seconds,
+/// as JSON lines or, with format text, one "[0:14.2 SPK 1] words" line each.
+fn transcript(project: &Value, args: &Value) -> Value {
+    let from = args.get("from").and_then(Value::as_f64);
+    let to = args.get("to").and_then(Value::as_f64);
+    let translation = args.get("text").and_then(Value::as_str) == Some("tgt");
+    let clock = |seconds: f64| {
+        let tenths = (seconds.max(0.0) * 10.0).round() as u64;
+        format!("{}:{:02}.{}", tenths / 600, tenths % 600 / 10, tenths % 10)
+    };
+    // the translation as the subtitles burn it: a line's own subtitle text over its translation,
+    // and no line that keeps the original speech
+    let own: std::collections::HashMap<&str, &str> = project["captions"]["overrides"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| Some((o["seg_id"].as_str()?, o["text"].as_str()?)))
+        .collect();
+    let lines: Vec<(&Value, &str)> = project["segments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|segment| segment["hidden"] != true && !(translation && segment["keep_original"] == true))
+        .map(|segment| {
+            let text = match translation {
+                true => segment["id"].as_str().and_then(|id| own.get(id).copied()).unwrap_or_else(|| segment["tgt_text"].as_str().unwrap_or_default()),
+                false => segment["src_text"].as_str().unwrap_or_default(),
+            };
+            (segment, text.trim())
+        })
+        .filter(|(_, text)| !text.is_empty())
+        .filter(|(segment, _)| {
+            let start = segment["start"].as_f64().unwrap_or_default();
+            let end = segment["end"].as_f64().unwrap_or_default();
+            from.is_none_or(|from| end >= from) && to.is_none_or(|to| start <= to)
+        })
+        .collect();
+    let speakers: std::collections::BTreeSet<&str> = lines.iter().filter_map(|(segment, _)| segment["speaker"].as_str()).collect();
+    if args.get("format").and_then(Value::as_str) == Some("text") {
+        let text: Vec<String> = lines
+            .iter()
+            .map(|(segment, text)| format!("[{} SPK {}] {text}", clock(segment["start"].as_f64().unwrap_or_default()), segment["speaker"].as_str().unwrap_or("-")))
+            .collect();
+        return json!({ "text": text.join("\n"), "lines": lines.len(), "speakers": speakers });
+    }
+    let rows: Vec<Value> = lines.iter().map(|(segment, text)| json!({ "id": segment["id"], "start": segment["start"], "end": segment["end"], "speaker": segment["speaker"], "text": text })).collect();
+    json!({ "language": if translation { project["tgt_lang"].as_str().unwrap_or_default() } else { "original" }, "speakers": speakers, "lines": rows })
+}
+
 /// What an edit changed: the project's state in brief and the part the edit
 /// touched, instead of the whole project every edit answers with.
 fn compact_change(name: &str, args: &Value, project: &Value) -> Value {
@@ -272,6 +329,10 @@ fn compact_change(name: &str, args: &Value, project: &Value) -> Value {
     let segments = project["segments"].as_array().cloned().unwrap_or_default();
     if name == "segments_reorder" {
         named.clear();
+    }
+    if name == "segment_split" {
+        let after = args.get("id").and_then(Value::as_str).and_then(|id| segments.iter().position(|segment| segment["id"] == id)).and_then(|at| segments.get(at + 1));
+        named.extend(after.and_then(|segment| segment["id"].as_str()).map(str::to_string));
     }
     let mut changed: Vec<Value> = segments.iter().filter(|segment| named.iter().any(|id| segment["id"] == id.as_str())).map(compact_segment).collect();
     if name == "segment_add" && args.get("id").is_none() {
@@ -345,6 +406,7 @@ fn shape(name: &str, args: &Value, value: Value) -> Value {
     match name {
         _ if detailed => value,
         "project_get" => compact_project(&value, args),
+        "project_transcript" => transcript(&value, args),
         _ if is_project(&value) => compact_change(name, args, &value),
         "jobs_list" => match job_rows(&value) {
             Ok(rows) => {
@@ -501,12 +563,12 @@ fn annotations(name: &str) -> Value {
         "align", "patch", "put", "rename", "save", "hide", "keep", "reorder", "regen", "enable", "resume", "export", "open", "reveal",
     ];
     // reads whose names the rules above miss
-    const READ_NAMES: &[&str] = &["studio_wait", "proxy_test", "openrouter_verify"];
+    const READ_NAMES: &[&str] = &["studio_wait", "proxy_test", "openrouter_verify", "project_transcript", "ui_screenshot", "ui_read_page", "ui_console", "editor_state"];
     // writes over what was stored, so the earlier content is gone: a client asks first
     const OVERWRITES: &[&str] = &[
         "project_put", "project_analyze", "project_retranslate", "project_remix", "project_align", "segment_update", "segments_reorder", "segments_regen_all",
         "project_mode_set", "translation_target_set", "translation_style_set", "rewrite_set", "voice_set", "caption_style_set", "casting_update",
-        "voice_slots_assign", "openrouter_set_key",
+        "voice_slots_assign", "openrouter_set_key", "segments_merge", "editor_segment_update", "editor_segments_merge", "editor_mode", "editor_style",
     ];
     let changes = CHANGES.iter().any(|verb| name.split('_').any(|word| word == *verb));
     let read_only = READ_NAMES.contains(&name) || !changes && READS.iter().any(|part| name.ends_with(part) || name.contains(&format!("{part}_")));
@@ -569,6 +631,7 @@ pub async fn status() -> Json<Value> {
         "agent_last_call": last.as_ref().map(|(_, what)| what.clone()),
         "agent_seconds_ago": last.as_ref().map(|(at, _)| at.elapsed().as_secs()),
         "agent_calls": agent().calls.load(Ordering::Relaxed),
+        "window_open": window::windows_open() > 0,
     }))
 }
 
@@ -669,6 +732,8 @@ const PATCH_OPS: &[(&str, &str)] = &[
     ("hide_segments", "segments_hide"),
     ("keep_segments", "segments_keep_original"),
     ("reorder_segments", "segments_reorder"),
+    ("split_segment", "segment_split"),
+    ("merge_segments", "segments_merge"),
     ("regen", "segment_regen"),
     ("regen_all", "segments_regen_all"),
     ("mode", "project_mode_set"),
@@ -1055,6 +1120,12 @@ fn tools() -> &'static [Tool] {
                 call: |args| get(project_path(args, "")?),
             },
             Tool {
+                name: "project_transcript",
+                description: "A project's transcript without the window: each line's id, start, end, speaker and text - the recognised original (text src, the default) or the translation as the subtitles show it (text tgt: a line's own subtitle text over its translation, lines that keep the original speech left out) - hidden lines left out, from and to (seconds) narrowing it; format text gives one \"[0:14.2 SPK 1] words\" line each instead of JSON lines.",
+                schema: || object(json!({ "pid": pid(), "text": { "type": "string", "enum": ["src", "tgt"] }, "format": { "type": "string", "enum": ["json", "text"] }, "from": { "type": "number" }, "to": { "type": "number" } }), &["pid"]),
+                call: |args| get(project_path(args, "")?),
+            },
+            Tool {
                 name: "project_analyze",
                 description: "Analyze a project's video: separate the voices from the background, find who speaks, recognise the speech, translate it into tgt_lang, read the on-screen text (detect) and style the subtitles after the original. A job: studio_wait with its job_id, then project_get shows the lines. mode: auto (dub when there is speech), dub, voiceover (the translation over the quieted original), nodub (subtitles only), transcribe (the transcript in the original language). src_lang: auto or a code (studio://languages). subs: auto, none, transcribe, translate. burn: burn the subtitles into the video (default on). rewrite: an instruction for a funny or themed version of the dub. translate_style: the tone of the translation. casting: find the characters by voice and face (content_type real or anime, auto guesses), casting_ref applies a saved casting (casting_library_list). import_translated: the subtitles given to project_create are already in tgt_lang. Analyzing again replaces the project's lines.",
                 schema: || {
@@ -1311,6 +1382,21 @@ fn tools() -> &'static [Tool] {
                 description: "Voice every line again at the next project_dub_audio or project_render.",
                 schema: || object(json!({ "pid": pid(), "response_format": detail() }), &["pid"]),
                 call: |args| edit(args, "regen_all"),
+            },
+            Tool {
+                name: "segment_split",
+                description: "Cut a line in two at a moment (at, seconds, inside the line): the recognised words and the text are divided there, tgt_text and tgt_text_2 give the two halves' translations (the translation is divided in the same share when left out). The second half gets new_id or <id>.2. A subtitle text of the line's own (caption_style_set with seg_id and text) is divided in the same share, and both halves keep its place and style. Both halves are dirty; the answer shows both.",
+                schema: || object(json!({ "pid": pid(), "id": { "type": "string" }, "at": { "type": "number", "description": "seconds" }, "tgt_text": { "type": "string" }, "tgt_text_2": { "type": "string" }, "new_id": { "type": "string" }, "response_format": detail() }), &["pid", "id", "at"]),
+                call: |args| {
+                    text(args, "id")?;
+                    edit(args, "split_segment")
+                },
+            },
+            Tool {
+                name: "segments_merge",
+                description: "Join lines that follow one another in the list into one (ids): the first keeps its id, speaker and voice, it runs from the earliest start to the latest end, the texts follow each other. The lines' own subtitle overrides become one: the place and style of the first that has one, and, when any line has a subtitle text of its own, the parts' texts in order. It is dirty.",
+                schema: || object(json!({ "pid": pid(), "ids": ids("line ids, neighbours in the list"), "response_format": detail() }), &["pid", "ids"]),
+                call: |args| edit(args, "merge_segments"),
             },
             // ---------------------------------------------------------------- what the project makes
             Tool {
@@ -1595,6 +1681,7 @@ fn tools() -> &'static [Tool] {
             },
         ];
         all.extend(atomic::tools());
+        all.extend(window::tools());
         all
     })
 }
@@ -1623,9 +1710,10 @@ struct Reply {
 async fn call_route_raw(call: Call) -> Result<Reply, String> {
     let api = studio_api()?;
     let asked = format!("{} {}", call.method, call.path);
-    let builder = Request::builder().method(call.method).uri(&call.path).header(header::HOST, "127.0.0.1");
+    let builder = Request::builder().method(call.method).uri(&call.path).header(header::HOST, "127.0.0.1").header(window::AGENT_HEADER, "1");
     let request = match call.payload {
         Payload::None => builder.body(Body::empty()),
+        Payload::Window { command, .. } => return Err(format!("{command} is a command of the studio's window, not a route")),
         Payload::Json(body) => builder.header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string())),
         Payload::Form { fields, files } => {
             let boundary = format!("studio-mcp-{}", uuid::Uuid::new_v4().simple());
@@ -1960,6 +2048,10 @@ pub async fn handle(headers: HeaderMap, body: axum::body::Bytes) -> Response {
             };
             match prepared {
                 Err(problem) => answer(problem, true),
+                Ok(Call { payload: Payload::Window { command, args, seconds }, .. }) => match window::ask_window(command, args, seconds).await {
+                    Ok(result) => window::window_reply(id, result),
+                    Err(problem) => answer(problem, true),
+                },
                 Ok(call) if call.path == "composite:status" => tool_json(id, status_summary().await),
                 Ok(call) if call.path == "composite:wait" => match wait_for(&args).await {
                     Ok(state) => tool_json(id, state),
@@ -2015,7 +2107,7 @@ fn moment(text: &str, end: bool) -> Result<i64, String> {
 }
 
 /// What an agent is told when it connects.
-const INSTRUCTIONS: &str = "You drive Dub Studio on this computer: it dubs, voices over, subtitles and transcribes videos. Every tool runs the same code as a button of the studio, through the routes its window calls. Start with studio_status. For one result from a file, without working in the studio, one call does it: transcribe_file (the transcript), translate_file (translated subtitles), dub_file (the dubbed video), separate_file (voice and background apart), detect_text_file (the text in the picture); export_subtitles writes a project's subtitles. Long work - project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, downloads - is a job: start it, then studio_wait with its job_id instead of polling. The graphics card runs one job at a time and a preview frame (project_frame) waits behind it, so look at frames while the studio is idle. Edits (segment_update, caption_style_set and the rest) are instant and saved; a line whose words, timing, speaker or voice changed is dirty, and project_dub_audio and project_render voice only the dirty lines again. Look ids up instead of guessing them: projects_list, project_get, voices_list, casting_get, casting_library_list, models_status. Files on this computer are passed by path. The whole guide is the resource studio://skill (prompt 'studio').";
+const INSTRUCTIONS: &str = "You drive Dub Studio on this computer: it dubs, voices over, subtitles and transcribes videos. Every tool runs the same code as a button of the studio, through the routes its window calls. Start with studio_status. For one result from a file, without working in the studio, one call does it: transcribe_file (the transcript), translate_file (translated subtitles), dub_file (the dubbed video), separate_file (voice and background apart), detect_text_file (the text in the picture); export_subtitles writes a project's subtitles. Long work - project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, downloads - is a job: start it, then studio_wait with its job_id instead of polling. The graphics card runs one job at a time and a preview frame (project_frame) waits behind it, so look at frames while the studio is idle. Edits (segment_update, caption_style_set and the rest) are instant and saved; a line whose words, timing, speaker or voice changed is dirty, and project_dub_audio and project_render voice only the dirty lines again. Look ids up instead of guessing them: projects_list, project_get, voices_list, casting_get, casting_library_list, models_status. Files on this computer are passed by path. To work in front of the user, open the project in the studio's window with editor_open and use the editor_* tools (the user watches the lines, the timeline, the frame and the export change) and ui_* for anything else on screen; they need the window open, the rest works without it. The whole guide is the resource studio://skill (prompt 'studio').";
 
 #[cfg(test)]
 mod tests {
@@ -2164,6 +2256,9 @@ mod tests {
         ("GET", "/jobs/{job_id}/events", "the page's progress stream: job_get and studio_wait"),
         ("POST", "/mcp", "the MCP server itself"),
         ("GET", "/mcp/status", "the settings page's view of the agent"),
+        ("GET", "/mcp/window", "the window's own stream of commands: the ui_* and editor_* tools go through it"),
+        ("POST", "/mcp/window/result", "the window's answers to those commands"),
+        ("POST", "/mcp/window/focus", "the window the person turned to"),
     ];
 
     /// Routes the tools call that come with the parallel work on jobs; once one
@@ -2218,6 +2313,9 @@ mod tests {
         let mut reached = Vec::new();
         for args in samples(tool, video, subtitles) {
             let call = (tool.call)(&args).unwrap_or_else(|problem| panic!("{} refused {args}: {problem}", tool.name));
+            if matches!(call.payload, Payload::Window { .. }) {
+                continue;
+            }
             match COMPOSITE_ROUTES.iter().chain(atomic::ROUTES).find(|(path, _)| *path == call.path) {
                 Some((_, reads)) => reached.extend(reads.iter().map(|(method, path)| (method.to_string(), path.to_string()))),
                 None => {
@@ -2227,6 +2325,25 @@ mod tests {
             }
         }
         reached
+    }
+
+    #[test]
+    fn the_transcript_is_what_is_heard_and_the_translation_what_is_burned() {
+        let project = json!({
+            "tgt_lang": "ru",
+            "captions": { "overrides": [{ "seg_id": "d", "text": "До встречи" }] },
+            "segments": [
+                { "id": "a", "start": 59.96, "end": 61.0, "speaker": "0", "src_text": "Hello", "tgt_text": "Привет" },
+                { "id": "b", "start": 61.0, "end": 62.0, "speaker": "0", "src_text": "Thanks for watching", "tgt_text": "Спасибо", "hidden": true },
+                { "id": "c", "start": 62.0, "end": 63.0, "speaker": "1", "src_text": "Bonjour", "tgt_text": "Бонжур", "keep_original": true },
+                { "id": "d", "start": 63.0, "end": 64.0, "speaker": "1", "src_text": "Bye", "tgt_text": "Пока" },
+            ]
+        });
+        let heard = transcript(&project, &json!({ "format": "text" }));
+        assert_eq!(heard["text"], "[1:00.0 SPK 0] Hello\n[1:02.0 SPK 1] Bonjour\n[1:03.0 SPK 1] Bye");
+        let burned = transcript(&project, &json!({ "text": "tgt" }));
+        let texts: Vec<&str> = burned["lines"].as_array().unwrap().iter().map(|line| line["text"].as_str().unwrap()).collect();
+        assert_eq!((texts, burned["language"].as_str()), (vec!["Привет", "До встречи"], Some("ru")));
     }
 
     #[test]

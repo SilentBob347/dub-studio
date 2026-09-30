@@ -40,7 +40,7 @@ function ServerKey({ url, typedUrl }: { url: string; typedUrl: string }) {
     <div>
       <div className="text-[11px] text-[var(--color-muted)] mb-0.5">{t("providers.serverKey")}</div>
       <div className="flex gap-2">
-        <input type={show ? "text" : "password"} value={key} onChange={(e) => setKey(e.target.value)} disabled={configured === null}
+        <input type={show ? "text" : "password"} data-mcp-secret value={key} onChange={(e) => setKey(e.target.value)} disabled={configured === null}
           placeholder={configured ? t("providers.serverKeySaved") : t("providers.serverKeyPlaceholder")} aria-label={t("providers.serverKey")}
           autoComplete="off" spellCheck={false} className={fieldCls} />
         <button onClick={() => setShow((s) => !s)} aria-label={show ? t("secrets.hide") : t("secrets.show")} title={show ? t("secrets.hide") : t("secrets.show")}

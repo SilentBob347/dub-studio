@@ -9,6 +9,7 @@ import { Stage, Layer, Rect, Line, Transformer } from "react-konva";
 import type Konva from "konva";
 import { api, type Project } from "../lib/api";
 import { useStore } from "../store";
+import { FRAME_SHOWN } from "./editorBridge";
 
 type Lane = "subs" | "blur" | "titles";
 type Props = { pid: string; project: Project; scrub: number; rendered: boolean; lane: Lane; playing?: boolean; onChanged: (fresh: Project) => void };
@@ -117,7 +118,8 @@ export default function PreviewCanvas({ pid, project, scrub, rendered, lane, pla
       <div className="relative" style={{ width: disp.w, height: disp.h }}>
         {rendered
           ? <video src={previewSrc} controls className="absolute inset-0 w-full h-full rounded-lg" />
-          : <img src={imgSrc} alt={t("preview.frameAlt")} onLoad={onFrameSettled} onError={onFrameSettled}
+          : <img src={imgSrc} alt={t("preview.frameAlt")} data-preview-frame=""
+                 onLoad={() => { onFrameSettled(); window.dispatchEvent(new CustomEvent(FRAME_SHOWN)); }} onError={onFrameSettled}
                  className="absolute inset-0 w-full h-full rounded-lg" />}
         {!rendered && disp.w > 0 && (
           <Stage width={disp.w} height={disp.h} className="absolute inset-0"

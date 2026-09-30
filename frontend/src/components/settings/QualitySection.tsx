@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import { AudioLines, Captions, Clock, Mic2, Sparkles, Star, Timer } from "lucide-react";
 import { api } from "../../lib/api";
 import SettingSwitch from "./SettingSwitch";
+import { useChanged } from "../editorBridge";
+import { SETTINGS_CHANGED } from "../../lib/mcpBridge";
 
 // Тумблеры качества — слоты active.json. defaultOn: слот, которого ещё нет в файле, считается включённым.
 const VOICE = [
@@ -29,12 +31,14 @@ export default function QualitySection() {
   const [sel, setSel] = useState<Selection | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reread, setReread] = useState(0);
+  useChanged(SETTINGS_CHANGED, () => setReread((n) => n + 1));
 
   useEffect(() => {
     api.capabilities()
       .then((c) => setSel(c.selection ?? {}))
       .catch((e: unknown) => setError(t("prefs.loadFailed", { error: e instanceof Error ? e.message : String(e) })));
-  }, [t]);
+  }, [t, reread]);
 
   const toggle = async (row: Row) => {
     if (!sel || saving) return;

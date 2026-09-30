@@ -3,7 +3,40 @@ import type en from "../locales/en.json";
 // Dub Studio API client — talks to the single-worker FastAPI backend over the dub-engine.
 // dev: Vite (5173) -> dub-server (8793, DUB_STUDIO_PORT). desktop/portable: the server serves the SPA
 // itself, so calls are same-origin (""). VITE_API overrides both.
-const BASE = (import.meta.env.VITE_API as string | undefined) ?? (import.meta.env.DEV ? "http://127.0.0.1:8793" : "");
+export const BASE = (import.meta.env.VITE_API as string | undefined) ?? (import.meta.env.DEV ? "http://127.0.0.1:8793" : "");
+
+/** This window's mark: the studio tells the changes the window made itself apart from an agent's or another window's. */
+export const WINDOW_ID = crypto.randomUUID();
+
+// Ревизия копии проекта в окне: её называет заголовок ответов, которые и есть проект (GET, PATCH, PUT).
+const revisions = new Map<string, number>();
+const REV_HEADER = "x-project-rev";
+const PROJECT_ROUTE = /^\/projects\/([A-Za-z0-9]+)(\/|$)/;
+
+/** The revision the window's copy of a project is at, as far as it knows. */
+export function projectRev(pid: string): number | undefined {
+  return revisions.get(pid);
+}
+
+/**
+ * Every request of this module goes through here instead of the global fetch: it carries the window's mark,
+ * a whole-project PUT carries the revision its state was taken at - the one it names itself, or the latest the
+ * window knows (the studio refuses it when someone else saved the project after that revision) - and the
+ * revision an answer shows is remembered.
+ */
+function fetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("x-dub-window", WINDOW_ID);
+  const path = new URL(input, window.location.href).pathname;
+  const pid = PROJECT_ROUTE.exec(path)?.[1];
+  const known = pid === undefined ? undefined : revisions.get(pid);
+  if (pid !== undefined && known !== undefined && init.method === "PUT" && path === `/projects/${pid}` && !headers.has(REV_HEADER)) headers.set(REV_HEADER, String(known));
+  return globalThis.fetch(input, { ...init, headers }).then((r) => {
+    const rev = r.headers.get(REV_HEADER);
+    if (pid !== undefined && r.ok && rev !== null) revisions.set(pid, Number(rev));
+    return r;
+  });
+}
 
 export type SubStyle = {
   color: string; outline: string; italic: boolean; bold: boolean; uppercase: boolean;
@@ -188,6 +221,8 @@ function _chain<T>(run: () => Promise<T>): Promise<T> {
   _patchChain = _patchChain.then(run, run);
   return _patchChain as Promise<T>;
 }
+/** Resolves once the window's queued edits of projects have been answered. */
+export const editsSettled = (): Promise<void> => _patchChain.then(() => undefined, () => undefined);
 
 // Общие обёртки: GET/POST c JSON-телом -> j<T>. Убирают повтор fetch+headers+JSON.stringify.
 const getJson = <T>(path: string): Promise<T> => fetch(`${BASE}${path}`).then(j<T>);
@@ -334,8 +369,12 @@ export const api = {
   listProjects: () => getJson<{ projects: ProjectListing[] }>("/projects"),   // недавние/сохранённые проекты для экрана «Открыть»
   getProject: (pid: string) => getJson<Project>(`/projects/${pid}`),
   deleteProject: (pid: string) => fetch(`${BASE}/projects/${pid}`, { method: "DELETE" }).then(j<{ ok: boolean }>),   // удалить проект (стирает workspace/<pid>) — кнопка в «Недавних»
-  putProject: (pid: string, project: Project) =>   // undo/redo: serialize through the SAME chain as patch() (no race)
-    _chain(() => fetch(`${BASE}/projects/${pid}`, { method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(project) }).then(j<Project>)),
+  // undo/redo: та же очередь, что у patch(). base — ревизия, на которой снят снимок (без неё — последняя известная
+  // окну). Если после неё проект сохранял кто-то, кроме этого окна, сервер его не перезапишет: ApiError project_changed.
+  putProject: (pid: string, project: Project, base?: number) =>
+    _chain(() => fetch(`${BASE}/projects/${pid}`, {
+      method: "PUT", headers: base === undefined ? JSON_HEADERS : { ...JSON_HEADERS, [REV_HEADER]: String(base) }, body: JSON.stringify(project),
+    }).then(coded<Project>)),
   patch: (pid: string, edit: Record<string, unknown>) =>   // run after the previous patch settles (ok or failed)
     _chain(() => fetch(`${BASE}/projects/${pid}`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify(edit) }).then(j<Project>)),
   alignProject: (pid: string) => fetch(`${BASE}/projects/${pid}/align`, { method: "POST" }).then(j<{ job_id: string; project_id: string }>),

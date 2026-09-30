@@ -20,7 +20,7 @@ export default function ConfirmDialog({ title, message, confirmLabel, danger = f
   const titleId = useId();
   const messageId = useId();
 
-  const confirm = async () => {
+  const runConfirm = async () => {
     if (busy) return;
     setBusy(true);
     setError(null);
@@ -58,7 +58,7 @@ export default function ConfirmDialog({ title, message, confirmLabel, danger = f
             className="px-3.5 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] text-[13px] text-[var(--color-text)] hover:border-[#3a414c] disabled:opacity-40 transition-colors">
             {t("common.cancel")}
           </button>
-          <button ref={confirmRef} type="button" onClick={() => { void confirm(); }} disabled={busy}
+          <button ref={confirmRef} type="button" onClick={() => { void runConfirm(); }} disabled={busy}
             className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[13px] font-semibold disabled:opacity-60 transition ${danger ? "bg-[#ef4444] text-white hover:brightness-110" : "bg-[var(--color-accent)] text-[var(--color-on-accent)] hover:brightness-105"}`}>
             {busy && <Loader2 size={13} className="animate-spin" />}{confirmLabel}
           </button>

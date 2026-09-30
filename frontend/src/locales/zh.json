@@ -910,6 +910,73 @@
     "copied": "已复制",
     "failed": "无法读取智能体状态"
   },
+  "confirm": {
+    "title": "确定要这样做吗？"
+  },
+  "a11y": {
+    "close": "关闭",
+    "clearSelection": "取消选择",
+    "selectLine": "勾选此句",
+    "selectBlur": "勾选此模糊区域",
+    "selectTitle": "勾选此标题",
+    "deleteBlur": "删除此模糊区域",
+    "removeLang": "移除此语言",
+    "lanes": "编辑器轨道"
+  },
+  "montage": {
+    "split": "在播放头处切分此句",
+    "mergeNext": "与下一句合并"
+  },
+  "bridge": {
+    "agent": "智能体",
+    "changedByAgent": "智能体修改了项目；撤销从此处开始",
+    "changedByApi": "其他程序修改了项目；撤销从此处开始",
+    "changedByWindow": "项目在另一个窗口中被修改；撤销从此处开始",
+    "changedWhileAway": "窗口断开期间项目发生了变化；撤销从此处开始",
+    "undoRefused": "未应用：智能体或另一个窗口在此之后保存了项目。现显示当前项目",
+    "syncFailed": "无法读取更改：{{error}}",
+    "jobStarted": "智能体已开始：{{kind}}",
+    "jobDone": "完成：{{kind}}",
+    "jobFailed": "失败：{{kind}}：{{error}}",
+    "job": {
+      "resume": "继续任务",
+      "other": "任务"
+    },
+    "do": {
+      "screenshot": "查看窗口",
+      "click": "点击「{{name}}」",
+      "type": "在「{{name}}」中输入",
+      "select": "在「{{name}}」中选择",
+      "press_key": "按下按键",
+      "scroll": "滚动页面",
+      "navigate": "打开界面",
+      "open_settings": "打开设置",
+      "open_help": "打开帮助",
+      "editor_open": "打开项目",
+      "editor_frame": "查看画面",
+      "editor_seek": "移动播放头",
+      "editor_select": "为你展示一个片段",
+      "editor_play": "播放配音",
+      "editor_pause": "暂停",
+      "editor_lane": "切换轨道",
+      "editor_segment_update": "编辑一句",
+      "editor_segment_add": "添加一句",
+      "editor_segments_delete": "删除句子",
+      "editor_segment_split": "将一句切成两句",
+      "editor_segments_merge": "合并句子",
+      "editor_segment_move": "在时间线上移动一句",
+      "editor_mode": "切换模式",
+      "editor_style": "修改字幕样式",
+      "editor_preset": "应用字幕预设",
+      "editor_blur_add": "添加模糊区域",
+      "editor_blur_update": "修改模糊区域",
+      "editor_title_add": "添加标题",
+      "editor_title_update": "修改标题",
+      "editor_undo": "撤销编辑",
+      "editor_redo": "重做编辑",
+      "editor_export": "开始导出"
+    }
+  },
   "jobs": {
     "fromCache": "来自缓存",
     "continue": "继续",

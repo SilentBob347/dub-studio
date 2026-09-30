@@ -922,6 +922,73 @@
     "copied": "Copied",
     "failed": "Could not read the agent's status"
   },
+  "confirm": {
+    "title": "Are you sure?"
+  },
+  "a11y": {
+    "close": "Close",
+    "clearSelection": "Clear the selection",
+    "selectLine": "Tick this line",
+    "selectBlur": "Tick this blur box",
+    "selectTitle": "Tick this title",
+    "deleteBlur": "Delete this blur box",
+    "removeLang": "Remove this language",
+    "lanes": "Editor lanes"
+  },
+  "montage": {
+    "split": "Cut the line at the playhead",
+    "mergeNext": "Join with the next line"
+  },
+  "bridge": {
+    "agent": "Agent",
+    "changedByAgent": "The agent changed the project; undo starts from here",
+    "changedByApi": "Another program changed the project; undo starts from here",
+    "changedByWindow": "The project was changed in another window; undo starts from here",
+    "changedWhileAway": "The project changed while the window was away; undo starts from here",
+    "undoRefused": "Not applied: the agent or another window saved the project after this state. The current project is shown",
+    "syncFailed": "Could not read the change: {{error}}",
+    "jobStarted": "The agent started: {{kind}}",
+    "jobDone": "Done: {{kind}}",
+    "jobFailed": "Failed: {{kind}}: {{error}}",
+    "job": {
+      "resume": "resumed job",
+      "other": "a job"
+    },
+    "do": {
+      "screenshot": "looks at the window",
+      "click": "clicks «{{name}}»",
+      "type": "types into «{{name}}»",
+      "select": "chooses in «{{name}}»",
+      "press_key": "presses a key",
+      "scroll": "scrolls",
+      "navigate": "opens a screen",
+      "open_settings": "opens the settings",
+      "open_help": "opens the help",
+      "editor_open": "opens a project",
+      "editor_frame": "looks at the frame",
+      "editor_seek": "moves the playhead",
+      "editor_select": "shows you a part",
+      "editor_play": "plays the dub",
+      "editor_pause": "pauses",
+      "editor_lane": "switches the lane",
+      "editor_segment_update": "edits a line",
+      "editor_segment_add": "adds a line",
+      "editor_segments_delete": "deletes lines",
+      "editor_segment_split": "cuts a line in two",
+      "editor_segments_merge": "joins lines",
+      "editor_segment_move": "moves a line on the timeline",
+      "editor_mode": "switches the mode",
+      "editor_style": "restyles the subtitles",
+      "editor_preset": "applies a subtitle preset",
+      "editor_blur_add": "adds a blur box",
+      "editor_blur_update": "changes a blur box",
+      "editor_title_add": "adds a title",
+      "editor_title_update": "changes a title",
+      "editor_undo": "undoes an edit",
+      "editor_redo": "redoes an edit",
+      "editor_export": "starts the export"
+    }
+  },
   "jobs": {
     "fromCache": "from cache",
     "continue": "Continue",

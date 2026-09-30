@@ -934,6 +934,73 @@
     "copied": "Copié",
     "failed": "Impossible de lire l'état de l'agent"
   },
+  "confirm": {
+    "title": "Êtes-vous sûr ?"
+  },
+  "a11y": {
+    "close": "Fermer",
+    "clearSelection": "Effacer la sélection",
+    "selectLine": "Cocher cette réplique",
+    "selectBlur": "Cocher cette zone de flou",
+    "selectTitle": "Cocher ce titre",
+    "deleteBlur": "Supprimer cette zone de flou",
+    "removeLang": "Retirer cette langue",
+    "lanes": "Pistes de l’éditeur"
+  },
+  "montage": {
+    "split": "Couper la réplique à la tête de lecture",
+    "mergeNext": "Fusionner avec la réplique suivante"
+  },
+  "bridge": {
+    "agent": "Agent",
+    "changedByAgent": "L’agent a modifié le projet ; l’annulation repart d’ici",
+    "changedByApi": "Un autre programme a modifié le projet ; l’annulation repart d’ici",
+    "changedByWindow": "Le projet a été modifié dans une autre fenêtre ; l’annulation repart d’ici",
+    "changedWhileAway": "Le projet a changé pendant que la fenêtre était déconnectée ; l’annulation repart d’ici",
+    "undoRefused": "Non appliqué : l’agent ou une autre fenêtre a enregistré le projet après cet état. Le projet actuel est affiché",
+    "syncFailed": "Impossible de lire la modification : {{error}}",
+    "jobStarted": "L’agent a lancé : {{kind}}",
+    "jobDone": "Terminé : {{kind}}",
+    "jobFailed": "Échec : {{kind}} : {{error}}",
+    "job": {
+      "resume": "tâche reprise",
+      "other": "une tâche"
+    },
+    "do": {
+      "screenshot": "regarde la fenêtre",
+      "click": "clique sur « {{name}} »",
+      "type": "écrit dans « {{name}} »",
+      "select": "choisit dans « {{name}} »",
+      "press_key": "appuie sur une touche",
+      "scroll": "fait défiler",
+      "navigate": "ouvre un écran",
+      "open_settings": "ouvre les réglages",
+      "open_help": "ouvre l’aide",
+      "editor_open": "ouvre un projet",
+      "editor_frame": "regarde l’image",
+      "editor_seek": "déplace la tête de lecture",
+      "editor_select": "vous montre un passage",
+      "editor_play": "lit le doublage",
+      "editor_pause": "met en pause",
+      "editor_lane": "change de piste",
+      "editor_segment_update": "modifie une réplique",
+      "editor_segment_add": "ajoute une réplique",
+      "editor_segments_delete": "supprime des répliques",
+      "editor_segment_split": "coupe une réplique en deux",
+      "editor_segments_merge": "fusionne des répliques",
+      "editor_segment_move": "déplace une réplique sur la timeline",
+      "editor_mode": "change de mode",
+      "editor_style": "change le style des sous-titres",
+      "editor_preset": "applique un préréglage de sous-titres",
+      "editor_blur_add": "ajoute une zone de flou",
+      "editor_blur_update": "modifie une zone de flou",
+      "editor_title_add": "ajoute un titre",
+      "editor_title_update": "modifie un titre",
+      "editor_undo": "annule une modification",
+      "editor_redo": "rétablit une modification",
+      "editor_export": "lance l’export"
+    }
+  },
   "jobs": {
     "fromCache": "depuis le cache",
     "continue": "Reprendre",

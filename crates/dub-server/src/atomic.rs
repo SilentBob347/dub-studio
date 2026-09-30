@@ -115,7 +115,7 @@ fn write_json(path: &Path, value: &Value) -> Result<(), String> {
 /// computer, read where it lies. With a key, the project an agent made earlier of the same file
 /// (same path, size and change time) for the same key is answered instead of a new one.
 pub async fn from_path(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
-    match tokio::task::spawn_blocking(move || make(&st, &body)).await {
+    match tokio::task::spawn_blocking(crate::mcp::carry(move || make(&st, &body))).await {
         Ok(Ok(answer)) => Json(answer).into_response(),
         Ok(Err((status, why))) => (status, why).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("from-path: {e}")).into_response(),

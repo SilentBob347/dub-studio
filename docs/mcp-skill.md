@@ -1,6 +1,6 @@
 ---
 name: dub-studio
-description: Drive Dub Studio on this computer through its MCP server - dub a video into another language with the speakers' own cloned voices, make a voice-over, translated or original-language subtitles, or a transcript; get a file's transcript, translated subtitles, dubbed video, voice and background apart or on-screen text in one call; fix the translation, the timing and the speakers line by line; restyle the subtitles, add titles and blur boxes; cast the characters of a series and give them library voices; export the same video in several languages; export SRT or TXT; save the result to a folder. Use whenever the user asks for anything the studio does.
+description: Drive Dub Studio on this computer through its MCP server - dub a video into another language with the speakers' own cloned voices, make a voice-over, translated or original-language subtitles, or a transcript; get a file's transcript, translated subtitles, dubbed video, voice and background apart or on-screen text in one call; fix the translation, the timing and the speakers line by line; cut, join and move lines on the timeline; restyle the subtitles, add titles and blur boxes; cast the characters of a series and give them library voices; export the same video in several languages; export SRT or TXT; save the result to a folder - either at once with a result back, or in the studio's window while the user watches. Use whenever the user asks for anything the studio does.
 ---
 
 # Dub Studio through MCP
@@ -76,6 +76,16 @@ connected and the address to paste.
   destructive, so your client asks the user first.
 - **The OpenRouter key never comes back**: `settings_get` and `studio_capabilities` show
   only `or_key_set`, `openrouter_status` where the key comes from.
+- **Two ways to do a thing.** The tools above do it at once and answer the result - a
+  transcript (`project_transcript`), a fixed line, a render - with or without the window.
+  The `editor_*` and `ui_*` tools do the same in the studio's window while the user watches
+  (below). Use the window when the user wants to see it done or to learn how; use the atomic
+  tools for batches and for work nobody watches.
+- **The window keeps up with you.** Whatever you change with any tool, the open window reads
+  again at once: the lines, the lists, the settings, a job you started (its progress shows in
+  the window, a render in its Files panel). The window's undo never erases your edits or what
+  your jobs saved, even when the user started a job of their own meanwhile: after your change
+  its history starts again, and an undo made on an older state is refused.
 
 ## One call on a file, or work in the studio
 
@@ -191,6 +201,70 @@ voices. `settings_set` switches the stages: `or_llm_on`/`or_llm` (translation),
 for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` stores it
 (`proxy_settings_get` shows it, the password hidden).
 
+## Working in the window, in front of the user
+
+The studio's window is the second way in: `editor_*` tools work in its editor exactly as
+the user's clicks do - the list scrolls to the line, the line lights up, the frame and the
+timeline change - and every step is shown to the user as "Agent: ..." at the top of the
+window. They need the window open (the desktop app, or the studio's address in a browser);
+without it they answer that the window is not open, and everything else still works.
+
+- **Start**: `editor_open` with the project's `pid` (a transcript opens its transcript view,
+  where only `editor_state`, `editor_seek`, `editor_select`, `editor_play`, `editor_pause`
+  and `editor_mode` work). `editor_state` tells what the editor shows: the playhead, the
+  line under it, the selection, undo and redo, the export's status.
+- **Show**: `editor_select` a line (or a blur box, a title) - the lane switches, the
+  playhead moves there and it is highlighted; `editor_seek` moves the playhead and waits for
+  the frame; `editor_play` plays one line or from a moment, `editor_pause` stops;
+  `editor_frame` is the frame the user sees now; `editor_lane` switches the left lane.
+- **Edit**: `editor_segment_update` (text, timing, speaker, hidden, original voice),
+  `editor_segment_add`, `editor_segments_delete`; the montage: `editor_segment_split` cuts a
+  line at a moment (the playhead by default), `editor_segments_merge` joins neighbouring
+  lines, `editor_segment_move` moves a line along the timeline keeping its length. The look:
+  `editor_mode`, `editor_style`, `editor_preset`, `editor_blur_add`, `editor_blur_update`,
+  `editor_title_add`, `editor_title_update`. Each is one step of the window's undo:
+  `editor_undo`, `editor_redo`.
+- **Export**: `editor_export` starts the render as the Export button does; the user watches
+  it in the Files panel, and Explorer shows the file when it is done. `editor_state` shows
+  its status; `studio_wait until: render` waits for it.
+- **Anything else on screen**: `ui_read_page` lists the visible controls with refs (a line
+  of the transcript, a blur box, a title and a recent project each read as one line with its
+  controls and fields; a key or password field reads only as filled or empty, and is masked
+  in `ui_screenshot` too), `ui_click`, `ui_type`, `ui_select`, `ui_press_key` (Space plays,
+  Ctrl+Z undoes, Ctrl+K opens the command palette), `ui_scroll`; `ui_screenshot` is a picture
+  of the whole window; `ui_navigate`, `ui_open_settings`, `ui_open_help`; `ui_notify` tells
+  the user something; `ui_console` shows the page's errors. The control you click is
+  highlighted for the user.
+- **Confirmations are the page's own**: deleting a project or a saved cast asks in a dialog
+  of the page; `ui_read_page` lists it first. Click its confirm button only when the user
+  asked for the deletion.
+
+**Show the user how to fix a translation**
+
+1. `editor_open` with the pid; `ui_notify` what you are going to do.
+2. `project_transcript` with `text: tgt` (or `editor_state`) to find the line.
+3. `editor_select` it - the user sees the line and the frame; `editor_play` it.
+4. `editor_segment_update` with the new `tgt_text`; `editor_frame` to see the subtitle.
+5. `project_dub_audio` to voice the dirty lines (the window shows the progress), then
+   `editor_play` the line again.
+
+**Cut and join lines on the timeline**
+
+1. `editor_select` the line; `editor_seek` to the pause where it should be cut.
+2. `editor_segment_split` (the playhead is the moment; `tgt_text` and `tgt_text_2` give the
+   halves' translations), then `editor_segment_update` each half's speaker when two people
+   speak.
+3. `editor_segments_merge` for lines broken in the middle of a sentence;
+   `editor_segment_move` with `shift` for a line that starts too early or too late.
+4. `editor_play` the stretch; `editor_undo` if it sounds wrong.
+
+**Export while the user watches**
+
+1. `editor_state`: the project is open and nothing renders.
+2. `editor_export`; `ui_notify` that the render started.
+3. `studio_wait until: render`; `editor_state` shows the export done; `ui_notify` the
+   result, or `project_files` for the path.
+
 ## Tools by area
 
 - **studio**: `studio_status`, `studio_wait`, `studio_system` (card, video memory, RAM),
@@ -211,6 +285,7 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
   `local_server_models`, `local_server_key_status`, `local_server_key_set`, `local_server_key_delete`;
   the provider of each stage is `settings_set` `llm_provider` / `vision_provider` (local, server, openrouter).
 - **project**: `projects_list` (query, since, until), `project_create`, `project_get`,
+  `project_transcript` (the transcript without the window),
   `project_analyze`, `project_resume`, `project_retranslate`, `project_remix`,
   `project_align`, `project_dub_audio`, `project_render`, `project_export_lang`,
   `project_put`, `project_patch` (any edit by its op), `project_delete`,
@@ -220,7 +295,8 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
 - **files**: `project_files`, `project_export_text` (SRT, VTT, ASS, TXT, JSON),
   `project_save_output`, `project_open_output`, `project_reveal`.
 - **lines**: `segment_update`, `segment_add`, `segments_delete`, `segments_hide`,
-  `segments_keep_original`, `segments_reorder`, `segment_regen`, `segments_regen_all`.
+  `segments_keep_original`, `segments_reorder`, `segment_regen`, `segments_regen_all`,
+  `segment_split` (cut a line in two), `segments_merge` (join neighbours).
 - **what the project makes**: `project_mode_set`, `audio_output_set`,
   `subtitles_content_set`, `subtitles_burn_set`, `subtitles_position_set`,
   `translation_target_set`, `translation_style_set`, `rewrite_set`, `voice_set`,
@@ -232,3 +308,12 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
   `casting_library_save`, `casting_library_delete`, `casting_library_avatar`.
 - **voices**: `voices_list`, `voices_catalog`, `voice_download`, `voices_download_pack`,
   `voice_rename`, `voice_delete`, `voice_from_speaker`, `voice_slots_assign`.
+- **the window**: `ui_screenshot`, `ui_read_page`, `ui_click`, `ui_type`, `ui_select`,
+  `ui_press_key`, `ui_scroll`, `ui_navigate`, `ui_open_settings`, `ui_open_help`,
+  `ui_notify`, `ui_console`.
+- **the editor, in front of the user**: `editor_open`, `editor_state`, `editor_frame`,
+  `editor_seek`, `editor_select`, `editor_play`, `editor_pause`, `editor_lane`,
+  `editor_segment_update`, `editor_segment_add`, `editor_segments_delete`,
+  `editor_segment_split`, `editor_segments_merge`, `editor_segment_move`, `editor_mode`,
+  `editor_style`, `editor_preset`, `editor_blur_add`, `editor_blur_update`,
+  `editor_title_add`, `editor_title_update`, `editor_undo`, `editor_redo`, `editor_export`.
