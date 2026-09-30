@@ -38,6 +38,8 @@ import { useSetupStatus } from "./lib/useSetupStatus";
 import { useDownloadErrorText, useGpuReasonText } from "./lib/setupText";
 import { fmtBytes } from "./lib/format";
 import SubsAlignToggle from "./components/SubsAlignToggle";
+import UrlImport from "./components/UrlImport";
+import YtDlpTool from "./components/YtDlpTool";
 import LlmProviders from "./components/LlmProviders";
 import OpenRouterModelSelect, { OpenRouterCatalogRow } from "./components/OpenRouterModelSelect";
 
@@ -447,6 +449,7 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
         {rowOf("sortformer")}
       </Group>
       <Group label={t("settings.roleRuntime")}>{rowOf("onnxruntime")}{(selv("diar_backend") === "gpu" || selv("asr_backend") === "gpu") && rowOf("onnxruntime-gpu")}{(selv("diar_backend") === "gpu" || selv("asr_backend") === "gpu") && rowOf("cudnn")}{rowOf("ffmpeg")}{rowOf("cuda-runtime")}{rowOf("vcruntime")}{rowOf("ocr")}</Group>
+      <YtDlpTool installed={!!get("ytdlp")?.installed} row={rowOf("ytdlp")} />
       {/* Производительность / экономия RAM — ВИДИМЫЕ контролы (не авто-магия): против OOM на слабой памяти. */}
       <Group label={t("settings.perfTitle")}>
         {[
@@ -1174,6 +1177,7 @@ function DropZone() {
               )}
             </div>
           </div>
+          <UrlImport onOpen={(pid) => { void openProject(pid); }} />
           <div className="mt-3.5 flex items-center justify-center gap-2 text-[12px]">
             <Languages size={14} className="text-[var(--color-accent-2)]" />
             <Combobox value={src} onChange={chooseSrc}

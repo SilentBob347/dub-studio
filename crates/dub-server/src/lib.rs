@@ -47,8 +47,10 @@ mod studio_settings;
 mod subalign;
 mod subimport;
 mod translate;
+mod url_import;
 mod voice_slots;
 mod wavio;
+mod ytdlp;
 pub mod process_group;
 pub mod service;
 
@@ -180,6 +182,8 @@ pub struct AppState {
     pub voices_dir: PathBuf,
     /// Фоновая закачка компонентов (мимо GPU-очереди джоб; состояние — в /setup/status).
     pub downloads: downloads::Downloads,
+    /// Загрузки видео по ссылке (yt-dlp), тоже мимо GPU-очереди; состояние — в /url/fetches.
+    pub fetches: url_import::Fetches,
 }
 
 /// Корень моделей: env DUBENGINE_MODELS_ROOT, иначе <repo_root>/models.
@@ -310,6 +314,7 @@ impl AppState {
             .map(PathBuf::from)
             .unwrap_or_else(|_| repo_root.join("voices"));
         let downloads = downloads::Downloads::open(&repo_root);
+        let fetches = url_import::Fetches::open(&repo_root, &workspace);
         AppState {
             repo_root,
             workspace,
@@ -327,6 +332,7 @@ impl AppState {
             models_root: mroot,
             voices_dir,
             downloads,
+            fetches,
         }
     }
 
@@ -454,6 +460,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/voices", get(voices_list))
         .route("/presets", get(endpoints::presets))
         .route("/projects", post(create_project).get(list_projects))
+        // Видео по ссылке (yt-dlp): проба, загрузка в новый проект мимо GPU-очереди, сам инструмент и его обновление.
+        .route("/projects/from_url", post(url_import::create_from_url))
+        .route("/url/probe", get(url_import::probe_get).post(url_import::probe_post))
+        .route("/url/fetches", get(url_import::fetches_list))
+        .route("/url/fetches/{id}", get(url_import::fetch_get).delete(url_import::fetch_forget))
+        .route("/url/fetches/{id}/cancel", post(url_import::fetch_cancel))
+        .route("/url/fetches/{id}/resume", post(url_import::fetch_resume))
+        .route("/url/tool", get(url_import::tool_status))
+        .route("/url/tool/update", post(url_import::tool_update))
         .route(
             "/projects/{pid}",
             get(get_project).patch(patch_project).put(endpoints::put_project).delete(delete_project),
@@ -621,8 +636,11 @@ async fn setup_remove(State(st): State<AppState>, Json(body): Json<Value>) -> Re
     let root = st.repo_root.clone();
     let dl = st.downloads.clone();
     let res = tokio::task::spawn_blocking(move || {
-        let report = setup::remove_components(&root, &ids)?;
+        let mut report = setup::remove_components(&root, &ids)?;
         dl.forget_covering(&ids);
+        if ids.iter().any(|id| id == ytdlp::COMPONENT) {
+            report.errors.extend(ytdlp::remove_updates(&root));
+        }
         Ok::<_, setup::DlError>(report)
     })
     .await;
@@ -1289,9 +1307,14 @@ async fn casting_save(
     Json(json!({ "ok": true, "characters": chars })).into_response()
 }
 
-/// GET /voices/catalog — каталог доп-голосов (HF датасет Slait/russia_voices): имя, пол, URL-превью.
-async fn voices_catalog() -> Json<Value> {
-    Json(tokio::task::spawn_blocking(record::catalog).await.unwrap_or_else(|_| json!({ "voices": [] })))
+/// GET /voices/catalog — каталог доп-голосов (HF датасет Slait/russia_voices): имя, пол, URL-превью. Hugging Face
+/// не ответил — 502 {error, detail}.
+async fn voices_catalog() -> Response {
+    match tokio::task::spawn_blocking(record::catalog).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": "catalog_unavailable", "detail": e }))).into_response(),
+        Err(e) => join_failure(e),
+    }
 }
 
 /// POST /voices/get {name} — скачать один голос (mp3+txt) из датасета в каталог голосов.
@@ -1439,70 +1462,82 @@ async fn create_project(
     }
 
     // Создаём начальный project.json, чтобы проект сразу мог быть открыт в редакторе без вызова analyze
-    if let Ok(src_path_str) = tokio::fs::read_to_string(d.join("source.txt")).await {
-        let src_path = Path::new(src_path_str.trim());
-        let meta = match media::probe(src_path) {
-            Ok(m) => dub_core::Meta {
-                video: src_path.to_string_lossy().to_string(),
-                duration: m.duration,
-                width: m.width,
-                height: m.height,
-                fps: m.fps,
-                src_codec: m.src_codec,
-                extra: serde_json::Map::new(),
-            },
-            Err(_) => dub_core::Meta {
-                video: src_path.to_string_lossy().to_string(),
-                duration: 0.0,
-                width: 1920,
-                height: 1080,
-                fps: 30.0,
-                src_codec: String::new(),
-                extra: serde_json::Map::new(),
-            },
-        };
-
-        // Загрузить реплики из import_subs если они были переданы при создании
-        let mut segments = Vec::new();
-        for ext in ["srt", "ass", "ssa"] {
-            let sub_file = d.join(format!("import_subs.{ext}"));
-            if sub_file.is_file() {
-                if let Ok(txt) = std::fs::read_to_string(&sub_file) {
-                    let cues = subimport::parse(&txt, ext);
-                    for (i, c) in cues.into_iter().enumerate() {
-                        segments.push(dub_core::Segment {
-                            id: format!("seg_{}", i + 1),
-                            start: c.start,
-                            end: c.end,
-                            speaker: Some("0".to_string()),
-                            src_text: c.text.clone(),
-                            tgt_text: c.text,
-                            voice: None,
-                            dirty: true,
-                            ckpt: None,
-                            extra: serde_json::Map::new(),
-                        });
-                    }
-                }
-                break;
-            }
+    if d.join("source.txt").is_file() {
+        let dir = d.clone();
+        match tokio::task::spawn_blocking(move || write_initial_project(&dir)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+            Err(e) => return join_failure(e),
         }
-
-        let initial_proj = dub_core::Project {
-            meta,
-            mode: "nodub".to_string(),
-            tgt_lang: "ru".to_string(),
-            segments,
-            audio: dub_core::Audio::default(),
-            subs: dub_core::Subs::default(),
-            captions: dub_core::Captions::default(),
-            render: dub_core::Render::default(),
-            ..Default::default()
-        };
-        let _ = save_project_atomic(&d, &initial_proj);
     }
 
     Json(json!({ "project_id": pid, "filename": filename, "imported_subs": imported_subs })).into_response()
+}
+
+/// Начальный project.json проекта из его source.txt (и import_subs.*, если субтитры пришли вместе с видео): проект
+/// открывается в редакторе без analyze. Общий для загрузки файла и загрузки по ссылке.
+pub(crate) fn write_initial_project(d: &Path) -> Result<(), String> {
+    let src_path_str = std::fs::read_to_string(d.join("source.txt")).map_err(|e| format!("{}: {e}", d.join("source.txt").display()))?;
+    let src_path = Path::new(src_path_str.trim());
+    let meta = match media::probe(src_path) {
+        Ok(m) => dub_core::Meta {
+            video: src_path.to_string_lossy().to_string(),
+            duration: m.duration,
+            width: m.width,
+            height: m.height,
+            fps: m.fps,
+            src_codec: m.src_codec,
+            extra: serde_json::Map::new(),
+        },
+        Err(_) => dub_core::Meta {
+            video: src_path.to_string_lossy().to_string(),
+            duration: 0.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            src_codec: String::new(),
+            extra: serde_json::Map::new(),
+        },
+    };
+
+    // Загрузить реплики из import_subs если они были переданы при создании
+    let mut segments = Vec::new();
+    for ext in ["srt", "ass", "ssa"] {
+        let sub_file = d.join(format!("import_subs.{ext}"));
+        if sub_file.is_file() {
+            if let Ok(txt) = std::fs::read_to_string(&sub_file) {
+                let cues = subimport::parse(&txt, ext);
+                for (i, c) in cues.into_iter().enumerate() {
+                    segments.push(dub_core::Segment {
+                        id: format!("seg_{}", i + 1),
+                        start: c.start,
+                        end: c.end,
+                        speaker: Some("0".to_string()),
+                        src_text: c.text.clone(),
+                        tgt_text: c.text,
+                        voice: None,
+                        dirty: true,
+                        ckpt: None,
+                        extra: serde_json::Map::new(),
+                    });
+                }
+            }
+            break;
+        }
+    }
+
+    let initial_proj = dub_core::Project {
+        meta,
+        mode: "nodub".to_string(),
+        tgt_lang: "ru".to_string(),
+        segments,
+        audio: dub_core::Audio::default(),
+        subs: dub_core::Subs::default(),
+        captions: dub_core::Captions::default(),
+        render: dub_core::Render::default(),
+        ..Default::default()
+    };
+    save_project_atomic(d, &initial_proj)
 }
 
 // ─── GET /projects ──────────────────────────────────────────────────────────

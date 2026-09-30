@@ -44,7 +44,8 @@ connected and the address to paste.
   the required models are there.
 - **Long work is a job**: `project_analyze`, `project_dub_audio`, `project_render`,
   `project_export_lang`, `project_retranslate`, `project_remix`, `project_resume`,
-  `voices_download_pack`. Each answers a `job_id`; then `studio_wait`
+  `voices_download_pack`, and a download by link (`project_create_from_url`, whose
+  `fetch.id` is waited for the same way). Each answers a `job_id`; then `studio_wait`
   with it (or `until: analyze | dub_audio | render | export_lang | retranslate | remix |
   download | voices_pack | idle`) instead of polling. It returns within a minute (30 s by
   default, 55 at most) with how far the work got; call it again. `job_get` and `jobs_list`
@@ -88,6 +89,21 @@ connected and the address to paste.
 5. `project_render`; `studio_wait` with its `job_id`.
 6. `project_frame` at a moment with speech to see the burned-in subtitles.
 7. `project_save_output` into the folder the user wants; tell them the path.
+
+**Dub a video from a link**
+
+1. `url_tool_status`: the component `ytdlp` must be installed (`models_download` with
+   `ids: ["ytdlp"]` otherwise).
+2. `url_probe` with the `url`: the title, the length, the qualities and the site's
+   subtitles made by people (`subtitles`, apart from `auto_subtitles`). A refusal names its
+   code and a `hint`: a proxy for a geo block, `cookies` (the path of a cookies.txt) for an
+   age check, a members' video or a bot check.
+3. `project_create_from_url` with `url`, `quality` and, to take the site's subtitles as the
+   project's imported ones, `subs_lang`. It downloads in the background beside the jobs:
+   `studio_wait` with its `fetch.id` as `job_id`; the result names the `project_id`.
+   `url_fetch_cancel` stops it, `url_fetch_resume` continues an interrupted or failed one.
+4. Go on as in *Dub a video* from `project_analyze`. The user answers for their right to
+   the content.
 
 **Fix the translation and render again**
 
@@ -172,6 +188,10 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
   `project_align`, `project_dub_audio`, `project_render`, `project_export_lang`,
   `project_put`, `project_patch` (any edit by its op), `project_delete`,
   `project_waveform`, `project_frame`.
+- **videos by link** (yt-dlp): `url_probe`, `project_create_from_url` (in the background, wait
+  with `studio_wait`), `url_fetches_list`, `url_fetch_get`, `url_fetch_cancel`,
+  `url_fetch_resume`, `url_fetch_delete`, `url_tool_status`, `url_tool_update` (a newer
+  yt-dlp, checked against its release's SHA-256; it is checked once a day anyway).
 - **files**: `project_files`, `project_export_text` (SRT, TXT), `project_save_output`,
   `project_open_output`, `project_reveal`.
 - **lines**: `segment_update`, `segment_add`, `segments_delete`, `segments_hide`,

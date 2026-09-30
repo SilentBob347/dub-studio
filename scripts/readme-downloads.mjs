@@ -95,6 +95,7 @@ const NAMES = {
   "higgs-q6_k": "Higgs Audio v3 Q6_K",
   "higgs-q4_k_m": "Higgs Audio v3 Q4_K_M",
   "parakeet-fp32": "Parakeet-TDT 0.6B v3 fp32",
+  "parakeet-ultra": "Parakeet Ultra 0.6B fp32",
   "whisper-engine": "Whisper-Faster (faster-whisper standalone)",
   "whisper-cuda": "Whisper CUDA (cuBLAS 11, cuDNN 8)",
   "whisper-tiny": "Whisper tiny",
@@ -103,7 +104,7 @@ const NAMES = {
   "whisper-medium": "Whisper medium",
   "whisper-large-v3": "Whisper large-v3",
   "whisper-large-v3-turbo": "Whisper large-v3-turbo",
-  sortformer: "Sortformer v2",
+  sortformer: "Nemotron 3 Diarization",
   roformer: "Mel-Band Roformer voc_fv6 Q8_0",
   "roformer-q5": "Mel-Band Roformer voc_fv6 Q5_0",
   "roformer-q4": "Mel-Band Roformer voc_fv6 Q4_0",
@@ -114,6 +115,7 @@ const NAMES = {
   onnxruntime: "ONNX Runtime",
   "onnxruntime-gpu": "ONNX Runtime GPU (CUDA)",
   ffmpeg: "FFmpeg (static build)",
+  ytdlp: "yt-dlp + deno",
   "cuda-runtime": "CUDA runtime (cudart, cuBLAS, cuFFT)",
   cudnn: "cuDNN 9",
 };
@@ -133,7 +135,7 @@ function readManifest() {
     const delivery = p.match(/delivery: Delivery::(\w+)/)?.[1];
     const size = num(p.match(/delivery: Delivery::\w+,\s*(?:\/\/[^\n]*\n\s*)*size: ([\d_]+)/)?.[1] ?? "0");
     if (!id || !requirement || !delivery) throw new Error("cannot parse a manifest component: " + p.slice(0, 120));
-    const files = [...p.matchAll(/FileSpec \{ url: (?:"([^"]+)"|(\w+)), dest_rel: "([^"]+)", size: ([\d_]+), extract: Extract::(\w+) \}/g)].map((f) => {
+    const files = [...p.matchAll(/FileSpec \{ url: (?:"([^"]+)"|(\w+)), dest_rel: "([^"]+)", size: ([\d_]+), sha256: "[0-9a-f]{64}", extract: Extract::(\w+) \}/g)].map((f) => {
       const url = f[1] ?? consts[f[2]];
       if (!url) throw new Error(`unknown URL constant ${f[2]} in component ${id}`);
       return { url, destRel: f[3], size: num(f[4]), extract: f[5].toLowerCase() };

@@ -16,7 +16,7 @@
 //!   • модели — прямые файлы HF (higgs-q8_0/*, gemma-4 + mmproj, parakeet-tdt int8, nemotron 3
 //!     diarization, roformer voc_fv6-Q8_0);
 //!   • сайдкары/движки — zip-релизы GitHub (BSRoformer.cpp v0.1.0, llama.cpp b11146 win-cuda-13.4,
-//!     onnxruntime 1.28.2, ffmpeg BtbN) + audiocpp_engine.dll (HF);
+//!     onnxruntime 1.28.2, ffmpeg BtbN, deno 2.9.7) + audiocpp_engine.dll (HF) + yt-dlp.exe 2026.08.19;
 //!   • CUDA-runtime — PyPI-wheel'ы NVIDIA (cudart 13.4.92 / cublas 13.8.0.4 / cuDNN 9.27.0.42) + redist cuFFT
 //!     12.4.0.43, распаковка *.dll плоско;
 //!   • VC++ runtime + OCR-модели — БАНДЛ (кладутся в релиз рядом с exe, как VC++ в Higgs); не качаются,
@@ -175,6 +175,12 @@ const REDIST_CUFFT: &str = "https://developer.download.nvidia.com/compute/cuda/r
 // валидировал Purfview (cuBLAS 11.11.3.6 + cuDNN 8.9.7.29), но zip'ы у NVIDIA (WheelDlls тянет *.dll плоско).
 const REDIST_WHISPER_CUBLAS: &str = "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-11.11.3.6-archive.zip";
 const REDIST_WHISPER_CUDNN: &str = "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-8.9.7.29_cuda11-archive.zip";
+// GitHub: yt-dlp 2026.08.19 (yt-dlp/yt-dlp, SHA-256 из SHA2-256SUMS релиза) — загрузка видео по ссылке. Это опора:
+// более свежие версии ставит рядом ytdlp::update, при их провале работает эта.
+const GH_YTDLP: &str = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe";
+// GitHub: deno 2.9.7 (denoland/deno) — JS-рантайм, без которого yt-dlp не решает задачи YouTube (yt-dlp-ejs уже внутри
+// yt-dlp.exe; вики yt-dlp EJS: deno не ниже 2.3.0).
+const GH_DENO: &str = "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-pc-windows-msvc.zip";
 // Страница драйверов NVIDIA (кнопка «Открыть сайт» — драйвер DLL-кой не ставится).
 pub const NVIDIA_DRIVER_URL: &str = "https://www.nvidia.com/Download/index.aspx";
 
@@ -688,6 +694,23 @@ pub fn manifest() -> Vec<Component> {
                 FileSpec { url: GH_FFMPEG, dest_rel: "tools/ffmpeg/_ffmpeg.zip", size: 170_732_198, sha256: "b4da332540eaebc6939181b59e267f163dd57407ef6596f7f3452845921d1d91", extract: Extract::ZipPick },
             ],
             markers: &[Marker { rel: "tools/ffmpeg/ffmpeg.exe", expect: 0 }],
+            external_url: None,
+        },
+        Component {
+            id: "ytdlp",
+            name: "Загрузка по ссылке (yt-dlp + deno)",
+            purpose: "Скачать видео по ссылке (YouTube и другие сайты yt-dlp) в новый проект",
+            requirement: Requirement::Optional,
+            delivery: Delivery::Download,
+            size: 60_470_620,
+            files: &[
+                FileSpec { url: GH_YTDLP, dest_rel: "tools/yt-dlp/yt-dlp.exe", size: 17_840_399, sha256: "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a", extract: Extract::None },
+                FileSpec { url: GH_DENO, dest_rel: "tools/yt-dlp/_deno.zip", size: 42_630_221, sha256: "a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238", extract: Extract::ZipFlat },
+            ],
+            markers: &[
+                Marker { rel: "tools/yt-dlp/yt-dlp.exe", expect: 17_840_399 },
+                Marker { rel: "tools/yt-dlp/deno.exe", expect: 97_462_048 },
+            ],
             external_url: None,
         },
         // ── СИСТЕМНОЕ ────────────────────────────────────────────────────────
@@ -1965,7 +1988,7 @@ fn download_whole(
 }
 
 /// Потоковый SHA-256 файла блоками по 1 МиБ. None — остановлено (stop): пауза не ждёт конца хэширования 12 ГБ.
-fn sha256_file(path: &Path, stop: &dyn Fn() -> bool) -> std::io::Result<Option<String>> {
+pub(crate) fn sha256_file(path: &Path, stop: &dyn Fn() -> bool) -> std::io::Result<Option<String>> {
     use sha2::{Digest, Sha256};
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();
