@@ -1,3 +1,4 @@
+import i18n from "./i18n";
 // Dub Studio API client — talks to the single-worker FastAPI backend over the dub-engine.
 // dev: Vite (5173) -> backend (8765). portable build: FastAPI serves the SPA itself, so calls are
 // same-origin ("") and follow whatever 127.0.0.1:<port> the launcher picked. VITE_API overrides both.
@@ -198,6 +199,6 @@ export const api = {
         } catch (err) { es.close(); reject(err instanceof Error ? err : new Error(String(err))); }
       };
       // EventSource fires onerror on transient drops too (it auto-reconnects) — only give up once truly CLOSED
-      es.onerror = () => { if (es.readyState === EventSource.CLOSED) reject(new Error("SSE connection lost")); };
+      es.onerror = () => { if (es.readyState === EventSource.CLOSED) reject(new Error(i18n.t("common.streamLost"))); };
     }),
 };

@@ -318,7 +318,8 @@
     "error": "Erreur",
     "play": "Lecture",
     "pause": "Pause",
-    "check": "Vérifier"
+    "check": "Vérifier",
+    "streamLost": "Connexion au flux d'événements perdue"
   },
   "hotkeys": {
     "title": "Raccourcis clavier",

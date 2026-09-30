@@ -3,7 +3,7 @@ import type { Allow } from "./scanHardcoded";
 export const ALLOW: Allow = {
   tokens: new Set<string>([
     "OpenRouter", "GitHub", "Telegram", "Nerual Dreming", "ArtGeneration.me", "Нейро-Софт",
-    "Parakeet-TDT", "Whisper", "Montserrat", "GPU", "VRAM", "RAM", "VRAM ·",
+    "Parakeet-TDT", "OCR PP-OCR", "Whisper", "Montserrat", "GPU", "VRAM", "RAM", "VRAM ·",
     "SPK", "AA", "v", "dB", "px", "px/s", "(Ctrl+Z)", "(Ctrl+Shift+Z)",
     "http://user:pass@host:8080 · socks5://host:1080", "sk-or-v1-…",
     "Content-Type",

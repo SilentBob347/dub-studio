@@ -18,7 +18,7 @@ export type Allow = {
 const HUMAN_ATTRS = new Set(["title", "placeholder", "aria-label", "alt", "aria-description", "aria-placeholder", "label", "description", "hint", "tip", "tooltip", "caption", "heading"]);
 const CYR = /[Ѐ-ӿ]/;
 const LETTER = /\p{L}/u;
-const PROSE = /^[A-Z][a-z]+(?:[ ,'’-][A-Za-z][A-Za-z'’-]*)+[.!?…:]?$/;
+const PROSE = /^[A-Z][A-Za-z]*(?:[ ,'’-][A-Za-z][A-Za-z'’-]*)+[.!?…:]?$/;
 const PROP_NAMES = new Set(["label", "title", "text", "message", "msg", "description", "hint", "placeholder", "desc", "tip", "caption", "heading", "error"]);
 const MESSAGE_CALLS = /^(?:[\w$.]*\.)?(pushActivity|alert|confirm|prompt|setMsg|setErr|setError|setCap|setNotice|setStatus|surfaceErr)$/;
 const HEX_COLOR = /^#[0-9a-fA-F]{3,8}$/;
@@ -101,9 +101,12 @@ function flowsToJsxChild(n: ts.Node): boolean {
 
 export function scanFile(file: string, allow: Allow, used?: Set<string>): Violation[] {
   const rel = relative(SRC_DIR, file).replaceAll("\\", "/");
+  return scanSource(readFileSync(file, "utf8"), rel, allow, used);
+}
+
+export function scanSource(text: string, rel: string, allow: Allow, used?: Set<string>): Violation[] {
   if (allow.skipFiles.has(rel)) return [];
-  const text = readFileSync(file, "utf8");
-  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const sf = ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, true, rel.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
   const out: Violation[] = [];
   const cyrAllowed = allow.cyrillicFiles.has(rel);
   const add = (n: ts.Node, kind: string, value: string) => {
@@ -124,10 +127,11 @@ export function scanFile(file: string, allow: Allow, used?: Set<string>): Violat
     } else if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n)) {
       const v = n.text;
       if (HEX_COLOR.test(v.trim()) || (LETTER.test(v) && tokenOk(v))) { /* not text */ }
-      else if (!inConsoleOrImport(n) && !(ts.isStringLiteral(n) && ts.isJsxAttribute(n.parent) && !HUMAN_ATTRS.has(n.parent.name.getText()))) {
+      else if (!inConsoleOrImport(n)) {
         const attr = attrOf(n);
+        const technicalAttr = ts.isStringLiteral(n) && ts.isJsxAttribute(n.parent) && !HUMAN_ATTRS.has(n.parent.name.getText());
         if (CYR.test(v) && !cyrAllowed) add(n, "cyrillic", v);
-        else if (!inTCall(n) && LETTER.test(v)) {
+        else if (!technicalAttr && !inTCall(n) && LETTER.test(v)) {
           if (attr && HUMAN_ATTRS.has(attr) && !tokenOk(v)) add(n, `attr-${attr}`, v);
           else if (!attr && flowsToJsxChild(n) && !tokenOk(v)) add(n, "jsx-expr", v);
           else if (!attr && isPropValue(n) && !tokenOk(v)) add(n, "prop", v);

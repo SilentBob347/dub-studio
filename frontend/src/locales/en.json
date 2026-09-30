@@ -348,7 +348,8 @@
     "error": "Error",
     "play": "Play",
     "pause": "Pause",
-    "check": "Check"
+    "check": "Check",
+    "streamLost": "Event stream connection lost"
   },
   "hotkeys": {
     "title": "Keyboard shortcuts",

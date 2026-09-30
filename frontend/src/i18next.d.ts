@@ -5,5 +5,6 @@ declare module "i18next" {
   interface CustomTypeOptions {
     defaultNS: "t";
     resources: { t: typeof en };
+    strictKeyChecks: true;
   }
 }

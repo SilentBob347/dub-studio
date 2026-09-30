@@ -314,7 +314,8 @@
     "error": "错误",
     "play": "播放",
     "pause": "暂停",
-    "check": "检查"
+    "check": "检查",
+    "streamLost": "事件流连接已断开"
   },
   "hotkeys": {
     "title": "键盘快捷键",

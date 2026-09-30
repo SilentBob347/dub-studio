@@ -318,7 +318,8 @@
     "error": "Error",
     "play": "Reproducir",
     "pause": "Pausa",
-    "check": "Comprobar"
+    "check": "Comprobar",
+    "streamLost": "Se perdió la conexión con el flujo de eventos"
   },
   "hotkeys": {
     "title": "Atajos de teclado",

@@ -11,6 +11,7 @@ import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
 import { playSfx, sfxEnabled, setSfxEnabled } from "./lib/sfx";
 import ResourceMonitor from "./components/ResourceMonitor";
+import { GENDER_LABEL_KEY, genderKey } from "./lib/gender";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -2076,7 +2077,7 @@ function CastingPanel({ pid, characters, voices, onChange }: {
                   {/* Пол — бейдж поверх аватара. */}
                   {c.gender && (
                     <span className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-[color-mix(in_oklab,var(--color-surface)_75%,transparent)] backdrop-blur text-[var(--color-text)]">
-                      {t(`casting.gender.${c.gender}`, c.gender)}
+                      {t(GENDER_LABEL_KEY[genderKey(c.gender)])}
                     </span>
                   )}
                   {/* Образец голоса (#115): играть/стоп wav. Кнопка только если бэк отдал voice_sample_url. */}
