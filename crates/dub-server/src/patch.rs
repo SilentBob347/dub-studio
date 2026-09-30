@@ -137,7 +137,10 @@ fn op_subpos(p: &mut Project, edit: &Value) -> PatchResult {
 }
 
 /// mode — верхнеуровневый режим вывода. Порт api.set_mode:
-///   subtitles -> nodub + subs.translate; dub -> dub + subs.translate; funny -> dub + subs.translate + rewrite.
+///   subtitles -> nodub + subs.transcribe; dub, voiceover -> свой аудио-выход + subs.translate;
+///   transcribe -> transcribe + subs.transcribe; funny -> dub + subs.translate + rewrite.
+/// Язык субтитров, выбранный отдельно (subs_content), пресет не перебивает: «нет» — ни один пресет,
+/// «оба» и «оригинал» под дубляжем или закадром — dub, voiceover и funny.
 /// Помечает все сегменты dirty. ValueError (неизвестное значение) -> 400.
 fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
     let value = edit.get("value").and_then(|x| x.as_str()).unwrap_or_default();
@@ -146,9 +149,18 @@ fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
     // «subs=none всё равно прожигает субтитры» — через редактор). subs.mode остаётся под управлением
     // независимого subs_content-контрола, пресет задаёт лишь его дефолт, когда он НЕ «none».
     let keep_no_subs = p.subs.mode == "none";
+    // «Оригинал» в nodub/transcribe — собственный дефолт пресетов subtitles/transcribe, а не выбор под
+    // дубляж: при переходе к дубляжу он становится переводом. «Оба» ни один пресет не ставит.
+    let keep_dub_subs = p.subs.mode == "bilingual"
+        || (p.subs.mode == "transcribe" && matches!(p.mode.as_str(), "dub" | "voiceover"));
     let set_subs = |p: &mut Project, m: &str| {
         if !keep_no_subs {
             p.subs.mode = m.into();
+        }
+    };
+    let set_dub_subs = |p: &mut Project| {
+        if !keep_no_subs && !keep_dub_subs {
+            p.subs.mode = "translate".into();
         }
     };
     match value {
@@ -159,13 +171,13 @@ fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
         }
         "dub" => {
             p.mode = "dub".into();
-            set_subs(p, "translate");
+            set_dub_subs(p);
             p.audio.rewrite = None;
         }
         "voiceover" => {
             // закадровый: перевод+TTS поверх приглушённого оригинала (громкость — audio.voiceover_gain_db)
             p.mode = "voiceover".into();
-            set_subs(p, "translate");
+            set_dub_subs(p);
             p.audio.rewrite = None;
         }
         "transcribe" => {
@@ -176,7 +188,7 @@ fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
         }
         "funny" => {
             p.mode = "dub".into();
-            set_subs(p, "translate");
+            set_dub_subs(p);
             if p.audio.rewrite.is_none() {
                 p.audio.rewrite = Some("make it a funny, playful dub".into());
             }
@@ -849,6 +861,48 @@ mod tests {
         assert!(p.segments[0].dirty);
         let e = apply(&mut p, &json!({"op":"mode","value":"nope"})).unwrap_err();
         assert_eq!(e.0, 400);
+    }
+
+    #[test]
+    fn a_dub_mode_keeps_the_subtitle_language_chosen_for_the_dub() {
+        let mut p = proj_with_seg();
+        p.mode = "dub".into();
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"mode","value":"voiceover"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("voiceover", "bilingual"));
+
+        p.mode = "dub".into();
+        p.subs.mode = "transcribe".into();
+        apply(&mut p, &json!({"op":"mode","value":"funny"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("dub", "transcribe"));
+        apply(&mut p, &json!({"op":"mode","value":"voiceover"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe");
+
+        p.mode = "nodub".into();
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"mode","value":"dub"})).unwrap();
+        assert_eq!(p.subs.mode, "bilingual");
+
+        p.subs.mode = "none".into();
+        apply(&mut p, &json!({"op":"mode","value":"funny"})).unwrap();
+        assert_eq!(p.subs.mode, "none");
+    }
+
+    #[test]
+    fn a_dub_mode_after_the_subtitles_preset_shows_the_translation() {
+        let mut p = proj_with_seg();
+        p.subs.mode = "translate".into();
+        apply(&mut p, &json!({"op":"mode","value":"subtitles"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("nodub", "transcribe"));
+        apply(&mut p, &json!({"op":"mode","value":"dub"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("dub", "translate"));
+        apply(&mut p, &json!({"op":"mode","value":"transcribe"})).unwrap();
+        apply(&mut p, &json!({"op":"mode","value":"voiceover"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("voiceover", "translate"));
+
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"mode","value":"subtitles"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe", "пресет «Субтитры» — субтитры оригинала");
     }
 
     #[test]

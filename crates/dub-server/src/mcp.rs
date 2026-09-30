@@ -1312,7 +1312,7 @@ fn tools() -> &'static [Tool] {
             // ---------------------------------------------------------------- what the project makes
             Tool {
                 name: "project_mode_set",
-                description: "What the project makes: subtitles (the original audio with subtitles in its own language), dub, voiceover (the translation over the quieted original), transcribe (the transcript), funny (a playful dub). Subtitles switched off stay off. Every line becomes dirty.",
+                description: "What the project makes: subtitles (the original audio with subtitles in its own language), dub, voiceover (the translation over the quieted original), transcribe (the transcript), funny (a playful dub). Subtitles switched off stay off; dub, voiceover and funny show the translation unless the subtitles are bilingual or, over a dub or voiceover, in the original language, which they keep. Every line becomes dirty.",
                 schema: || object(json!({ "pid": pid(), "value": { "type": "string", "enum": ["subtitles", "dub", "voiceover", "transcribe", "funny"] }, "response_format": detail() }), &["pid", "value"]),
                 call: |args| edit(args, "mode"),
             },
