@@ -6,6 +6,7 @@ license.workspace = true
 description = "Перевод + vision (Gemma через dub-llm): порт dubengine/translate.py + ctx_translate.py"
 
 [dependencies]
+dub-core = { path = "../dub-core" }
 dub-llm = { path = "../dub-llm" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -14,6 +15,9 @@ regex = "1"
 base64 = "0.23"
 # hound — читать vocals.wav для нарезки аудио-контекстных окон (<=28с), как sf.read в питоне.
 hound = "3.5"
+
+[dev-dependencies]
+dub-llm = { path = "../dub-llm", features = ["test-support"] }
 
 [[example]]
 name = "translate_demo"

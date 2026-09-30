@@ -652,6 +652,8 @@ fn build_dub(
     regen_dub: bool,
     progress: &Progress,
 ) -> Result<PathBuf, String> {
+    let tts_view = crate::tts_text::synthesis_view(proj, progress);
+    let proj = &tts_view;
     let wd = &paths.work_dir;
     // Сегменты с непустым tgt (как в питоне: только строки с текстом синтезируются). Несём индекс в
     // ПОЛНОМ списке proj.segments — слот next.start считается по индексу i+1 полного списка (порт

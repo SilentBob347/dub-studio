@@ -26,6 +26,7 @@ mod llm_provider;
 mod openrouter;
 mod f0;
 mod frame;
+mod glossary_api;
 mod hw;
 mod presets;
 mod job_store;
@@ -47,6 +48,7 @@ mod studio_settings;
 mod subalign;
 mod subimport;
 mod translate;
+mod tts_text;
 mod voice_slots;
 mod wavio;
 pub mod process_group;
@@ -448,6 +450,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{pid}/casting/library", post(casting_library_save))
         .route("/casting/library/{slug}", delete(casting_library_delete))
         .route("/casting/library/{slug}/avatar", get(casting_library_avatar))
+        .route("/casting/library/{slug}/glossary", get(glossary_api::series_get).put(glossary_api::series_put))
         .route("/settings/launch", get(studio_settings::launch_get).patch(studio_settings::launch_patch))
         .route("/app/paths", get(studio_settings::app_paths))
         .route("/fonts", get(endpoints::fonts))
@@ -465,6 +468,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{pid}/render", post(render_project))
         .route("/projects/{pid}/export-lang", post(export_lang))   // клон+ре-перевод+рендер на другом языке (экспорт-уровень мультиязыка)
         .route("/projects/{pid}/retranslate", post(retranslate_project))   // #122: смена режима из транскрипта — перевод готовых сегментов БЕЗ ASR
+        .route("/projects/{pid}/glossary", get(glossary_api::project_get).put(glossary_api::project_put))
+        .route("/projects/{pid}/glossary/extract", post(glossary_api::extract))
         .route("/projects/{pid}/waveform", get(endpoints::waveform))
         .route("/projects/{pid}/preview", get(endpoints::preview))
         .route("/projects/{pid}/output", get(output))
@@ -1607,10 +1612,13 @@ async fn list_projects(State(st): State<AppState>) -> Response {
 
 async fn get_project(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> Response {
     match st.load_project(&pid) {
-        Ok(p) => match p.to_json() {
-            Ok(s) => ([("content-type", "application/json")], s).into_response(),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        },
+        Ok(mut p) => {
+            tts_text::annotate(&mut p);
+            match p.to_json() {
+                Ok(s) => ([("content-type", "application/json")], s).into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
+        }
         Err(resp) => resp,
     }
 }
@@ -1792,6 +1800,7 @@ async fn patch_project(
     if let Err(e) = save_project_atomic(&dir, &proj) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
+    tts_text::annotate(&mut proj);
     match proj.to_json() {
         Ok(s) => ([("content-type", "application/json")], s).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -2007,7 +2016,7 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
     let new_pid_res = pid.to_string();
     let out_res = paths.output.clone();
     let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
-        use dub_translate::{flat_run, Seg};
+        use dub_translate::{flat_run, flat_run_with, FlatOpts, Seg};
         clean_partials(&dst_for_job);
         let pj = dst_for_job.join("project.json");
         let text = std::fs::read_to_string(&pj).map_err(|e| e.to_string())?;
@@ -2041,7 +2050,10 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
                     Seg::new(src, spk)
                 })
                 .collect();
-            flat_run(client, &mut segs, "auto", &lang_c, spoken, &p.audio.translate_style).map_err(|e| format!("translate: {e}"))?;
+            let opts = FlatOpts { src: "auto", tgt: &lang_c, spoken, style: &p.audio.translate_style, glossary: &p.glossary };
+            flat_run_with(client, &mut segs, &opts, &mut |m: &str| progress(json!({ "type": "progress", "stage": "translate", "msg": m.trim() })))
+                .map_err(|e| format!("translate: {e}"))?;
+            p.glossary_fp = glossary_api::fingerprint(&p.glossary, &lang_c);
             for (s, sg) in p.segments.iter_mut().zip(segs) {
                 if !sg.tgt.trim().is_empty() {
                     s.tgt_text = sg.tgt;
@@ -2121,7 +2133,7 @@ async fn retranslate_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
     let pid_res = pid.to_string();
     let lang_c = lang.clone();
     let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
-        use dub_translate::{flat_run, Seg};
+        use dub_translate::{flat_run, flat_run_with, FlatOpts, Seg};
         let pj = dir_for_job.join("project.json");
         let text = std::fs::read_to_string(&pj).map_err(|e| e.to_string())?;
         let mut p = Project::from_json(&text).map_err(|e| e.to_string())?;
@@ -2170,8 +2182,10 @@ async fn retranslate_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
                 Seg::new(src, spk)
             })
             .collect();
-        flat_run(client, &mut segs, "auto", &lang_c, spoken, &p.audio.translate_style)
+        let opts = FlatOpts { src: "auto", tgt: &lang_c, spoken, style: &p.audio.translate_style, glossary: &p.glossary };
+        flat_run_with(client, &mut segs, &opts, &mut |m: &str| progress(json!({ "type": "progress", "stage": "translate", "msg": m.trim() })))
             .map_err(|e| format!("translate: {e}"))?;
+        p.glossary_fp = glossary_api::fingerprint(&p.glossary, &lang_c);
         for (s, sg) in p.segments.iter_mut().zip(segs) {
             if !sg.tgt.trim().is_empty() {
                 s.tgt_text = sg.tgt;

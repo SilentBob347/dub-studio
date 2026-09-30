@@ -138,6 +138,24 @@ pub enum Endpoint {
     OpenRouter,
 }
 
+/// Ответ модели и причина остановки (finish_reason как у OpenAI; пусто, если сервер её не назвал).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Completion {
+    pub text: String,
+    pub finish_reason: String,
+}
+
+/// Держит ли сервер ответ в JSON-схеме (response_format json_schema).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StructuredOutput {
+    /// Держит: свой llama-server (грамматика из схемы) или модель OpenRouter, заявившая structured_outputs.
+    Supported,
+    /// Не держит — модель OpenRouter без structured_outputs/response_format в каталоге.
+    Unsupported,
+    /// Неизвестно (свой OpenAI-совместимый сервер): пробовать, отказ 400 — не держит.
+    Untested,
+}
+
 /// Сколько токенов добавить к max_tokens модели, которая обязана думать: рассуждение считается в max_tokens.
 const REASONING_ROOM: u32 = 4096;
 /// Потолок max_tokens при повторе обрезанного ответа.
@@ -238,8 +256,22 @@ impl ChatClient {
         self.model.as_deref()
     }
 
-    /// Тело запроса для этого сервера.
-    fn body(&self, messages: &[Message], s: &Sampling, max_tokens: u32) -> Value {
+    /// Можно ли просить у сервера ответ по JSON-схеме.
+    pub fn structured_output(&self) -> StructuredOutput {
+        match self.endpoint {
+            Endpoint::LlamaServer => StructuredOutput::Supported,
+            Endpoint::OpenAiCompatible => StructuredOutput::Untested,
+            Endpoint::OpenRouter => {
+                let declared = self.profile.as_ref().is_some_and(|p| {
+                    p.supported_parameters.iter().any(|x| x == "structured_outputs" || x == "response_format")
+                });
+                if declared { StructuredOutput::Supported } else { StructuredOutput::Unsupported }
+            }
+        }
+    }
+
+    /// Тело запроса для этого сервера. schema — JSON-схема ответа (response_format json_schema).
+    fn body(&self, messages: &[Message], s: &Sampling, max_tokens: u32, schema: Option<&Value>) -> Value {
         let mut body = serde_json::Map::new();
         if let Some(m) = &self.model {
             body.insert("model".into(), json!(m));
@@ -258,11 +290,10 @@ impl ChatClient {
                 if let Some(rp) = s.repeat_penalty {
                     body.insert("repeat_penalty".into(), json!(rp));
                 }
-                if self.endpoint == Endpoint::LlamaServer {
-                    // enable_thinking=false — как Gemma4ChatHandler(enable_thinking=False): без него Gemma-4
-                    // сжигает max_tokens на reasoning_content, content пустой. Это специфика своего llama-server.
-                    body.insert("chat_template_kwargs".into(), json!({"enable_thinking": false}));
-                }
+                // enable_thinking=false — как Gemma4ChatHandler(enable_thinking=False): без него думающая модель
+                // сжигает max_tokens на рассуждение, и короткий ответ (слово глоссария) обрезается. Шаблон чата без
+                // этого флага его не читает; Ollama и LM Studio пропускают незнакомое поле.
+                body.insert("chat_template_kwargs".into(), json!({"enable_thinking": false}));
             }
             Endpoint::OpenRouter => {
                 // В облако — только то, что модель заявила в supported_parameters, под именами OpenRouter.
@@ -305,25 +336,40 @@ impl ChatClient {
         }
         body.insert("max_tokens".into(), json!(max_tokens));
         body.insert("stream".into(), json!(false));
+        if let Some(schema) = schema {
+            body.insert(
+                "response_format".into(),
+                json!({ "type": "json_schema", "json_schema": { "name": "answer", "strict": true, "schema": schema } }),
+            );
+            if self.endpoint == Endpoint::OpenRouter {
+                // Схему держит не каждый провайдер модели: только те, что принимают все параметры запроса.
+                body.insert("provider".into(), json!({ "require_parameters": true }));
+            }
+        }
         Value::Object(body)
     }
 
-    /// Один вызов /v1/chat/completions -> текст ассистента. Ретраит на сетевых/5xx/429-ошибках.
-    /// llama-server: content как есть (пустой ответ — не ошибка, <think> снимает вызывающий).
-    /// Свой сервер и OpenRouter: ответ без рассуждений; ответ, обрезанный лимитом токенов, повторяется
-    /// с удвоенным лимитом, затем — ошибка `CutShort`; промпт, обрезанный сервером, — ошибка `PromptCut`.
+    /// Один вызов /v1/chat/completions -> текст ассистента (см. `complete`).
     pub fn chat(&self, messages: &[Message], s: &Sampling) -> Result<String, LlmError> {
+        self.complete(messages, s, None).map(|c| c.text)
+    }
+
+    /// Один вызов /v1/chat/completions -> текст ассистента и finish_reason. Ретраит на сетевых/5xx/429-ошибках.
+    /// schema — ответ по JSON-схеме (response_format json_schema).
+    /// llama-server: content как есть (пустой ответ — не ошибка, <think> снимает вызывающий).
+    /// Свой сервер и OpenRouter: ответ без рассуждений; пустой ответ — ошибка `Api` с id модели; ответ,
+    /// обрезанный лимитом токенов, повторяется с удвоенным лимитом, затем — ошибка `CutShort`; промпт,
+    /// обрезанный сервером, — ошибка `PromptCut`.
+    pub fn complete(&self, messages: &[Message], s: &Sampling, schema: Option<&Value>) -> Result<Completion, LlmError> {
         let mut max_tokens = s.max_tokens;
         let mut cut_retries = if self.endpoint == Endpoint::LlamaServer { 0 } else { 1 };
         loop {
-            let body = self.body(messages, s, max_tokens);
+            let body = self.body(messages, s, max_tokens, schema);
             let answer = self.send(&body)?;
+            let finish = answer.pointer("/choices/0/finish_reason").and_then(Value::as_str).unwrap_or_default().to_string();
             if self.endpoint == Endpoint::LlamaServer {
-                return Ok(answer
-                    .pointer("/choices/0/message/content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string());
+                let text = answer.pointer("/choices/0/message/content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                return Ok(Completion { text, finish_reason: finish });
             }
             if self.endpoint == Endpoint::OpenAiCompatible {
                 let prompt_chars: usize = messages.iter().map(Message::text_chars).sum();
@@ -338,9 +384,13 @@ impl ChatClient {
             }
             let message = answer.pointer("/choices/0/message").cloned().unwrap_or(Value::Null);
             let text = crate::answer::content_of(&message);
-            let finish = answer.pointer("/choices/0/finish_reason").and_then(Value::as_str).unwrap_or_default();
             if finish != "length" {
-                return Ok(text);
+                if text.is_empty() {
+                    let model = self.model.as_deref().unwrap_or("?");
+                    let why = if finish.is_empty() { "без причины".to_string() } else { format!("finish_reason={finish}") };
+                    return Err(LlmError::Api(format!("модель {model} вернула пустой ответ ({why})")));
+                }
+                return Ok(Completion { text, finish_reason: finish });
             }
             if cut_retries == 0 || max_tokens >= MAX_TOKENS_CEILING {
                 let model = self.model.as_deref().unwrap_or("?");
@@ -375,7 +425,7 @@ impl ChatClient {
                     // 4xx (кроме 429) — не ретраим, это наша ошибка запроса.
                     let text = resp.text().unwrap_or_default();
                     if status.as_u16() != 429 && status.as_u16() < 500 {
-                        return Err(LlmError::Api(format!("{status}: {text}")));
+                        return Err(LlmError::Rejected { code: status.as_u16(), status: status.to_string(), body: text });
                     }
                     last_err = format!("{status}: {text}");
                 }
@@ -403,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn a_local_server_gets_its_model_and_key_without_llama_kwargs() {
+    fn a_local_server_gets_its_model_and_key_and_thinking_off() {
         let server = serve(vec![answer("<think>hm</think>1. Привет", "stop")]);
         let client = ChatClient::openai_compatible(&format!("{}/v1/", server.base()), "gemma3:12b", Some("secret".into())).unwrap();
         let out = client.chat(&[Message::user_text("ping")], &Sampling::new(0.2, 0.9, 32).top_k(20)).unwrap();
@@ -414,7 +464,64 @@ mod tests {
         let body = body_json(&request);
         assert_eq!(body["model"], "gemma3:12b");
         assert_eq!(body["top_k"], 20);
-        assert!(body.get("chat_template_kwargs").is_none());
+        assert_eq!(body["chat_template_kwargs"], json!({ "enable_thinking": false }));
+        assert!(body.get("response_format").is_none());
+    }
+
+    #[test]
+    fn an_empty_answer_of_a_remote_model_is_an_error_naming_it() {
+        let server = serve(vec![answer("", "stop")]);
+        let client = ChatClient::openai_compatible(&server.base(), "qwen3:8b", None).unwrap();
+        let error = client.chat(&[Message::user_text("ping")], &Sampling::new(0.2, 0.95, 50)).unwrap_err();
+        assert!(matches!(&error, LlmError::Api(text) if text.contains("qwen3:8b") && text.contains("пустой")), "{error}");
+
+        let cloud = serve(vec![answer("<think>only thoughts</think>", "stop")]);
+        let client = ChatClient::openrouter_at(&cloud.base(), "k", "vendor/m").unwrap();
+        let error = client.chat(&[Message::user_text("ping")], &Sampling::new(0.2, 0.95, 50)).unwrap_err();
+        assert!(matches!(&error, LlmError::Api(text) if text.contains("vendor/m")), "{error}");
+
+        let own = serve(vec![answer("", "stop")]);
+        let client = ChatClient::new(own.base()).unwrap();
+        assert_eq!(client.chat(&[Message::user_text("ping")], &Sampling::new(0.2, 0.95, 50)).unwrap(), "", "llama-server: as it was");
+    }
+
+    #[test]
+    fn a_json_schema_goes_as_response_format_and_the_finish_reason_comes_back() {
+        let schema = json!({ "type": "object", "properties": { "1": { "type": "string" } }, "required": ["1"], "additionalProperties": false });
+        let own = serve(vec![answer("{\"1\":\"Привет\"}", "stop")]);
+        let client = ChatClient::new(own.base()).unwrap();
+        assert_eq!(client.structured_output(), StructuredOutput::Supported);
+        let done = client.complete(&[Message::user_text("ping")], &Sampling::new(0.2, 0.95, 50), Some(&schema)).unwrap();
+        assert_eq!(done, Completion { text: "{\"1\":\"Привет\"}".into(), finish_reason: "stop".into() });
+        let body = body_json(&own.request(0));
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["schema"], schema);
+        assert!(body.get("provider").is_none());
+
+        let cloud = serve(vec![answer("{\"1\":\"Hola\"}", "stop")]);
+        let profile = ModelProfile { supported_parameters: vec!["structured_outputs".into(), "temperature".into()], ..ModelProfile::default() };
+        let client = ChatClient::openrouter_at(&cloud.base(), "k", "vendor/m").unwrap().with_profile(Some(profile));
+        assert_eq!(client.structured_output(), StructuredOutput::Supported);
+        client.complete(&[Message::user_text("ping")], &Sampling::new(0.2, 0.95, 50), Some(&schema)).unwrap();
+        let body = body_json(&cloud.request(0));
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(body["provider"], json!({ "require_parameters": true }));
+
+        let plain = ChatClient::openrouter_at(&cloud.base(), "k", "vendor/m").unwrap()
+            .with_profile(Some(ModelProfile { supported_parameters: vec!["temperature".into()], ..ModelProfile::default() }));
+        assert_eq!(plain.structured_output(), StructuredOutput::Unsupported);
+        assert_eq!(ChatClient::openrouter_at(&cloud.base(), "k", "vendor/m").unwrap().structured_output(), StructuredOutput::Unsupported);
+        assert_eq!(ChatClient::openai_compatible(&cloud.base(), "m", None).unwrap().structured_output(), StructuredOutput::Untested);
+    }
+
+    #[test]
+    fn a_refused_request_carries_its_status() {
+        let server = serve(vec![Reply::json(400, r#"{"error":"response_format is not supported"}"#)]);
+        let client = ChatClient::openai_compatible(&server.base(), "m", None).unwrap();
+        let error = client.chat(&[Message::user_text("ping")], &Sampling::new(0.2, 0.95, 50)).unwrap_err();
+        assert!(matches!(&error, LlmError::Rejected { code: 400, body, .. } if body.contains("response_format")), "{error}");
+        assert!(error.to_string().starts_with("api: 400"), "{error}");
+        assert_eq!(server.count(), 1, "a refusal is not retried");
     }
 
     #[test]

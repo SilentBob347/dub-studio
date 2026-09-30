@@ -132,6 +132,21 @@ connected and the address to paste.
 4. `casting_library_save` keeps the cast; the next episode's `project_analyze` with
    `casting: true` and `casting_ref` (a slug of `casting_library_list`) applies it.
 
+**Names and terms the same in every line and episode**
+
+1. `glossary_get`: the project's glossary (`stale: true` - the translation was made with another one).
+2. `glossary_extract` collects candidates from the text (a job: `studio_wait`, the entries are in its
+   result); `glossary_set` with `merge: true` adds the ones to keep. An entry has `term` and either
+   `translation` or `keep: true` (left as written); `pronunciation` changes only what the voice says,
+   `asr_fix` lists how speech recognition misspells the term (analysis corrects it).
+3. `project_retranslate` with the project's `tgt_lang` and `mode` translates again with the glossary.
+4. `series_glossary_set` with `merge: true` and the entries keeps them in a saved casting; the next
+   episode's `project_analyze` with that `casting_ref` adds them to its glossary. `series_glossary_get` reads it.
+
+A line whose `tts_skip` is set in `project_get` is not voiced: nothing is left to say once sound tags
+([music], (laughs), ♪…♪), speaker labels and markup are taken out; `tts_text` shows what the voice says
+when it differs from the translation.
+
 **A batch into one folder**
 
 For each file: `project_create`, `project_analyze`, `studio_wait`, `project_render`,
@@ -185,5 +200,7 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
   `blur_enable`.
 - **casting**: `casting_get`, `casting_update`, `casting_avatar`, `casting_library_list`,
   `casting_library_save`, `casting_library_delete`, `casting_library_avatar`.
+- **glossary**: `glossary_get`, `glossary_set`, `glossary_extract`, `series_glossary_get`,
+  `series_glossary_set`.
 - **voices**: `voices_list`, `voices_catalog`, `voice_download`, `voices_download_pack`,
   `voice_rename`, `voice_delete`, `voice_from_speaker`, `voice_slots_assign`.
