@@ -19,7 +19,7 @@ audiocpp = { path = "../audiocpp" }
 hound = "3"
 axum = { version = "0.8", features = ["multipart"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "fs"] }
 tokio = { workspace = true }
 tokio-stream = "0.1"
 futures-util = "0.3"
@@ -32,18 +32,19 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 mime_guess = "2"
 # setup-автозакачка: HTTPS-загрузка компонентов (rustls, без системного OpenSSL) + распаковка zip/wheel.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# rustls: собственный криптопровайдер reqwest (aws-lc-rs) и корни из системного хранилища сертификатов.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 # Многопоточная (aria2-style) загрузка byte-range'ами через ureq (метод Higgs-Ultimate). HF Xet-CAS отдаёт
 # 206 на Range-запросы с ureq-UA (reqwest/curl-UA душит 403). Параллельные диапазоны сатурируют канал HF CDN.
 ureq = { version = "3", features = ["socks-proxy"] }   # socks-proxy: без него socks5:// паникует «Enable feature socks-proxy»
-zip = { version = "3", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # монитор ресурсов: GPU через NVML, RAM/CPU через sysinfo.
-nvml-wrapper = "0.10"
-sysinfo = "0.32"
+nvml-wrapper = "0.13"
+sysinfo = "0.39"
 # запись голоса с микрофона (нативный cpal + hound-WAV).
-cpal = "0.15"
+cpal = "0.18"
 # нативный диалог выбора папки (импорт готовых моделей без докачки; на Windows — Win32, без GTK).
-rfd = "0.15"
+rfd = "0.17"
 # content-addressable per-stage кэш (analyze::cache): лёгкий, чистый хэш без C-зависимостей.
 # Префикс-хэш длинных wav (первые+последние N байт + размер) — быстрый ключ инвалидации стадий.
 blake3 = "1"

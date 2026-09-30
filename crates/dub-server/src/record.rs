@@ -26,18 +26,24 @@ pub fn level() -> f32 {
     f32::from_bits(peak_cell().load(Ordering::Relaxed))
 }
 
+/// Имя микрофона для UI и выбора: FriendlyName устройства (WASAPI).
+fn device_name(d: &cpal::Device) -> Option<String> {
+    use cpal::traits::DeviceTrait;
+    d.description().ok().map(|desc| desc.name().to_string())
+}
+
 /// Список микрофонов (первым — системный по умолчанию).
 pub fn input_devices() -> Vec<String> {
-    use cpal::traits::{DeviceTrait, HostTrait};
+    use cpal::traits::HostTrait;
     let host = cpal::default_host();
-    let def = host.default_input_device().and_then(|d| d.name().ok());
+    let def = host.default_input_device().and_then(|d| device_name(&d));
     let mut names = Vec::new();
     if let Some(n) = &def {
         names.push(n.clone());
     }
     if let Ok(devs) = host.input_devices() {
         for d in devs {
-            if let Ok(n) = d.name() {
+            if let Some(n) = device_name(&d) {
                 if Some(&n) != def.as_ref() {
                     names.push(n);
                 }
@@ -68,7 +74,7 @@ pub fn start(path: &std::path::Path, device: Option<String>) -> Result<(), Strin
             Some(name) => host
                 .input_devices()
                 .ok()
-                .and_then(|mut it| it.find(|d| d.name().map(|n| n == name).unwrap_or(false)))
+                .and_then(|mut it| it.find(|d| device_name(d).is_some_and(|n| n == name)))
                 .or_else(|| host.default_input_device()),
             None => host.default_input_device(),
         };
@@ -82,7 +88,7 @@ pub fn start(path: &std::path::Path, device: Option<String>) -> Result<(), Strin
         };
         let fmt = supported.sample_format();
         let ch = (supported.channels() as usize).max(1);
-        let sr = supported.sample_rate().0;
+        let sr = supported.sample_rate();
         let config: cpal::StreamConfig = supported.into();
         let spec = hound::WavSpec { channels: 1, sample_rate: sr, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
         let writer = match hound::WavWriter::create(&thread_path, spec) {
@@ -117,9 +123,9 @@ pub fn start(path: &std::path::Path, device: Option<String>) -> Result<(), Strin
         }
         let err_fn = |e| eprintln!("microphone stream error: {e}");
         let built = match fmt {
-            cpal::SampleFormat::F32 => device.build_input_stream(&config, cb!(f32, |s: f32| s), err_fn, None),
-            cpal::SampleFormat::I16 => device.build_input_stream(&config, cb!(i16, |s: i16| s as f32 / i16::MAX as f32), err_fn, None),
-            cpal::SampleFormat::U16 => device.build_input_stream(&config, cb!(u16, |s: u16| (s as f32 - 32768.0) / 32768.0), err_fn, None),
+            cpal::SampleFormat::F32 => device.build_input_stream(config, cb!(f32, |s: f32| s), err_fn, None),
+            cpal::SampleFormat::I16 => device.build_input_stream(config, cb!(i16, |s: i16| s as f32 / i16::MAX as f32), err_fn, None),
+            cpal::SampleFormat::U16 => device.build_input_stream(config, cb!(u16, |s: u16| (s as f32 - 32768.0) / 32768.0), err_fn, None),
             other => { let _ = ready_tx.send(Err(format!("формат {other:?} не поддержан"))); return; }
         };
         let stream = match built {

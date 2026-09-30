@@ -8,11 +8,11 @@ description = "Сайдкар llama-server (llama.cpp CUDA) + OpenAI-совме�
 [dependencies]
 # Блокирующий HTTP-клиент: тело джобы analyze синхронное (spawn_blocking), llama-server локальный —
 # rustls не нужен, хватает нативного стека. blocking = простой последовательный вызов /v1/chat/completions.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 
 [[example]]
 name = "llm_smoke"

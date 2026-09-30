@@ -12,7 +12,7 @@
 //! Higgs voiceclean.rs):
 //!   • модели — прямые файлы HF (higgs-q8_0/*, gemma-4 + mmproj, parakeet-tdt int8, sortformer, roformer
 //!     voc_fv6-Q8_0);
-//!   • сайдкары/движки — zip-релизы GitHub (BSRoformer.cpp, llama.cpp win-cuda-13.3, onnxruntime 1.24.2,
+//!   • сайдкары/движки — zip-релизы GitHub (BSRoformer.cpp, llama.cpp win-cuda-13.3, onnxruntime 1.28.2,
 //!     ffmpeg BtbN) + audiocpp_engine.dll (HF);
 //!   • CUDA-runtime — PyPI-wheel'ы NVIDIA (cudart 13.3.29 / cublas 13.6.0.2), распаковка *.dll плоско;
 //!   • VC++ runtime + OCR-модели — БАНДЛ (кладутся в релиз рядом с exe, как VC++ в Higgs); не качаются,
@@ -53,7 +53,7 @@ pub enum Extract {
     /// zip: отобрать конкретные файлы по имени листа (ffmpeg.exe/ffprobe.exe) и положить плоско в каталог.
     ZipPick,
     /// zip: распаковать ВЕСЬ архив с сохранением поддерева в каталог. Для onnxruntime — чтобы получить
-    /// `onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll` ровно там, где его ищет dub-asr::ensure_ort_dylib.
+    /// `onnxruntime-win-x64-1.28.2/lib/onnxruntime.dll` ровно там, где его ищет dub-asr::ensure_ort_dylib.
     ZipTree,
     /// wheel (zip): достать все *.dll плоско в каталог, затем удалить архив (CUDA runtime).
     WheelDlls,
@@ -132,14 +132,15 @@ const GH_BSROFORMER_ENGINE_CPU: &str =
 const GH_LLAMA_BUILD: &str = "b9966";
 const GH_LLAMA: &str =
     "https://github.com/ggml-org/llama.cpp/releases/download/b9966/llama-b9966-bin-win-cuda-13.3-x64.zip";
-// GitHub: onnxruntime 1.24.2 win-x64 (microsoft/onnxruntime) — строго 1.24.2 (rc.12 ABI; иначе дедлок).
+// GitHub: onnxruntime 1.28.2 win-x64 (microsoft/onnxruntime) — строго 1.28.x (ort rc.13 api-28; иначе дедлок).
 const GH_ORT: &str =
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip";
-// GitHub: onnxruntime 1.24.2 GPU-сборка под CUDA 13 (gpu_cuda13) — CUDA-EP для Parakeet/Sortformer на
-// GPU. Вариант cuda13 переиспользует наши _13-DLL (cudart/cublas), нужен только cuDNN 9 (WHEEL_CUDNN).
+    "https://github.com/microsoft/onnxruntime/releases/download/v1.28.2/onnxruntime-win-x64-1.28.2.zip";
+// GitHub: onnxruntime 1.28.2 GPU-сборка под CUDA 13 (gpu_cuda13) — CUDA-EP для Parakeet/Sortformer на
+// GPU. onnxruntime_providers_cuda.dll грузит cudart64_13/cublas64_13/cublasLt64_13 (cuda-runtime),
+// cudnn64_9 (WHEEL_CUDNN) и cufft64_12 (REDIST_CUFFT).
 // Содержит onnxruntime.dll(GPU) + onnxruntime_providers_cuda.dll + onnxruntime_providers_shared.dll.
 const GH_ORT_GPU: &str =
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-gpu_cuda13-1.24.2.zip";
+    "https://github.com/microsoft/onnxruntime/releases/download/v1.28.2/onnxruntime-win-x64-gpu_cuda13-1.28.2.zip";
 // GitHub: ffmpeg static win64 GPL (BtbN/FFmpeg-Builds) — тот же источник, что install.bat.
 const GH_FFMPEG: &str =
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
@@ -606,29 +607,29 @@ pub fn manifest() -> Vec<Component> {
         },
         Component {
             id: "onnxruntime",
-            name: "ONNX Runtime 1.24.2",
-            purpose: "Рантайм ASR/OCR/диаризации (строго 1.24.2)",
+            name: "ONNX Runtime 1.28.2",
+            purpose: "Рантайм ASR/OCR/диаризации (строго 1.28.x)",
             requirement: Requirement::Required,
             delivery: Delivery::Download,
-            size: 74_075_355,
+            size: 78_620_837,
             files: &[
-                FileSpec { url: GH_ORT, dest_rel: "models/runtime/_ort.zip", size: 74_075_355, extract: Extract::ZipTree },
+                FileSpec { url: GH_ORT, dest_rel: "models/runtime/_ort.zip", size: 78_620_837, extract: Extract::ZipTree },
             ],
             // dub-asr::ensure_ort_dylib ищет ровно этот путь под models/runtime.
-            markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll", expect: 0 }],
+            markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-1.28.2/lib/onnxruntime.dll", expect: 0 }],
             external_url: None,
         },
         Component {
             id: "onnxruntime-gpu",
-            name: "ONNX Runtime 1.24.2 GPU (CUDA)",
+            name: "ONNX Runtime 1.28.2 GPU (CUDA)",
             purpose: "CUDA-провайдер для диаризации/Parakeet на GPU (режим local_backend=gpu)",
             requirement: Requirement::Recommended,
             delivery: Delivery::Download,
-            size: 288_348_147,
+            size: 365_562_963,
             files: &[
-                FileSpec { url: GH_ORT_GPU, dest_rel: "models/runtime/_ort_gpu.zip", size: 288_348_147, extract: Extract::ZipTree },
+                FileSpec { url: GH_ORT_GPU, dest_rel: "models/runtime/_ort_gpu.zip", size: 365_562_963, extract: Extract::ZipTree },
             ],
-            markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-gpu-1.24.2/lib/onnxruntime.dll", expect: 0 }],
+            markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-gpu_cuda13-1.28.2/lib/onnxruntime.dll", expect: 0 }],
             external_url: None,
         },
         Component {
@@ -1586,7 +1587,7 @@ fn extract_zip_flat(zip_path: &Path, dir: &Path) -> Result<(), String> {
 }
 
 /// zip: отобрать нужные файлы (onnxruntime.dll, ffmpeg.exe/ffprobe.exe) и положить плоско в dir.
-/// onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll -> dir/onnxruntime.dll ; ffmpeg .../bin/*.exe -> dir/*.exe.
+/// onnxruntime-win-x64-1.28.2/lib/onnxruntime.dll -> dir/onnxruntime.dll ; ffmpeg .../bin/*.exe -> dir/*.exe.
 fn extract_zip_pick(zip_path: &Path, dir: &Path) -> Result<(), String> {
     let file = std::fs::File::open(zip_path).map_err(|e| format!("открыть {}: {e}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("не zip: {e}"))?;
