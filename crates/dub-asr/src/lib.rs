@@ -690,6 +690,41 @@ fn words_from_tokens(tokens: Vec<parakeet_rs::TimedToken>, offset: f64, clip_sec
         })
         .collect();
     out.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+    attach_punct(out)
+}
+
+fn is_closing_punct(w: &str) -> bool {
+    w.chars().all(|c| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | '…' | ')' | ']' | '}' | '%'))
+}
+
+fn is_opening_punct(w: &str) -> bool {
+    w.chars().all(|c| matches!(c, '(' | '[' | '{' | '¿' | '¡'))
+}
+
+/// parakeet-rs в режиме Words отдаёт знак препинания отдельным словом: закрывающий приклеивается к
+/// предыдущему слову, открывающий — к следующему; тайминги слова не меняются.
+fn attach_punct(words: Vec<Word>) -> Vec<Word> {
+    let mut out: Vec<Word> = Vec::with_capacity(words.len());
+    let mut opening = String::new();
+    for mut w in words {
+        if is_closing_punct(&w.word) {
+            if let Some(prev) = out.last_mut() {
+                prev.word.push_str(&w.word);
+                continue;
+            }
+        }
+        if is_opening_punct(&w.word) {
+            opening.push_str(&w.word);
+            continue;
+        }
+        if !opening.is_empty() {
+            w.word.insert_str(0, &std::mem::take(&mut opening));
+        }
+        out.push(w);
+    }
+    if let (false, Some(prev)) = (opening.is_empty(), out.last_mut()) {
+        prev.word.push_str(&opening);
+    }
     out
 }
 
@@ -934,7 +969,7 @@ mod diar_word_tests {
     #[test]
     fn zero_duration_word_gets_its_frame_not_clip_end() {
         let ws = words_from_tokens(
-            vec![tok(" Well", 6.0, 6.16), tok(".", 6.24, 6.24), tok(" ", 6.3, 6.3), tok(" Next", 7.0, 7.3)],
+            vec![tok(" Well", 6.0, 6.16), tok(" so", 6.24, 6.24), tok(" ", 6.3, 6.3), tok(" Next", 7.0, 7.3)],
             0.0,
             22.0,
         );
@@ -949,6 +984,30 @@ mod diar_word_tests {
         let ws = words_from_tokens(vec![tok("end.", 9.98, 9.98)], 100.0, 10.0);
         assert!((ws[0].start - 109.98).abs() < 1e-4);
         assert!((ws[0].end - 110.0).abs() < 1e-4, "кадр не выходит за конец клипа: {:?}", ws[0]);
+    }
+
+    #[test]
+    fn punctuation_joins_neighbour_words() {
+        let ws = words_from_tokens(
+            vec![
+                tok(" Where's", 0.5, 0.9),
+                tok(" uniform", 1.0, 1.6),
+                tok("?", 1.68, 1.76),
+                tok(" ¿", 2.0, 2.0),
+                tok(" Qué", 2.1, 2.4),
+                tok("?", 2.5, 2.5),
+                tok(" Bien", 3.0, 3.3),
+                tok(".", 3.4, 3.4),
+            ],
+            0.0,
+            10.0,
+        );
+        let got: Vec<&str> = ws.iter().map(|w| w.word.as_str()).collect();
+        assert_eq!(got, ["Where's", "uniform?", "¿Qué?", "Bien."]);
+        assert!((ws[1].end - 1.6).abs() < 1e-5, "тайминг слова не тянется к знаку: {:?}", ws[1]);
+        assert!((ws[2].start - 2.1).abs() < 1e-5, "открывающий знак не сдвигает начало слова: {:?}", ws[2]);
+        let seg = segment::segment_words(&ws, segment::SEG_MAX_GAP, segment::SEG_MAX_DUR);
+        assert_eq!(seg[0].text, "Where's uniform?");
     }
 
     #[test]
