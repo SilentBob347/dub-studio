@@ -118,7 +118,11 @@
     "packMissing": "（未找到语音包）",
     "addSpeakerDone_other": "{{count}} 句 → 新 SPK {{spk}}",
     "ageTeen": "青少年",
-    "ageChild": "儿童"
+    "ageChild": "儿童",
+    "errNoSeparation": "无法从说话人 {{spk}} 创建声音：此项目没有分离出的人声，且未安装人声分离引擎，声音会带有音乐。请在 {{settings}} → {{models}} → {{section}} 中安装。",
+    "errSeparation": "无法从说话人 {{spk}} 创建声音：从音乐中分离人声失败 — {{detail}}",
+    "errNoLines": "说话人 {{spk}} 没有可用于创建声音的台词",
+    "errFailed": "无法从说话人 {{spk}} 创建声音：{{detail}}"
   },
   "remix": {
     "title": "改编",

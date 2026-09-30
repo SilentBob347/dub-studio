@@ -120,7 +120,11 @@
     "addSpeakerDone_many": "{{count}} falas → novo SPK {{spk}}",
     "addSpeakerDone_other": "{{count}} falas → novo SPK {{spk}}",
     "ageTeen": "adolescente",
-    "ageChild": "criança"
+    "ageChild": "criança",
+    "errNoSeparation": "Não foi possível criar uma voz do falante {{spk}}: este projeto não tem a voz separada e o mecanismo de separação de voz não está instalado, então a voz levaria a música. Instale-o em {{settings}} → {{models}} → {{section}}.",
+    "errSeparation": "Não foi possível criar uma voz do falante {{spk}}: a separação da voz e da música falhou — {{detail}}",
+    "errNoLines": "O falante {{spk}} não tem falas para criar uma voz",
+    "errFailed": "Não foi possível criar uma voz do falante {{spk}}: {{detail}}"
   },
   "remix": {
     "title": "Remix",

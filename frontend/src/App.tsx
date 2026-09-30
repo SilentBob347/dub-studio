@@ -37,6 +37,7 @@ import RemoveComponent from "./components/RemoveComponent";
 import { useSetupStatus } from "./lib/useSetupStatus";
 import { useDownloadErrorText, useGpuReasonText } from "./lib/setupText";
 import { fmtBytes } from "./lib/format";
+import { makeSpeakerVoice } from "./lib/speakerVoice";
 import SubsAlignToggle from "./components/SubsAlignToggle";
 import LlmProviders from "./components/LlmProviders";
 import OpenRouterModelSelect, { OpenRouterCatalogRow } from "./components/OpenRouterModelSelect";
@@ -3357,7 +3358,7 @@ function Editor() {
                       <button key={spk} disabled={spkVoiceBusy !== null}
                         onClick={async () => {
                           setSpkVoiceBusy(spk);
-                          try { const r = await api.speakerVoice(pid!, spk, t("voice.speakerName", { spk })); if (r.ok) { setVoiceList(r.voices); branch("recast", { voice_mode: "voice", voice_name: r.name }); } } catch { /* ignore */ } finally { setSpkVoiceBusy(null); }
+                          try { const r = await makeSpeakerVoice(pid!, spk, t("voice.speakerName", { spk })); if (r) { setVoiceList(r.voices); branch("recast", { voice_mode: "voice", voice_name: r.name }); } else playSfx("error"); } finally { setSpkVoiceBusy(null); }
                         }}
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--color-border)] text-[12px] hover:border-[var(--color-accent)] disabled:opacity-40">
                         {spkVoiceBusy === spk ? <Loader2 size={12} className="animate-spin" /> : <AudioLines size={12} className="text-[var(--color-accent)]" />}SPK {spk}
@@ -4328,13 +4329,18 @@ function TranscriptView() {
 
   async function makeVoice(spk: string) {
     setBusy(spk);
-    try { const r = await api.speakerVoice(pid, spk, `${t("transcribe.speaker")} ${spk}`); if (r.ok) setMade((m) => ({ ...m, [spk]: r.name })); }
-    catch { /* ignore */ } finally { setBusy(null); }
+    try { const r = await makeSpeakerVoice(pid, spk, `${t("transcribe.speaker")} ${spk}`); if (r) setMade((m) => ({ ...m, [spk]: r.name })); }
+    finally { setBusy(null); }
   }
   async function makeAll() {
     setBusy("__all__");
-    try { for (const spk of speakers) { const r = await api.speakerVoice(pid, spk, `${t("transcribe.speaker")} ${spk}`); if (r.ok) setMade((m) => ({ ...m, [spk]: r.name })); } }
-    catch { /* ignore */ } finally { setBusy(null); }
+    try {
+      for (const spk of speakers) {
+        const r = await makeSpeakerVoice(pid, spk, `${t("transcribe.speaker")} ${spk}`);
+        if (!r) break;
+        setMade((m) => ({ ...m, [spk]: r.name }));
+      }
+    } finally { setBusy(null); }
   }
 
   async function dl(name: string, text: string) {

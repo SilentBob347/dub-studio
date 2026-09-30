@@ -18,8 +18,9 @@ release notes on GitHub are taken from the release's section.
   transcript is exactly the words it contains. Only when neither the analysis nor the render
   separated the voice does it come from the original mix, and the render log says so.
 - **Voices made from a speaker are full band too.** They are cut from the project's separated vocals
-  the same way; when the line cannot be separated from the music, making the voice fails with the
-  reason instead of saving it with the music.
+  the same way; when the line cannot be separated from the music, making the voice fails instead of
+  saving it with the music, and the status line says why: that the vocal separation engine is not
+  installed and where to install it, or what the engine answered.
 
 ### Fixed
 

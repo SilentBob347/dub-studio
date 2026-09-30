@@ -120,7 +120,11 @@
     "addSpeakerDone_many": "{{count}} líneas → nuevo SPK {{spk}}",
     "addSpeakerDone_other": "{{count}} líneas → nuevo SPK {{spk}}",
     "ageTeen": "adolescente",
-    "ageChild": "niño"
+    "ageChild": "niño",
+    "errNoSeparation": "No se pudo crear una voz del hablante {{spk}}: este proyecto no tiene la voz separada y el motor de separación de voz no está instalado, así que la voz llevaría la música. Instálalo en {{settings}} → {{models}} → {{section}}.",
+    "errSeparation": "No se pudo crear una voz del hablante {{spk}}: falló la separación de la voz y la música — {{detail}}",
+    "errNoLines": "El hablante {{spk}} no tiene frases para crear una voz",
+    "errFailed": "No se pudo crear una voz del hablante {{spk}}: {{detail}}"
   },
   "remix": {
     "title": "Remix",

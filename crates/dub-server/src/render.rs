@@ -1811,10 +1811,26 @@ fn ref_window(s: &dub_core::Segment, a: f64, b: f64) -> (f64, f64, Option<String
     }
 }
 
+/// Почему голос из реплики спикера не сделан. `NoSeparator` пользователь исправляет сам (ставит компонент
+/// сепарации), поэтому это отказ, а не сбой; в нём пути, которых нет.
+#[derive(Debug)]
+pub(crate) enum VoiceClipError {
+    NoSeparator(String),
+    Separation(String),
+    Io(String),
+}
+
+impl From<String> for VoiceClipError {
+    fn from(e: String) -> Self {
+        VoiceClipError::Io(e)
+    }
+}
+
 /// Голос из реплики спикера `s` («Сделать голос»): окно до `cap` с (ref_window) в `out` тем же форматом,
 /// что реф клона (media::trim_ref). Источник — вокал проекта в полной полосе (`wd/stems/vocals.wav`); без
-/// стемов реплика вырезается из `input` в 44.1 кГц стерео и сепарируется в `tmp` движком `sep`. Сбой
-/// сепарации — ошибка: голос с музыкой оригинала за очищенный не выдаётся. Возвращает текст окна.
+/// стемов реплика вырезается из `input` в 44.1 кГц стерео и сепарируется в `tmp` движком `sep`. Голос с
+/// музыкой оригинала за очищенный не выдаётся: без движка — отказ до вырезки, сбой сепарации — ошибка.
+/// Возвращает текст окна.
 pub(crate) fn speaker_voice_clip(
     s: &dub_core::Segment,
     cap: f64,
@@ -1823,18 +1839,22 @@ pub(crate) fn speaker_voice_clip(
     sep: (&Path, &Path),
     tmp: &Path,
     out: &Path,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, VoiceClipError> {
     let (a, b, text) = ref_window(s, s.start, s.end.min(s.start + cap));
     let stem = wd.join("stems").join("vocals.wav");
     if stem.is_file() {
         media::trim_ref(&stem, out, a, b)?;
         return Ok(text);
     }
+    let missing: Vec<String> = [sep.0, sep.1].iter().filter(|p| !p.is_file()).map(|p| p.display().to_string()).collect();
+    if !missing.is_empty() {
+        return Err(VoiceClipError::NoSeparator(missing.join(", ")));
+    }
     std::fs::create_dir_all(tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     let clip = tmp.join("cut44.wav");
     media::cut(input, &clip, a, b, 44_100, 2)?;
     let voc = dub_sep::separate(&clip, &tmp.join("stems"), sep.0, sep.1)
-        .map_err(|e| format!("сепарация реплики спикера: {e}"))?;
+        .map_err(|e| VoiceClipError::Separation(e.to_string()))?;
     media::trim_ref(&voc.vocals, out, 0.0, b - a)?;
     Ok(text)
 }
@@ -3122,16 +3142,38 @@ mod tests {
     }
 
     #[test]
+    fn speaker_voice_without_stems_or_separator_is_refused_before_cutting() {
+        let wd = scratch("spkvoice_noengine");
+        let input = wd.join("source.wav");
+        stereo_wav(&input, 44_100, 5.0);
+        let no_engine = wd.join("no-engine.exe");
+        let model = wd.join("model.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
+        let tmp = wd.join("_voicecut");
+        let out = wd.join("voice.wav");
+        match speaker_voice_clip(&seg("s0", 1.0, 3.0, "x"), 12.0, &wd, &input, (&no_engine, &model), &tmp, &out) {
+            Err(VoiceClipError::NoSeparator(missing)) => assert_eq!(missing, no_engine.display().to_string()),
+            other => panic!("ждали отказ без движка: {other:?}"),
+        }
+        assert!(!out.exists() && !tmp.exists(), "без движка реплика не вырезается и голос не пишется");
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
     fn speaker_voice_without_stems_fails_when_the_line_cannot_be_separated() {
         let wd = scratch("spkvoice_nosep");
         let input = wd.join("source.wav");
         stereo_wav(&input, 44_100, 5.0);
-        let no_engine = wd.join("no-engine.exe");
+        let broken = wd.join("broken-cli.exe");
+        std::fs::write(&broken, b"not an executable").unwrap();
+        let model = wd.join("model.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
         let tmp = wd.join("_voicecut");
         let out = wd.join("voice.wav");
-        let err = speaker_voice_clip(&seg("s0", 1.0, 3.0, "x"), 12.0, &wd, &input, (&no_engine, &no_engine), &tmp, &out)
-            .unwrap_err();
-        assert!(err.contains("сепарация реплики спикера"), "{err}");
+        match speaker_voice_clip(&seg("s0", 1.0, 3.0, "x"), 12.0, &wd, &input, (&broken, &model), &tmp, &out) {
+            Err(VoiceClipError::Separation(e)) => assert!(e.contains("запуск движка"), "{e}"),
+            other => panic!("ждали сбой сепарации: {other:?}"),
+        }
         assert!(!out.exists(), "голос с музыкой оригинала за очищенный не пишется");
         let r = hound::WavReader::open(tmp.join("cut44.wav")).unwrap();
         assert_eq!((r.spec().sample_rate, r.spec().channels), (44_100, 2), "на сепарацию реплика идёт в полной полосе");

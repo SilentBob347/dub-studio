@@ -220,7 +220,7 @@ async function coded<T>(r: Response): Promise<T> {
   if (body && typeof body.error === "string") throw new ApiError(body.error, typeof body.detail === "string" ? body.detail : "");
   throw new ApiError(`http_${r.status}`, text);
 }
-const sendCoded = <T>(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<T> =>
+const sendCoded = <T>(method: "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<T> =>
   fetch(`${BASE}${path}`, body === undefined ? { method } : { method, headers: JSON_HEADERS, body: JSON.stringify(body) }).then(coded<T>);
 const getCoded = <T>(path: string): Promise<T> => fetch(`${BASE}${path}`).then(coded<T>);
 
@@ -307,7 +307,7 @@ export const api = {
   voiceSampleUrl: (name: string) => `${BASE}/voices/sample?name=${encodeURIComponent(name)}`,   // прослушка выбранного голоса (<audio>)
   voicesRename: (from: string, to: string) => postJson<{ voices: string[] }>("/voices/rename", { from, to }),
   voicesDelete: (name: string) => postJson<{ voices: string[] }>("/voices/delete", { name }),
-  speakerVoice: (pid: string, speaker: string, name: string) => postJson<{ ok: boolean; name: string; voices: string[] }>(`/projects/${pid}/speaker-voice`, { speaker, name }),
+  speakerVoice: (pid: string, speaker: string, name: string) => sendCoded<{ ok: boolean; name: string; voices: string[] }>("POST", `/projects/${pid}/speaker-voice`, { speaker, name }),
   // Слоты голосов из библиотеки (#114): раздать голоса по спикерам по полу/приоритету. Пустые списки -> клон.
   voiceSlots: (pid: string, slots: { male: string[]; female: string[] }) =>
     postJson<{ ok: boolean; speakers: Record<string, { voice: string | null; gender: string | null; f0: number | null }> }>(`/projects/${pid}/voice-slots`, slots),

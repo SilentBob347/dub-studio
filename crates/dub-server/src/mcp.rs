@@ -1576,7 +1576,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "voice_from_speaker",
-                description: "Make a library voice of a project's speaker: their longest line (up to 12 s), cleaned of music, is saved in full band as the voice name with its words. Fails with the reason when the line cannot be separated from the music.",
+                description: "Make a library voice of a project's speaker: their longest line (up to 12 s), cleaned of music, is saved in full band as the voice name with its words. Refuses with no_separation (409) when the project has no separated vocals and the separation engine of the chosen backend is not installed (models_download roformer with bsroformer-engine, or bsroformer-engine-cpu); separation_failed says why separating the line failed.",
                 schema: || object(json!({ "pid": pid(), "speaker": { "type": "string", "description": "speaker id from project_get" }, "name": { "type": "string" } }), &["pid", "speaker", "name"]),
                 call: |args| post(project_path(args, "/speaker-voice")?, json!({ "speaker": text(args, "speaker")?, "name": text(args, "name")? })),
             },

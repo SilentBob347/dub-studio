@@ -820,7 +820,9 @@ async fn record_stop(State(st): State<AppState>) -> Json<Value> {
 
 /// POST /projects/{pid}/speaker-voice {speaker, name} — сделать голос из спикера: его длиннейшая
 /// реплика (<=12с) чистым вокалом в полной полосе → voices/<name>.wav (render::speaker_voice_clip).
-/// Порт «Сделать голос» Higgs.
+/// Порт «Сделать голос» Higgs. Отказ — JSON {error, detail}: 400 no_speaker_lines, 409 no_separation (нет ни
+/// вокала проекта, ни движка сепарации той сборки, что выбрана для стадии), 500 separation_failed и
+/// speaker_voice_failed.
 async fn speaker_voice(
     State(st): State<AppState>,
     axum::extract::Path(pid): axum::extract::Path<String>,
@@ -842,8 +844,11 @@ async fn speaker_voice(
         .iter()
         .filter(|s| s.speaker.as_deref().unwrap_or("0") == want)
         .max_by(|a, b| (a.end - a.start).partial_cmp(&(b.end - b.start)).unwrap_or(std::cmp::Ordering::Equal));
+    let refused = |status: StatusCode, code: &str, detail: String| {
+        (status, Json(json!({ "error": code, "detail": detail }))).into_response()
+    };
     let Some(cand) = cand else {
-        return (StatusCode::BAD_REQUEST, "у спикера нет реплик").into_response();
+        return refused(StatusCode::BAD_REQUEST, "no_speaker_lines", want);
     };
     let cand = cand.clone();
     let input = std::fs::read_to_string(dir.join("source.txt")).unwrap_or_default();
@@ -851,11 +856,13 @@ async fn speaker_voice(
     let out = st.voices_dir.join(format!("{name}.wav"));
     let txt = st.voices_dir.join(format!("{name}.txt"));
     let voices_dir = st.voices_dir.clone();
-    let cli = st.bsroformer_cli.clone();
+    let repo_root = st.repo_root.clone();
+    let models_root = st.models_root.clone();
     let model = st.bsroformer_model.clone();
     let tmp = dir.join("_voicecut");
     let res = tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&voices_dir).map_err(|e| format!("{}: {e}", voices_dir.display()))?;
+        let cli = dub_sep::engine_cli(&repo_root, models::stage_backend(&models_root, "sep_backend"));
         let made = render::speaker_voice_clip(&cand, 12.0, &dir, &input, (&cli, &model), &tmp, &out);
         let cleaned =
             if tmp.exists() { std::fs::remove_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display())) } else { Ok(()) };
@@ -867,13 +874,15 @@ async fn speaker_voice(
             None if txt.exists() => std::fs::remove_file(&txt).map_err(|e| format!("{}: {e}", txt.display()))?,
             None => {}
         }
-        Ok::<(), String>(())
+        Ok::<(), render::VoiceClipError>(())
     })
     .await;
     match res {
         Ok(Ok(())) => Json(json!({ "ok": true, "name": name, "voices": list_voice_names(&st.voices_dir) })).into_response(),
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(Err(render::VoiceClipError::NoSeparator(missing))) => refused(StatusCode::CONFLICT, "no_separation", missing),
+        Ok(Err(render::VoiceClipError::Separation(e))) => refused(StatusCode::INTERNAL_SERVER_ERROR, "separation_failed", e),
+        Ok(Err(render::VoiceClipError::Io(e))) => refused(StatusCode::INTERNAL_SERVER_ERROR, "speaker_voice_failed", e),
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, "speaker_voice_failed", e.to_string()),
     }
 }
 
