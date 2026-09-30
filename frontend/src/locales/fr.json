@@ -78,7 +78,8 @@
     "caps": "MAJUSCULES",
     "plate": "Plaque",
     "resetAuto": "Réinit. auto",
-    "resetGlobal": "Réinit. global"
+    "resetGlobal": "Réinit. global",
+    "plateColor": "Couleur de la plaque"
   },
   "voice": {
     "clone": "Cloner l'original",
@@ -106,13 +107,18 @@
     "addSpeaker": "＋ Ajouter un locuteur",
     "addSpeakerHint": "L'IA a détecté moins de locuteurs qu'il n'y en a ? Cochez les lignes de la 2ᵉ personne (ou placez la tête de lecture sur l'une) et cliquez — elles deviennent un nouveau SPK avec sa propre voix.",
     "addSpeakerPick": "Cochez d'abord des lignes ou placez la tête de lecture sur une ligne",
-    "addSpeakerDone": "{{n}} ligne(s) → nouveau SPK {{spk}}",
     "gain": "Gain",
     "gainHint": "Amplifier toute la piste (au rendu/export).",
     "origGain": "Volume d’origine",
     "origGainHint": "Voix off : volume de la piste originale sous la traduction.",
     "langSearch": "Rechercher une langue…",
-    "noMatch": "Aucun résultat"
+    "noMatch": "Aucun résultat",
+    "speakerName": "Locuteur {{spk}}",
+    "autoName": "Voix {{n}}",
+    "packMissing": "(pack introuvable)",
+    "addSpeakerDone_one": "{{count}} ligne → nouveau SPK {{spk}}",
+    "addSpeakerDone_many": "{{count}} lignes → nouveau SPK {{spk}}",
+    "addSpeakerDone_other": "{{count}} lignes → nouveau SPK {{spk}}"
   },
   "remix": {
     "title": "Remix",
@@ -135,7 +141,7 @@
     "all": "Toutes",
     "show": "Afficher le masque",
     "hide": "Masquer le masque",
-    "off": "off",
+    "off": "désactivé",
     "modeBlur": "Flou (clic → remplissage)",
     "modeFill": "Remplissage (clic → flou)",
     "fillColor": "Couleur de remplissage"
@@ -147,7 +153,9 @@
   },
   "titles": {
     "tab": "Titres",
-    "add": "Titre perso"
+    "add": "Titre perso",
+    "delete": "Supprimer le titre",
+    "defaultText": "Titre"
   },
   "preset": {
     "title": "Préréglage",
@@ -179,16 +187,19 @@
     "exportHint": "Exporte ce clip dans plusieurs langues l’une après l’autre avec les mêmes réglages : mise en page des sous-titres, styles, flou et voix sont conservés ; seuls la traduction et le doublage changent.",
     "exportGo": "Exporter · {{n}}",
     "add": "＋ Ajouter une langue",
-    "langsWord": "langues",
     "openEditor": "Éditeur",
     "done": "Terminé",
-    "backToExport": "↩ Retour à l’export"
+    "backToExport": "↩ Retour à l’export",
+    "langsCount_one": "{{count}} langue",
+    "langsCount_many": "{{count}} langues",
+    "langsCount_other": "{{count}} langues"
   },
   "status": {
     "working": "En cours…",
     "idle": "Prêt",
     "log": "Journal d'activité",
-    "clear": "Effacer"
+    "clear": "Effacer",
+    "backendOffline": "backend hors ligne"
   },
   "edit": {
     "setStart": "Début au curseur",
@@ -214,7 +225,11 @@
     "show": "Afficher la ligne",
     "del": "Supprimer la ligne",
     "refresh": "Actualiser",
-    "refreshHint": "Forcer le rafraîchissement de l'aperçu / sous-titres"
+    "refreshHint": "Forcer le rafraîchissement de l'aperçu / sous-titres",
+    "drag": "Déplacer la phrase (glisser-déposer)",
+    "moveUp": "Monter",
+    "moveDown": "Descendre",
+    "edited": "modifié"
   },
   "settings": {
     "sounds": "Sons de notification",
@@ -238,7 +253,7 @@
     "whisperCompute": "Quant. (compute)",
     "whisperComputeHint": "Précision de calcul — vitesse/qualité",
     "notInstalled": "non installé",
-    "perfTitle": "Performance / RAM",
+    "perfTitle": "Performances / RAM",
     "llamaUbatch": "Lot prefill Gemma",
     "llamaUbatchHint": "Plus petit = moins de RAM (évite l'OOM sur 32 Go)",
     "higgsRef": "Durée de référence du clone",
@@ -287,7 +302,7 @@
   "sel": {
     "pick": "Sélection :",
     "all": "Tout",
-    "count": "sélectionnés",
+    "count": "{{count}} sélectionnés",
     "keep": "Original",
     "hide": "Masquer",
     "del": "Supprimer"
@@ -302,7 +317,8 @@
     "done": "Terminé",
     "error": "Erreur",
     "play": "Lecture",
-    "pause": "Pause"
+    "pause": "Pause",
+    "check": "Vérifier"
   },
   "hotkeys": {
     "title": "Raccourcis clavier",
@@ -320,26 +336,26 @@
     "esc": "Fermer / quitter le plein écran"
   },
   "setup": {
-    "title": "First run",
+    "title": "Premier lancement",
     "subtitle": "Dub Studio needs a few components before the first dub. Pick what to download — it runs in the background.",
-    "download": "Download all",
-    "downloadOne": "Download",
-    "cancel": "Cancel",
-    "installed": "Installed",
-    "missing": "Missing",
-    "downloading": "Downloading…",
-    "required": "Required",
-    "recommended": "Recommended",
-    "bundled": "Bundled with app",
-    "external": "System",
-    "driverMissing": "NVIDIA driver not detected",
-    "openDriver": "Open NVIDIA driver site",
-    "ready": "Everything is ready",
-    "continue": "Continue",
-    "totalToDownload": "To download",
-    "reinstallHint": "Ships with the app — reinstall if missing",
-    "done": "Done",
-    "error": "Error",
+    "download": "Tout télécharger",
+    "downloadOne": "Télécharger",
+    "cancel": "Annuler",
+    "installed": "Installé",
+    "missing": "Manquant",
+    "downloading": "Téléchargement…",
+    "required": "Obligatoire",
+    "recommended": "Recommandé",
+    "bundled": "Fourni avec l'application",
+    "external": "Système",
+    "driverMissing": "Pilote NVIDIA non détecté",
+    "openDriver": "Ouvrir le site du pilote NVIDIA",
+    "ready": "Tout est prêt",
+    "continue": "Continuer",
+    "totalToDownload": "À télécharger",
+    "reinstallHint": "Fourni avec l'application — réinstallez-la s'il manque",
+    "done": "Terminé",
+    "error": "Erreur",
     "pickNoteTitle": "Un quant par modèle.",
     "pickNote": "Le nécessaire est déjà coché. Les quants sont des variantes du même modèle (OU) : quant plus élevé = meilleure qualité et plus lourd, plus bas = plus léger. Pas besoin de tout télécharger.",
     "grpHiggs": "Voix · Higgs Audio v3",
@@ -349,14 +365,14 @@
     "pickOneQuant": "choisissez-en un",
     "default": "par défaut",
     "alt": "ou",
-    "quantHint": "Une variante par modèle. Quant plus élevé = meilleure qualité, plus de VRAM et disque ; plus bas = plus léger."
+    "quantHint": "Une variante par modèle. Quant plus élevé = meilleure qualité, plus de VRAM et disque ; plus bas = plus léger.",
+    "cloudHint": "Vous avez choisi <b>Cloud</b> et saisi la clé ? Vous pouvez ne pas télécharger les lourds modèles locaux ci-dessous — la traduction et la voix passeront par OpenRouter."
   },
   "batch": {
     "open": "Lot de fichiers",
     "title": "Traitement par lot",
     "queue": "File",
     "start": "Démarrer",
-    "files": "fichiers",
     "queued": "en file",
     "analyzing": "analyse",
     "rendering": "rendu",
@@ -365,7 +381,10 @@
     "open_out": "Ouvrir",
     "saveAll": "Tout enregistrer dans un dossier",
     "back": "Retour",
-    "add": "Ajouter des fichiers"
+    "add": "Ajouter des fichiers",
+    "filesCount_one": "{{count}} fichier",
+    "filesCount_many": "{{count}} fichiers",
+    "filesCount_other": "{{count}} fichiers"
   },
   "transcribe": {
     "title": "Transcription et diarisation",
@@ -379,7 +398,9 @@
     "exportSrt": "Exporter .srt",
     "exportTxt": "Exporter .txt",
     "empty": "Aucune ligne dans la transcription",
-    "speakersN": "locuteurs"
+    "speakersCount_one": "{{count}} locuteur",
+    "speakersCount_many": "{{count}} locuteurs",
+    "speakersCount_other": "{{count}} locuteurs"
   },
   "comp": {
     "langHint": "100+ langues. Pour une source hors d'Europe, Whisper s'active automatiquement.",
@@ -448,50 +469,195 @@
     "add": "Ajouter une voix",
     "remove": "Retirer",
     "priorityHint": "Ordre = priorité : l'emplacement 1 est le locuteur qui parle le plus de ce genre, puis en rotation. Liste vide = ce genre est cloné.",
-    "assigned": "Voix attribuées : {{n}} locuteur(s)"
+    "assigned_one": "Voix attribuées : {{count}} locuteur",
+    "assigned_many": "Voix attribuées : {{count}} locuteurs",
+    "assigned_other": "Voix attribuées : {{count}} locuteurs"
   },
   "accordion": {
     "voices": "Voix",
-    "voicesLib": "Depuis la bibliothèque : {{n}} voix",
     "subs": "Sous-titres",
-    "advanced": "Plus d'options"
+    "advanced": "Plus d'options",
+    "voicesLib_one": "Depuis la bibliothèque : {{count}} voix",
+    "voicesLib_many": "Depuis la bibliothèque : {{count}} voix",
+    "voicesLib_other": "Depuis la bibliothèque : {{count}} voix"
   },
   "casting": {
     "tab": "Personnages",
     "tabHint": "Distribution des personnages — visages, voix et notes d'élocution",
     "title": "Distribution des personnages",
-    "count": "{{n}} personnage(s)",
     "hint": "Personnages détectés dans la vidéo. Donnez à chacun un nom, une note d'élocution (transmise au traducteur) et une voix de doublage, puis appliquez la distribution. Voix vide = clonage depuis la vidéo.",
     "apply": "Appliquer la distribution",
     "applied": "Appliqué",
     "namePlaceholder": "Nom du personnage",
-    "lines": "{{n}} réplique(s)",
     "speech": "Style d'élocution",
     "speechPlaceholder": "ex. bourru et sarcastique, parle vite, âgé",
     "voice": "Voix de doublage",
     "voiceClone": "Cloner depuis la vidéo",
     "contentAuto": "Auto",
-    "contentReal": "Real faces",
-    "contentAnime": "Cartoon / anime",
+    "contentReal": "Visages réels",
+    "contentAnime": "Dessin animé / anime",
     "gender": {
       "male": "Homme",
       "female": "Femme",
       "unknown": "—"
-    }
+    },
+    "autoByGender": "— attribution automatique selon le genre —",
+    "count_one": "{{count}} personnage",
+    "count_many": "{{count}} personnages",
+    "count_other": "{{count}} personnages",
+    "lines_one": "{{count}} réplique",
+    "lines_many": "{{count}} répliques",
+    "lines_other": "{{count}} répliques"
   },
   "castingLib": {
-    "save": "Save cast to library",
-    "saveHint": "Save the current cast as a profile to apply to another video",
-    "savedShort": "Saved",
-    "namePlaceholder": "Cast name",
-    "savedToast": "Cast \"{{name}}\" saved to library",
-    "playSample": "Play voice sample",
-    "stopSample": "Stop",
-    "applyLabel": "Apply saved cast",
-    "none": "— none —",
-    "profileOption": "{{name}} ({{n}} chars)",
-    "empty": "Library is empty — save a cast from the editor.",
-    "delete": "Delete profile",
-    "deleteConfirm": "Delete this cast profile?"
+    "save": "Enregistrer la distribution dans la bibliothèque",
+    "saveHint": "Enregistre la distribution actuelle comme profil à appliquer à une autre vidéo",
+    "savedShort": "Enregistré",
+    "namePlaceholder": "Nom de la distribution",
+    "savedToast": "Distribution « {{name}} » enregistrée dans la bibliothèque",
+    "playSample": "Écouter un échantillon de voix",
+    "stopSample": "Arrêter",
+    "applyLabel": "Appliquer une distribution enregistrée",
+    "none": "— aucune —",
+    "profileOption": "{{name}} ({{n}} pers.)",
+    "empty": "La bibliothèque est vide — enregistrez une distribution depuis l'éditeur.",
+    "delete": "Supprimer le profil",
+    "deleteConfirm": "Supprimer ce profil de distribution ?"
+  },
+  "units": {
+    "gb": "Go",
+    "mb": "Mo",
+    "watt": "W"
+  },
+  "cloud": {
+    "needKey": "Saisissez votre clé OpenRouter ci-dessous (Paramètres cloud)",
+    "ttsNoRussian": "⚠ Ce modèle ne prend pas en charge le russe — choisissez-en un autre pour le doublage en russe.",
+    "autocast": "Attribution automatique des voix",
+    "beta": "bêta",
+    "autocastHint": "La voix est choisie automatiquement selon le genre du locuteur ; chaque locuteur reçoit une voix différente.",
+    "oneVoice": "— une seule voix pour tous —",
+    "pickTts": "— choisir un modèle TTS —",
+    "pickStt": "— choisir un modèle STT —",
+    "pickMt": "— choisir un modèle de traduction —",
+    "asrHint": "Transcription dans le cloud — inutile de télécharger les lourds modèles ASR locaux.",
+    "visionOn": "Analyse visuelle des images dans le cloud",
+    "visionSameAsMt": "identique au modèle de traduction",
+    "title": "Paramètres cloud · OpenRouter",
+    "threads": "Threads parallèles",
+    "threadsHint": "segments sur N connexions — ASR/TTS/traduction cloud plus rapides (1 = sans multithreading)"
+  },
+  "proxy": {
+    "title": "Proxy",
+    "all": "Tout faire passer par le proxy",
+    "allHint": "à activer si le téléchargement direct des modèles ou OpenRouter ne fonctionne pas",
+    "ok": "Ça fonctionne — HF et OpenRouter sont accessibles via le proxy",
+    "badHf": "téléchargement des modèles (HF)",
+    "services": "services",
+    "unreachable": "Inaccessible via le proxy : {{list}}",
+    "failed": "Impossible de vérifier le proxy",
+    "support": "Prend en charge HTTP/HTTPS/SOCKS5. S'applique immédiatement au téléchargement des modèles et au cloud."
+  },
+  "orKey": {
+    "title": "Clé OpenRouter",
+    "hint": "pour les moteurs cloud (traduction / TTS)",
+    "ok": "La clé fonctionne — enregistrée",
+    "rejected": "Clé refusée par OpenRouter",
+    "unavailable": "OpenRouter est indisponible"
+  },
+  "hwPreset": {
+    "title": "Préréglage selon le matériel",
+    "gpu": "{{name}} · {{gb}} Go de VRAM",
+    "noGpu": "GPU NVIDIA introuvable",
+    "ram": "RAM {{gb}} Go"
+  },
+  "qc": {
+    "asr": {
+      "tip": "Vérifie automatiquement le texte reconnu avec Whisper ASR pour écarter silences et défauts",
+      "label": "Vérification du texte par ASR (QC)",
+      "hint": "contrôle automatique du doublage par ASR (le désactiver accélère la synthèse)"
+    },
+    "duration": {
+      "tip": "Ajuste de la vitesse et contrôle de la durée audio selon la plage du sous-titre",
+      "label": "Contrôle de la durée des phrases (Stretch QC)",
+      "hint": "ajustement de la durée et limite d'étirement maximal"
+    },
+    "multitake": {
+      "tip": "Génère 3 variantes de doublage par phrase et choisit automatiquement la meilleure selon la durée",
+      "label": "Sélection multi-prises (3 prises)",
+      "hint": "3 variantes de doublage — la meilleure selon la durée est retenue (plus lent, mais de meilleure qualité)"
+    },
+    "speechRate": {
+      "tip": "Adapte dynamiquement le rythme de parole du modèle à la longueur du texte et à la plage de temps disponible",
+      "label": "Débit de parole dynamique (Speech Rate TTS)",
+      "hint": "adapte la vitesse de parole à la longueur du texte dans la fenêtre"
+    },
+    "emoRef": {
+      "tip": "Transfère l'émotion, l'intonation et le jeu directement depuis l'audio original de la scène",
+      "label": "Référence émotionnelle de la scène (Emo-Ref)",
+      "hint": "copie l'intonation, l'émotion et le jeu de la scène originale"
+    },
+    "breath": {
+      "tip": "Insère automatiquement de douces respirations naturelles dans les pauses entre les répliques",
+      "label": "Respirations entre les phrases",
+      "hint": "insère de douces respirations naturelles dans les pauses pour rendre la parole plus vivante"
+    }
+  },
+  "manual": {
+    "newTitle": "Créer un projet (configuration manuelle)",
+    "newSub": "configuration manuelle",
+    "tip": "Crée un projet sans génération automatique et passe directement aux sous-titres",
+    "label": "Mode manuel",
+    "sub": "vers les sous-titres",
+    "starting": "Création du projet en mode manuel...",
+    "done": "Projet créé en mode manuel — prêt pour le travail sur les sous-titres"
+  },
+  "duck": {
+    "tip": "Baisse le fond sous la voix dans le doublage. Désactivé : fond à plein volume.",
+    "label": "Baisser le fond sous la voix",
+    "hint": "Ducking : le fond est plus bas sous la parole du doublage. Désactivé : fond complet."
+  },
+  "blurPlate": {
+    "tip": "Une plaque floutée sous les sous-titres pour la lisibilité. Désactivé : texte sans plaque.",
+    "label": "Plaque floutée sous les sous-titres",
+    "hint": "Une plaque floutée sous les sous-titres. Désactivé : sans plaque."
+  },
+  "palette": {
+    "placeholder": "⌘K — commandes…"
+  },
+  "timeline": {
+    "title": "Chronologie audio et sous-titres",
+    "zoomOut": "Dézoomer",
+    "zoomIn": "Zoomer",
+    "editStart": "Ajuster le début",
+    "editEnd": "Ajuster la fin",
+    "listen": "Écouter la phrase"
+  },
+  "subs": {
+    "saved": "Fichier de sous-titres enregistré avec succès !",
+    "savedAll": "Toutes les modifications des sous-titres ont été enregistrées avec succès !",
+    "empty": "Le fichier de sous-titres est vide ou son format n'a pas pu être reconnu (.srt/.ass)",
+    "saveTip": "Enregistrer les sous-titres dans un fichier (.srt)",
+    "saveTypeDesc": "Sous-titres (.srt)",
+    "importTip": "Importer un fichier de sous-titres (.srt, .ass, .vtt)",
+    "importShort": "Importer .srt/.ass",
+    "loadTip": "Charger des sous-titres existants depuis un fichier (.srt, .ass)",
+    "importList": "Importer des sous-titres (.srt, .ass)",
+    "importPanel": "Importer des sous-titres (.srt / .ass)",
+    "loaded_one": "Sous-titres chargés : {{count}} phrase de {{file}}",
+    "loaded_many": "Sous-titres chargés : {{count}} phrases de {{file}}",
+    "loaded_other": "Sous-titres chargés : {{count}} phrases de {{file}}"
+  },
+  "float": {
+    "dock": "Remettre dans l'en-tête"
+  },
+  "monitor": {
+    "popOut": "Détacher le moniteur de ressources",
+    "title": "Ressources",
+    "power": "Alimentation",
+    "process": "Processus"
+  },
+  "preview": {
+    "frameAlt": "Image de l'aperçu",
+    "updating": "mise à jour…"
   }
 }

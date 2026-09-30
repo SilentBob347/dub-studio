@@ -63,7 +63,6 @@
     "title": "Batch processing",
     "queue": "Queue",
     "start": "Start",
-    "files": "files",
     "queued": "queued",
     "analyzing": "analyzing",
     "rendering": "rendering",
@@ -72,7 +71,9 @@
     "open_out": "Open",
     "saveAll": "Save all to folder",
     "back": "Back",
-    "add": "Add files"
+    "add": "Add files",
+    "filesCount_one": "{{count}} file",
+    "filesCount_other": "{{count}} files"
   },
   "transcribe": {
     "title": "Transcript and diarization",
@@ -86,7 +87,8 @@
     "exportSrt": "Export .srt",
     "exportTxt": "Export .txt",
     "empty": "No lines in the transcript",
-    "speakersN": "speakers"
+    "speakersCount_one": "{{count}} speaker",
+    "speakersCount_other": "{{count}} speakers"
   },
   "actions": {
     "translate": "Translate",
@@ -108,7 +110,8 @@
     "caps": "UPPERCASE",
     "plate": "Plate",
     "resetAuto": "Reset to auto",
-    "resetGlobal": "Reset to global"
+    "resetGlobal": "Reset to global",
+    "plateColor": "Plate color"
   },
   "voice": {
     "clone": "Clone original",
@@ -136,13 +139,17 @@
     "addSpeaker": "＋ Add speaker",
     "addSpeakerHint": "AI found fewer speakers than there are? Tick the second person's lines (or park the playhead on one) and click — they become a new SPK you can give its own voice.",
     "addSpeakerPick": "First tick some lines, or move the playhead onto a line",
-    "addSpeakerDone": "{{n}} line(s) → new SPK {{spk}}",
     "gain": "Track boost",
     "gainHint": "Boost the whole track (applied on regen/export).",
     "origGain": "Original volume",
     "origGainHint": "Voice-over: how loud the original track sits under the translation.",
     "langSearch": "Search language…",
-    "noMatch": "No matches"
+    "noMatch": "No matches",
+    "speakerName": "Speaker {{spk}}",
+    "autoName": "Voice {{n}}",
+    "packMissing": "(pack not found)",
+    "addSpeakerDone_one": "{{count}} line → new SPK {{spk}}",
+    "addSpeakerDone_other": "{{count}} lines → new SPK {{spk}}"
   },
   "remix": {
     "title": "Remix",
@@ -177,7 +184,9 @@
   },
   "titles": {
     "tab": "Titles",
-    "add": "Custom title"
+    "add": "Custom title",
+    "delete": "Delete title",
+    "defaultText": "Title"
   },
   "preset": {
     "title": "Preset",
@@ -209,16 +218,18 @@
     "exportHint": "Exports this clip into several languages one after another with the same settings — subtitle layout, styles, blur and voice are kept; only translation and voicing change.",
     "exportGo": "Export · {{n}}",
     "add": "＋ Add a language",
-    "langsWord": "languages",
     "openEditor": "Editor",
     "done": "Done",
-    "backToExport": "↩ Back to language export"
+    "backToExport": "↩ Back to language export",
+    "langsCount_one": "{{count}} language",
+    "langsCount_other": "{{count}} languages"
   },
   "status": {
     "working": "Working…",
     "idle": "Ready",
     "log": "Activity log",
-    "clear": "Clear"
+    "clear": "Clear",
+    "backendOffline": "backend offline"
   },
   "edit": {
     "setStart": "Start at playhead",
@@ -244,7 +255,11 @@
     "show": "Show line",
     "del": "Delete line",
     "refresh": "Refresh",
-    "refreshHint": "Force-refresh the preview / subtitles (if it lags or hangs)"
+    "refreshHint": "Force-refresh the preview / subtitles (if it lags or hangs)",
+    "drag": "Drag the phrase (drag & drop)",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "edited": "edited"
   },
   "settings": {
     "sounds": "Notification sounds",
@@ -317,7 +332,7 @@
   "sel": {
     "pick": "Select:",
     "all": "All",
-    "count": "selected",
+    "count": "{{count}} selected",
     "keep": "Keep orig.",
     "hide": "Hide",
     "del": "Delete"
@@ -332,7 +347,8 @@
     "done": "Done",
     "error": "Error",
     "play": "Play",
-    "pause": "Pause"
+    "pause": "Pause",
+    "check": "Check"
   },
   "hotkeys": {
     "title": "Keyboard shortcuts",
@@ -379,7 +395,8 @@
     "totalToDownload": "To download",
     "reinstallHint": "Ships with the app — reinstall if missing",
     "done": "Done",
-    "error": "Error"
+    "error": "Error",
+    "cloudHint": "Picked <b>Cloud</b> and entered the key? You can skip downloading the heavy local models below — translation and voiceover will go through OpenRouter."
   },
   "comp": {
     "langHint": "100+ languages. For a non-European source, Whisper turns on automatically.",
@@ -448,24 +465,24 @@
     "add": "Add voice",
     "remove": "Remove",
     "priorityHint": "Order = priority: slot 1 is the most-speaking speaker of that gender, then round-robin. Empty list = that gender is cloned.",
-    "assigned": "Voices assigned: {{n}} speaker(s)"
+    "assigned_one": "Voices assigned: {{count}} speaker",
+    "assigned_other": "Voices assigned: {{count}} speakers"
   },
   "accordion": {
     "voices": "Voices",
-    "voicesLib": "From library: {{n}} voice(s)",
     "subs": "Subtitles",
-    "advanced": "More options"
+    "advanced": "More options",
+    "voicesLib_one": "From library: {{count}} voice",
+    "voicesLib_other": "From library: {{count}} voices"
   },
   "casting": {
     "tab": "Characters",
     "tabHint": "Character cast — faces, voices and speech notes",
     "title": "Character casting",
-    "count": "{{n}} character(s)",
     "hint": "Detected characters from the video. Give each a name, a speech note (sent to the translator), and a dubbing voice, then apply the cast. Empty voice = clone from the video.",
     "apply": "Apply casting",
     "applied": "Applied",
     "namePlaceholder": "Character name",
-    "lines": "{{n}} line(s)",
     "speech": "Speech style",
     "speechPlaceholder": "e.g. gruff and sarcastic, speaks fast, elderly",
     "voice": "Dubbing voice",
@@ -477,7 +494,12 @@
       "male": "Male",
       "female": "Female",
       "unknown": "—"
-    }
+    },
+    "autoByGender": "— auto-cast by gender —",
+    "count_one": "{{count}} character",
+    "count_other": "{{count}} characters",
+    "lines_one": "{{count}} line",
+    "lines_other": "{{count}} lines"
   },
   "castingLib": {
     "save": "Save cast to library",
@@ -489,9 +511,144 @@
     "stopSample": "Stop",
     "applyLabel": "Apply saved cast",
     "none": "— none —",
-    "profileOption": "{{name}} ({{n}} chars)",
+    "profileOption": "{{name}} ({{n}} char.)",
     "empty": "Library is empty — save a cast from the editor.",
     "delete": "Delete profile",
     "deleteConfirm": "Delete this cast profile?"
+  },
+  "units": {
+    "gb": "GB",
+    "mb": "MB",
+    "watt": "W"
+  },
+  "cloud": {
+    "needKey": "Enter your OpenRouter key below (Cloud settings)",
+    "ttsNoRussian": "⚠ This model does not support Russian — pick another one for Russian dubbing.",
+    "autocast": "Auto-cast voices",
+    "beta": "beta",
+    "autocastHint": "The voice is picked automatically by the speaker's gender; different speakers get different voices.",
+    "oneVoice": "— one voice for everyone —",
+    "pickTts": "— pick a TTS model —",
+    "pickStt": "— pick an STT model —",
+    "pickMt": "— pick a translation model —",
+    "asrHint": "Cloud transcription — no need to download heavy local ASR models.",
+    "visionOn": "Cloud vision analysis of frames",
+    "visionSameAsMt": "same as the translation model",
+    "title": "Cloud settings · OpenRouter",
+    "threads": "Parallel threads",
+    "threadsHint": "chunks over N connections — faster cloud ASR/TTS/translation (1 = no multithreading)"
+  },
+  "proxy": {
+    "title": "Proxy",
+    "all": "Proxy all traffic",
+    "allHint": "turn on if direct model download or OpenRouter does not work",
+    "ok": "Works — HF and OpenRouter are reachable through the proxy",
+    "badHf": "model download (HF)",
+    "services": "services",
+    "unreachable": "Unreachable through the proxy: {{list}}",
+    "failed": "Could not check the proxy",
+    "support": "Supports HTTP/HTTPS/SOCKS5. Applies immediately to model downloads and the cloud."
+  },
+  "orKey": {
+    "title": "OpenRouter key",
+    "hint": "for cloud engines (translation / TTS)",
+    "ok": "Key works — saved",
+    "rejected": "Key rejected by OpenRouter",
+    "unavailable": "OpenRouter is unavailable"
+  },
+  "hwPreset": {
+    "title": "Hardware preset",
+    "gpu": "{{name}} · {{gb}} GB VRAM",
+    "noGpu": "NVIDIA GPU not found",
+    "ram": "RAM {{gb}} GB"
+  },
+  "qc": {
+    "asr": {
+      "tip": "Automatically check the recognized text with Whisper ASR to cut out silence and defects",
+      "label": "ASR text check (QC)",
+      "hint": "auto-check the voiceover via ASR (turning it off speeds up synthesis)"
+    },
+    "duration": {
+      "tip": "Fit the speed and control the audio timing to the subtitle slot",
+      "label": "Phrase duration control (Stretch QC)",
+      "hint": "timing fit and maximum stretch limit"
+    },
+    "multitake": {
+      "tip": "Generate 3 voiceover variants of every phrase and automatically pick the best one by timing",
+      "label": "Multi-take selection (3 takes)",
+      "hint": "3 voiceover variants — the best one by timing is picked (slower, but better quality)"
+    },
+    "speechRate": {
+      "tip": "Dynamically adapts the neural model's speaking pace to the text length and the available time slot",
+      "label": "Dynamic speech rate (Speech Rate TTS)",
+      "hint": "adapts the speaking speed to the text length in the window"
+    },
+    "emoRef": {
+      "tip": "Transfers emotion, intonation and delivery straight from the scene's original audio",
+      "label": "Scene emotion reference (Emo-Ref)",
+      "hint": "copies the intonation, emotion and delivery of the original scene"
+    },
+    "breath": {
+      "tip": "Automatically inserts quiet, natural breaths in the pauses between lines",
+      "label": "Breaths between phrases",
+      "hint": "inserts natural soft breaths in pauses to make speech livelier"
+    }
+  },
+  "manual": {
+    "newTitle": "Create a project (manual setup)",
+    "newSub": "manual setup",
+    "tip": "Create a project without auto-generation and go straight to subtitles",
+    "label": "Manual mode",
+    "sub": "to subtitles",
+    "starting": "Creating a project in manual mode...",
+    "done": "Project created in manual mode — ready to work on subtitles"
+  },
+  "duck": {
+    "tip": "Duck the background under the voice in the dub. Off — the background stays at full volume.",
+    "label": "Duck the background under the voice",
+    "hint": "Ducking: the background gets quieter under the dub's speech. Off — the full background."
+  },
+  "blurPlate": {
+    "tip": "A blurred plate behind the subtitles for readability. Off — text without a plate.",
+    "label": "Blur plate behind subtitles",
+    "hint": "A blurred plate behind the subtitles. Off — no plate."
+  },
+  "palette": {
+    "placeholder": "⌘K — commands…"
+  },
+  "timeline": {
+    "title": "Audio and subtitle timeline",
+    "zoomOut": "Zoom out",
+    "zoomIn": "Zoom in",
+    "editStart": "Adjust start",
+    "editEnd": "Adjust end",
+    "listen": "Listen to this phrase"
+  },
+  "subs": {
+    "saved": "Subtitle file saved successfully!",
+    "savedAll": "All subtitle changes saved successfully!",
+    "empty": "The subtitle file is empty or its format could not be recognized (.srt/.ass)",
+    "saveTip": "Save subtitles to a file (.srt)",
+    "saveTypeDesc": "Subtitles (.srt)",
+    "importTip": "Import a subtitle file (.srt, .ass, .vtt)",
+    "importShort": "Import .srt/.ass",
+    "loadTip": "Load ready-made subtitles from a file (.srt, .ass)",
+    "importList": "Import subtitles (.srt, .ass)",
+    "importPanel": "Import subtitles (.srt / .ass)",
+    "loaded_one": "Subtitles loaded: {{count}} phrase from {{file}}",
+    "loaded_other": "Subtitles loaded: {{count}} phrases from {{file}}"
+  },
+  "float": {
+    "dock": "Return to the header"
+  },
+  "monitor": {
+    "popOut": "Detach the resource monitor",
+    "title": "Resources",
+    "power": "Power",
+    "process": "Process"
+  },
+  "preview": {
+    "frameAlt": "Preview frame",
+    "updating": "updating…"
   }
 }
