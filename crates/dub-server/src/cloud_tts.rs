@@ -20,7 +20,7 @@ const FFMPEG: &str = "ffmpeg";
 /// поэтому ОДИН раз конвертируем mp3->wav (не туда-обратно — это единственная необходимая конвертация,
 /// как локальный Higgs пишет seg через encode_wav). `voice` пусто -> дефолт из настроек.
 pub fn synth_audio(models_root: &Path, text: &str, voice: &str) -> Result<Vec<u8>, String> {
-    let key = crate::models::openrouter_key(models_root)
+    let key = crate::models::openrouter_key()
         .ok_or("облачный TTS включён, но ключ OpenRouter не задан")?;
     let model = crate::models::openrouter_model(models_root, "tts");
     if model.is_empty() {

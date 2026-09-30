@@ -27,10 +27,39 @@ pub fn set_selection(mroot: &Path, engine: &str, variant: &str) -> std::io::Resu
     v.as_object_mut()
         .expect("load_selection returns object")
         .insert(engine.to_string(), Value::String(variant.to_string()));
+    write_selection(mroot, &v)
+}
+
+/// Записать весь выбор атомарно (tmp + rename).
+pub fn write_selection(mroot: &Path, selection: &Value) -> std::io::Result<()> {
     let _ = std::fs::create_dir_all(mroot);
     let tmp = mroot.join("active.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap_or_default())?;
+    std::fs::write(&tmp, serde_json::to_vec_pretty(selection).unwrap_or_default())?;
     std::fs::rename(&tmp, mroot.join("active.json"))
+}
+
+/// Выбор для ответов API. Секреты не уходят никогда: вместо ключа OpenRouter — `or_key_set`, пароль
+/// вырезан из `proxy_url`, вместо него — `proxy_password_set`.
+pub fn public_selection(mroot: &Path) -> Value {
+    redact_selection(
+        &load_selection(mroot),
+        crate::credentials::openrouter_source().is_some(),
+        crate::credentials::proxy_password().is_some(),
+    )
+}
+
+pub(crate) fn redact_selection(selection: &Value, or_key_set: bool, proxy_password_set: bool) -> Value {
+    let mut slots = selection.as_object().cloned().unwrap_or_default();
+    slots.remove("or_key");
+    let mut inline_password = false;
+    if let Some(url) = slots.get("proxy_url").and_then(Value::as_str).map(str::to_owned) {
+        let (bare, password) = split_proxy_password(&url);
+        inline_password = password.is_some();
+        slots.insert("proxy_url".into(), Value::String(bare));
+    }
+    slots.insert("or_key_set".into(), Value::Bool(or_key_set));
+    slots.insert("proxy_password_set".into(), Value::Bool(proxy_password_set || inline_password));
+    Value::Object(slots)
 }
 
 fn pick<'a>(sel: &'a Value, engine: &str) -> Option<&'a str> {
@@ -90,7 +119,7 @@ pub fn is_selection_key(key: &str) -> bool {
             | "speech_rate_on"  // "1" -> адаптация темпа генерации TTS под длину текста/слота; "0" -> дефолт темп
             | "emo_ref_on"      // "1" -> эмоциональный референс сцены (перенос эмоций из оригинального вокала); "0" -> выкл
             // Облачные модели (OpenRouter) — опциональная замена тяжёлого локального LLM/TTS. Всё ВЫКЛ по умолчанию.
-            | "or_key"          // API-ключ OpenRouter (хранится локально в active.json, не логируется)
+            // Ключ OpenRouter сюда не входит: он в хранилище секретов (credentials), ручка /engine/openrouter/settings.
             | "or_llm_on"       // "1" -> перевод через OpenRouter chat вместо локальной Gemma
             | "or_llm"          // id LLM-модели перевода (напр. "google/gemini-2.5-flash")
             | "or_vision_on"    // "1" -> vision-анализ кадров через OpenRouter multimodal
@@ -103,8 +132,8 @@ pub fn is_selection_key(key: &str) -> bool {
             | "or_asr"          // id STT-модели OpenRouter (напр. "openai/whisper-large-v3")
             | "or_concurrency"  // число параллельных облачных запросов (чанки в N потоков; OpenRouter ~50 конкур.)
             // Прокси: у части юзеров прямой доступ к HF/OpenRouter закрыт -> все обращения через свой прокси.
+            // Адрес меняется только через /engine/proxy/settings: там пароль отделяется в хранилище секретов.
             | "proxy_on"        // "1" -> проксировать весь исходящий трафик приложения через proxy_url
-            | "proxy_url"       // URL прокси: http|https|socks5://[user:pass@]host:port (хранится локально)
     )
 }
 
@@ -131,20 +160,59 @@ pub fn local_backend(mroot: &Path) -> &'static str {
     stage_backend(mroot, "local_backend")
 }
 
-/// API-ключ OpenRouter из active.json (локальное хранение, десктоп). Пусто/нет -> None.
-pub fn openrouter_key(mroot: &Path) -> Option<String> {
-    pick(&load_selection(mroot), "or_key").map(str::to_string)
+/// API-ключ OpenRouter: переменная окружения OPENROUTER_API_KEY, иначе хранилище секретов. Нет -> None.
+pub fn openrouter_key() -> Option<String> {
+    crate::credentials::openrouter_api_key().map(|(key, _)| key)
 }
 
 /// URL прокси-сервера из active.json — ТОЛЬКО если прокси включён (proxy_on=="1") и URL непустой, иначе None.
 /// Через него идут ВСЕ обращения приложения: закачка моделей (ureq), OpenRouter (Go-хелпер), метаданные HF
 /// (reqwest). Формат: http|https|socks5://[user:pass@]host:port. Валидность URL проверяет /engine/proxy/test.
+/// В active.json адрес лежит без пароля; пароль подставляется из хранилища секретов.
 pub fn proxy_url(mroot: &Path) -> Option<String> {
     let sel = load_selection(mroot);
     if pick(&sel, "proxy_on") != Some("1") {
         return None;
     }
-    pick(&sel, "proxy_url").map(str::to_string)
+    let url = pick(&sel, "proxy_url")?;
+    Some(proxy_with_password(url, crate::credentials::proxy_password().as_deref()))
+}
+
+/// Разбор `[scheme://][user[:password]@]host…` (схему ureq допускает опустить): (до userinfo, user, password,
+/// после `@`).
+fn proxy_userinfo(url: &str) -> Option<(&str, &str, Option<&str>, &str)> {
+    let start = url.find("://").map_or(0, |scheme| scheme + 3);
+    let rest = &url[start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let at = rest[..authority_end].rfind('@')?;
+    let (user, password) = match rest[..at].split_once(':') {
+        Some((user, password)) => (user, Some(password)),
+        None => (&rest[..at], None),
+    };
+    Some((&url[..start], user, password, &rest[at + 1..]))
+}
+
+/// Отделить пароль от адреса прокси: (адрес без пароля, пароль). Логин остаётся в адресе.
+pub fn split_proxy_password(url: &str) -> (String, Option<String>) {
+    match proxy_userinfo(url) {
+        Some((head, user, Some(password), tail)) => {
+            (format!("{head}{user}@{tail}"), Some(password.to_string()).filter(|p| !p.is_empty()))
+        }
+        _ => (url.to_string(), None),
+    }
+}
+
+/// Есть ли в адресе прокси логин (`user@`), к которому относится пароль.
+pub fn proxy_has_user(url: &str) -> bool {
+    proxy_userinfo(url).is_some_and(|(_, user, _, _)| !user.is_empty())
+}
+
+/// Подставить пароль в адрес с логином и без пароля; адрес со своим паролем или без логина — как есть.
+pub fn proxy_with_password(url: &str, password: Option<&str>) -> String {
+    match (proxy_userinfo(url), password.filter(|p| !p.is_empty())) {
+        (Some((head, user, None, tail)), Some(password)) if !user.is_empty() => format!("{head}{user}:{password}@{tail}"),
+        _ => url.to_string(),
+    }
 }
 
 /// Прописать прокси из active.json в env процесса (HTTP(S)_PROXY/ALL_PROXY + lowercase-варианты). Стандартные
@@ -163,19 +231,19 @@ pub fn apply_proxy_env(mroot: &Path) {
 
 /// Спрятать user:pass в URL прокси для логов (не светим креды): scheme://***@host:port.
 fn mask_proxy(url: &str) -> String {
-    match (url.find("://"), url.rfind('@')) {
-        (Some(s), Some(at)) if at > s + 3 => format!("{}***@{}", &url[..s + 3], &url[at + 1..]),
-        _ => url.to_string(),
+    match proxy_userinfo(url) {
+        Some((head, _, _, tail)) => format!("{head}***@{tail}"),
+        None => url.to_string(),
     }
 }
 
 /// Включён ли облачный путь для стадии `stage` ("llm"|"vision"|"tts"): галка ИЛИ есть ключ.
-/// Требует непустой or_key — без ключа облако невозможно, откатываемся на локальный движок.
+/// Требует ключ OpenRouter — без ключа облако невозможно, откатываемся на локальный движок.
 pub fn openrouter_stage_on(mroot: &Path, stage: &str) -> bool {
-    let sel = load_selection(mroot);
-    if pick(&sel, "or_key").is_none() {
+    if crate::credentials::openrouter_source().is_none() {
         return false;
     }
+    let sel = load_selection(mroot);
     let flag = match stage {
         "llm" => "or_llm_on",
         "vision" => "or_vision_on",
@@ -596,7 +664,7 @@ mod resolve_live_tests {
         }
         let sel = load_selection(&mroot);
         let choice = resolve_asr_choice(repo, &mroot, &sel);
-        eprintln!("sel = {sel}");
+        eprintln!("sel = {}", redact_selection(&sel, false, false));
         eprintln!("resolved = {}", choice.describe());
         // Ассертим Whisper только когда он РЕАЛЬНО установлен: резолв по контракту тихо откатывается
         // на Parakeet без бинаря/модели (ревью: иначе тест ложно валится на машине без whisper).
@@ -610,5 +678,59 @@ mod resolve_live_tests {
                 "active.json просит whisper (и он установлен), но резолв дал: {}", choice.describe()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_proxy_password_is_split_off_and_put_back() {
+        assert_eq!(
+            split_proxy_password("http://alice:p%40ss:w@proxy.lan:3128"),
+            ("http://alice@proxy.lan:3128".to_string(), Some("p%40ss:w".to_string()))
+        );
+        assert_eq!(split_proxy_password("socks5://proxy.lan:1080"), ("socks5://proxy.lan:1080".to_string(), None));
+        assert_eq!(split_proxy_password("http://alice@proxy.lan:3128"), ("http://alice@proxy.lan:3128".to_string(), None));
+        assert_eq!(split_proxy_password("http://alice:@proxy.lan:3128"), ("http://alice@proxy.lan:3128".to_string(), None));
+        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", Some("p%40ss:w")), "http://alice:p%40ss:w@proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://alice:own@proxy.lan:3128", Some("stored")), "http://alice:own@proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://proxy.lan:3128", Some("stored")), "http://proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", None), "http://alice@proxy.lan:3128");
+        assert!(proxy_has_user("http://alice@proxy.lan:3128") && !proxy_has_user("http://proxy.lan:3128"));
+        assert!(!proxy_has_user("http://proxy.lan:3128/path@x"));
+        assert_eq!(split_proxy_password("alice:hunter2@proxy.lan:3128"), ("alice@proxy.lan:3128".to_string(), Some("hunter2".to_string())));
+        assert_eq!(mask_proxy("alice:hunter2@proxy.lan:3128"), "***@proxy.lan:3128");
+        assert_eq!(mask_proxy("socks5://alice:hunter2@proxy.lan:1080"), "socks5://***@proxy.lan:1080");
+    }
+
+    #[test]
+    fn the_public_selection_carries_flags_instead_of_secrets() {
+        let selection = json!({
+            "tts": "q6_k",
+            "or_key": "sk-or-v1-secret",
+            "proxy_on": "1",
+            "proxy_url": "http://alice:hunter2@proxy.lan:3128",
+        });
+        let public = redact_selection(&selection, true, false);
+        let text = public.to_string();
+        assert!(!text.contains("sk-or-v1-secret") && !text.contains("hunter2") && !text.contains("\"or_key\""));
+        assert_eq!(public["proxy_url"], "http://alice@proxy.lan:3128");
+        assert_eq!(public["or_key_set"], true);
+        assert_eq!(public["proxy_password_set"], true, "a legacy inline password still counts as set");
+        assert_eq!(public["tts"], "q6_k");
+
+        let bare = redact_selection(&json!({ "proxy_url": "socks5://proxy.lan:1080" }), false, false);
+        assert_eq!(bare["or_key_set"], false);
+        assert_eq!(bare["proxy_password_set"], false);
+        assert_eq!(bare["proxy_url"], "socks5://proxy.lan:1080");
+    }
+
+    #[test]
+    fn secrets_are_not_selection_slots() {
+        assert!(!is_selection_key("or_key") && !is_selection_key("proxy_url"));
+        assert!(is_selection_key("proxy_on") && is_selection_key("or_llm_on"));
     }
 }

@@ -8,7 +8,7 @@ use std::path::Path;
 /// Err. `src_lang` — ISO-639-1 ("ru"/"en"/…) или "auto"/"" (авто-детект). Провайдер без сегментов (не
 /// verbose_json) -> один сегмент на весь текст.
 pub fn transcribe(models_root: &Path, wav: &Path, src_lang: &str) -> Result<Vec<(f64, f64, String)>, String> {
-    let key = crate::models::openrouter_key(models_root).ok_or("облачный ASR включён, но ключ OpenRouter не задан")?;
+    let key = crate::models::openrouter_key().ok_or("облачный ASR включён, но ключ OpenRouter не задан")?;
     let model = crate::models::openrouter_model(models_root, "asr");
     if model.is_empty() {
         return Err("STT-модель OpenRouter не выбрана в настройках".into());

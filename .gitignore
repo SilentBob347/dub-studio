@@ -13,6 +13,8 @@ python/
 node/
 ffmpeg/
 models/
+# хранилище секретов портативной раскладки (ключ OpenRouter, пароль прокси) — никогда в репозиторий
+secrets/
 voices/
 downloads/
 temp/

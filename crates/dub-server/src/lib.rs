@@ -14,7 +14,9 @@ mod cloud_asr;
 mod cloud_tts;
 mod cloud_voices;
 mod compose;
+mod credentials;
 mod endpoints;
+mod guard;
 mod llm_provider;
 mod openrouter_cli;
 mod f0;
@@ -28,6 +30,7 @@ mod ocr;
 mod patch;
 mod record;
 mod render;
+mod secrets_api;
 mod setup;
 mod spa;
 mod subimport;
@@ -228,6 +231,13 @@ impl AppState {
         let _ = std::fs::create_dir_all(&workspace);
         let web_root = spa::find_web_root(&repo_root);
         let mroot = models_root(&repo_root);
+        match credentials::migrate_legacy_selection(&mroot) {
+            Ok(moved) if moved.openrouter_key || moved.proxy_password => {
+                tracing::info!("секреты перенесены из active.json в хранилище секретов: {moved:?}")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!("секреты из active.json не перенесены в хранилище: {e:#}"),
+        }
         let tdt_dir = std::env::var("DUB_STUDIO_TDT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| mroot.join("tdt"));
@@ -311,12 +321,6 @@ fn save_project_atomic(dir: &Path, proj: &Project) -> Result<(), String> {
 }
 
 pub fn build_router(state: AppState) -> Router {
-    use tower_http::cors::{Any, CorsLayer};
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
     Router::new()
         .route("/engine/capabilities", get(capabilities))
         .route("/engine/opts", axum::routing::patch(endpoints::set_opts))
@@ -324,7 +328,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/engine/openrouter/models", get(endpoints::openrouter_models))
         .route("/engine/openrouter/voices", get(endpoints::openrouter_voices))
         .route("/engine/openrouter/verify", post(endpoints::openrouter_verify))
+        .route(
+            "/engine/openrouter/settings",
+            get(secrets_api::openrouter_settings)
+                .put(secrets_api::update_openrouter_settings)
+                .delete(secrets_api::delete_openrouter_settings),
+        )
         .route("/engine/proxy/test", post(endpoints::proxy_test))
+        .route("/engine/proxy/settings", get(secrets_api::proxy_settings).put(secrets_api::update_proxy_settings))
         .route("/engine/presets", get(endpoints::presets_list))
         .route("/engine/preset", post(endpoints::preset_apply))
         // «Первый запуск»: статус компонентов + автозакачка недостающего (SSE через ту же job-машину).
@@ -386,7 +397,9 @@ pub fn build_router(state: AppState) -> Router {
         // Видео-аплоад — большие тела. axum по дефолту режет на 2МБ (multipart ломается на
         // реальном ролике). Питон (Starlette) лимита не ставит -> снимаем и мы.
         .layer(axum::extract::DefaultBodyLimit::disable())
-        .layer(cors)
+        .layer(guard::cors())
+        // Снаружи всех слоёв: чужой Origin/Host получает 403 раньше CORS, SPA и любой ручки.
+        .layer(axum::middleware::from_fn(guard::origin_guard))
         .with_state(state)
 }
 
@@ -396,7 +409,8 @@ async fn capabilities(State(st): State<AppState>) -> Json<Value> {
     let o = &st.opts;
     let ffmpeg = which_ffmpeg();
     // Текущий выбор вариантов (active.json) — фронт рисует по нему селекторы движка/модели/кванта ASR.
-    let sel = models::load_selection(&st.models_root);
+    // Без секретов: вместо ключа OpenRouter и пароля прокси — флаги or_key_set / proxy_password_set.
+    let sel = models::public_selection(&st.models_root);
     // Языки контента = полный набор Whisper (99). Единый источник — dub_translate::WHISPER_LANGS.
     let langs: Vec<&str> = dub_translate::WHISPER_LANGS.iter().map(|(c, _)| *c).collect();
     // Тот же JSON-контракт, что в app.py.capabilities(), плюс поля выбора ASR-движка.
