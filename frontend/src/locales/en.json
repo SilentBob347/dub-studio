@@ -520,6 +520,14 @@
     "delete": "Delete profile",
     "deleteConfirm": "Delete this cast profile?"
   },
+  "asrVariant": {
+    "int8": "int8",
+    "int8Hint": "NVIDIA base model, int8 quant — fast and light (~0.7 GB)",
+    "fp32": "fp32",
+    "fp32Hint": "NVIDIA base model at full fp32 precision (~2.6 GB)",
+    "ultra": "Ultra · fp32",
+    "ultraHint": "Moondream fine-tune of the base model: fewer recognition errors, same 25 languages · fp32 ~2.6 GB"
+  },
   "units": {
     "gb": "GB",
     "mb": "MB",

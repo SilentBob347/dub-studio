@@ -39,7 +39,7 @@ This is **v2 — a fully native rewrite**. The previous version dragged along an
 ## Features
 
 - **Dub any clip with a cloned voice** — the original timbre is cloned and speaks the new language ([Higgs Audio v3](https://huggingface.co/bosonai) native engine, GGUF Q8_0). Auto-cast per speaker or pick a pack voice
-- **Speaker diarization** — who speaks when (NVIDIA **Sortformer** v2, up to 4 voices), a different voice per speaker
+- **Speaker diarization** — who speaks when (NVIDIA **Nemotron 3 Diarization**, up to 8 voices), a different voice per speaker
 - **Transcript + diarization mode** — a dedicated screen: audio/video → a clean transcript laid out by speaker (click a line to move the playhead and vice versa), and **one click turns each speaker into a voice** — the reference is cleaned by vocal separation and auto-transcribed into reference text (like Higgs). Export `.srt` / `.txt`
 - **Translation + vision style analysis** — the whole transcript is translated locally by **Gemma-4 12B** (QAT q4_0 GGUF, llama.cpp), and a vision pass reads the frame layout: caption style, titles, brands, text zones
 - **SOTA vocal separation** — **Mel-Band Roformer** (native BSRoformer.cpp on CUDA) splits voice from music: the clip's background is **preserved**, the clone locks onto clean speech
@@ -80,7 +80,7 @@ Transcript mode — a diarized transcript laid out by speaker, with clean voices
 
 **Everything else the app downloads and offers to install with buttons** — no more installing CUDA Toolkit, Visual C++ Redistributable, ffmpeg, or fetching weights by hand:
 
-- **Models** — Higgs Audio v3 (TTS), Gemma-4 12B + vision (translation), Parakeet-TDT (ASR), Sortformer (diarization), Mel-Band Roformer (separation) — direct files from Hugging Face.
+- **Models** — Higgs Audio v3 (TTS), Gemma-4 12B + vision (translation), Parakeet-TDT or Parakeet Ultra (ASR), Nemotron 3 Diarization (diarization), Mel-Band Roformer (separation) — direct files from Hugging Face.
 - **Sidecar engines** — the Higgs engine (`audiocpp_engine.dll`), llama.cpp (CUDA 13.4), BSRoformer.cpp, ONNX Runtime 1.28.2, ffmpeg (NVENC) — GitHub zip releases.
 - **CUDA runtime** (`cudart64_13` / `cublas64_13` / `cublasLt64_13`) — from NVIDIA's official redistributable [PyPI wheels](https://pypi.org/project/nvidia-cublas/) (redistribution permitted by the [CUDA Toolkit EULA](https://docs.nvidia.com/cuda/eula/index.html), Attachment A).
 - **VC++ runtime** and **OCR models** ship **bundled** next to the `.exe` — nothing to download.
@@ -103,7 +103,7 @@ On **first run** a "First run" panel lists the components with a ✓/! status ea
 
 `analyze()` is the fixed first stage: separate → ASR (word timings) → diarize → context-translate + vision (caption style / titles / brands) → OCR (layout / blur boxes). It returns an editable **Project** document. Every edit is a patch on that Project with a ~0.17 s/frame preview; export re-runs **only the dirtied stages**.
 
-**Stack:** a native Tauri 2 shell (Rust) launches `dub-server` (axum) on a local port and opens a window onto the SPA — React 19 + Vite + Tailwind + react-konva over JASSUB. Engines: Parakeet-TDT (ASR, ONNX) · Sortformer (diarization) · Gemma-4-12B GGUF (translate + vision, llama.cpp) · Higgs Audio v3 (TTS, `audiocpp_engine.dll`) · Mel-Band Roformer (separation, BSRoformer.cpp) · PP-OCR (ONNX) · ffmpeg/NVENC. **Not a single Python process at runtime.**
+**Stack:** a native Tauri 2 shell (Rust) launches `dub-server` (axum) on a local port and opens a window onto the SPA — React 19 + Vite + Tailwind + react-konva over JASSUB. Engines: Parakeet-TDT (ASR, ONNX) · Nemotron 3 Diarization (diarization) · Gemma-4-12B GGUF (translate + vision, llama.cpp) · Higgs Audio v3 (TTS, `audiocpp_engine.dll`) · Mel-Band Roformer (separation, BSRoformer.cpp) · PP-OCR (ONNX) · ffmpeg/NVENC. **Not a single Python process at runtime.**
 
 ### Build from source
 
@@ -125,4 +125,4 @@ Requires Node 20+, Rust (MSVC toolchain) and WebView2. The native engines (`audi
 
 ## License
 
-App code is [MIT](../LICENSE). Model weights keep their own licenses (Higgs Audio v3 — Boson AI research/non-commercial; Gemma — Gemma Terms; etc.) — audited before each release.
+App code is [MIT](../LICENSE). Model weights keep their own licenses (Higgs Audio v3 — Boson AI research/non-commercial; Gemma — Gemma Terms; Parakeet and Parakeet Ultra — CC-BY-4.0; Nemotron 3 Diarization — OpenMDW-1.1; etc.) — audited before each release.

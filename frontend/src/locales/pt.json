@@ -529,6 +529,14 @@
     "delete": "Excluir perfil",
     "deleteConfirm": "Excluir este perfil de elenco?"
   },
+  "asrVariant": {
+    "int8": "int8",
+    "int8Hint": "Modelo base da NVIDIA, quantização int8 — rápido e leve (~0,7 GB)",
+    "fp32": "fp32",
+    "fp32Hint": "Modelo base da NVIDIA em precisão total fp32 (~2,6 GB)",
+    "ultra": "Ultra · fp32",
+    "ultraHint": "Versão do modelo base ajustada pela Moondream: menos erros de reconhecimento, os mesmos 25 idiomas · fp32 ~2,6 GB"
+  },
   "units": {
     "gb": "GB",
     "mb": "MB",

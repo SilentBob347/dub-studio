@@ -52,7 +52,7 @@ Carga un clip una vez y envíalo a cualquier modo dentro del editor.
 ## Funciones
 
 - **Clonación de voz** —— el timbre original se clona y habla el nuevo idioma (motor nativo [Higgs Audio v3](https://huggingface.co/bosonai), GGUF). Reparto automático por hablante o tu propia voz de un pack.
-- **Diarización de hablantes** —— quién habla y cuándo (NVIDIA **Sortformer** v2, hasta 4 voces), una voz distinta por hablante.
+- **Diarización de hablantes** —— quién habla y cuándo (NVIDIA **Nemotron 3 Diarization**, hasta 8 voces), una voz distinta por hablante.
 - **Reparto de personajes (beta)** —— un personaje es un par **«cara + voz»**. La app reúne las caras de todo el vídeo, reconoce a la misma persona y **la vincula a un hablante por coaparición** (quien sale en primer plano recibe la voz, un oyente de fondo no); elige automáticamente el fotograma-avatar más nítido y **guarda un perfil de reparto para toda la serie** —— asignas voces y descripciones una vez y el **siguiente episodio las aplica solo**. Un interruptor **«caras reales / dibujos·anime»** cambia la detección de rostros según el contenido.
 - **Elección de motor ASR** — transcribe con **Parakeet-TDT** (GPU, por defecto) o **Whisper** ([faster-whisper standalone de Purfview](https://github.com/Purfview/whisper-standalone-win), funciona en CPU) — elige el tamaño del modelo (tiny … large-v3-turbo) y el cuant (compute type) directamente en ajustes.
 - **Importar subtítulos listos** — usa tu propio `.srt`/`.ass` como transcripción exacta: el texto y los tiempos vienen del archivo en vez del reconocimiento automático (los hablantes se asignan igual por diarización). Marca **«subtítulos ya en el idioma destino»** y también se omite la traducción — un vídeo en inglés + tus subtítulos en ruso → doblaje en ruso directo desde ellos.
@@ -110,7 +110,7 @@ En un equipo con NVIDIA, lo único que instalas a mano es un **[controlador NVID
 
 `analyze()` es un primer pase fijo: separación → ASR con tiempos por palabra → diarización → traducción contextual + visión (estilo de subtítulos / títulos / marcas) → OCR (diseño / cajas de desenfoque). El resultado es un documento **Project** editable. Cada edición es un parche sobre él con vista previa ~0,17 s/fotograma; la exportación solo reejecuta **las etapas modificadas**.
 
-**Stack:** un shell nativo **Tauri 2 (Rust)** lanza `dub-server` (axum) en un puerto local y abre una ventana sobre la SPA —— React 19 + Vite + Tailwind + react-konva sobre JASSUB. Motores: Parakeet-TDT o Whisper (ASR) · Sortformer (diarización) · Gemma-4-12B GGUF (traducción + visión, llama.cpp) · Higgs Audio v3 (TTS) · Mel-Band Roformer (separación, BSRoformer.cpp) · PP-OCR (ONNX) · ffmpeg/NVENC. **Ni un solo proceso Python en tiempo de ejecución.**
+**Stack:** un shell nativo **Tauri 2 (Rust)** lanza `dub-server` (axum) en un puerto local y abre una ventana sobre la SPA —— React 19 + Vite + Tailwind + react-konva sobre JASSUB. Motores: Parakeet-TDT o Whisper (ASR) · Nemotron 3 Diarization (diarización) · Gemma-4-12B GGUF (traducción + visión, llama.cpp) · Higgs Audio v3 (TTS) · Mel-Band Roformer (separación, BSRoformer.cpp) · PP-OCR (ONNX) · ffmpeg/NVENC. **Ni un solo proceso Python en tiempo de ejecución.**
 
 ### Compilar desde el código
 
@@ -139,7 +139,9 @@ Requiere Node 20+, Rust (toolchain MSVC) y WebView2. Los motores nativos no hace
 ## Créditos
 
 - **[Boson AI](https://huggingface.co/bosonai)** —— modelo Higgs Audio v3; **[drbaph / Higgs-Audio-v3-Studio](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio)** —— cuantizaciones GGUF y `audiocpp_engine.dll` nativo.
-- **[NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)** y **[Sortformer](https://huggingface.co/nvidia)** —— ASR y diarización; pesos ONNX de [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) y [altunenes/parakeet-rs](https://github.com/altunenes/parakeet-rs).
+- **[NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)** (CC-BY-4.0) —— ASR; pesos ONNX de [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx), runtime [altunenes/parakeet-rs](https://github.com/altunenes/parakeet-rs).
+- **[Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra)** de **[Moondream](https://huggingface.co/moondream)**, basado en parakeet-tdt-0.6b-v3 de NVIDIA (CC-BY-4.0) —— ASR ajustado opcional con menos errores de reconocimiento; exportación ONNX de [altunenes/parakeet-rs](https://huggingface.co/altunenes/parakeet-rs).
+- **[NVIDIA Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization)** (Streaming Sortformer v3, [OpenMDW-1.1](https://openmdw.ai/license/1-1/)) —— diarización de hablantes, hasta 8 hablantes; exportación ONNX de [altunenes/parakeet-rs](https://huggingface.co/altunenes/parakeet-rs).
 - **[Google Gemma](https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf)** —— Gemma-4 12B (traducción + visión), vía [llama.cpp](https://github.com/ggml-org/llama.cpp).
 - **[chenmozhijin / BSRoformer.cpp](https://github.com/chenmozhijin/BSRoformer.cpp)** y **[GaboxR67](https://huggingface.co/GaboxR67)** —— el motor nativo y el modelo Mel-Band Roformer.
 
@@ -155,4 +157,4 @@ Creo software de código abierto e investigo en IA —— la mayor parte es de a
 
 ## Licencia
 
-El código de la app es [MIT](LICENSE). Los pesos de los modelos conservan sus licencias (Higgs Audio v3 —— Boson AI research/no comercial; Gemma —— Gemma Terms; etc.) —— auditadas antes de cada lanzamiento.
+El código de la app es [MIT](LICENSE). Los pesos de los modelos conservan sus licencias (Higgs Audio v3 —— Boson AI research/no comercial; Gemma —— Gemma Terms; Parakeet y Parakeet Ultra —— CC-BY-4.0; Nemotron 3 Diarization —— OpenMDW-1.1; etc.) —— auditadas antes de cada lanzamiento.

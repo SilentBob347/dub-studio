@@ -52,7 +52,7 @@
 ## Возможности
 
 - **Клонирование голоса** — оригинальный тембр клонируется и говорит на новом языке (нативный движок [Higgs Audio v3](https://huggingface.co/bosonai), GGUF). Авто-каст по спикерам или свой голос из пака.
-- **Диаризация спикеров** — кто и когда говорит (NVIDIA **Sortformer** v2, до 4 голосов), разный голос на каждого.
+- **Диаризация спикеров** — кто и когда говорит (NVIDIA **Nemotron 3 Diarization**, до 8 голосов), разный голос на каждого.
 - **Кастинг персонажей (бета)** — персонаж это **связка «лицо + голос»**. Приложение собирает лица по всему видео, узнаёт одного и того же человека и **привязывает его к спикеру по со-встречаемости** реплик (кто в кадре крупным планом — получает голос, фоновый слушатель — нет); автоматически подбирает самый чёткий кадр-аватар и **сохраняет профиль кастинга на весь сериал** — назначил голоса и описания один раз, на **новой серии всё применяется само**. Тумблер **«Реальные лица / Мультфильм·аниме»** переключает распознавание лиц под тип контента.
 - **Выбор ASR-движка** — транскрипция через **Parakeet-TDT** (GPU, по умолчанию) или **Whisper** ([standalone faster-whisper от Purfview](https://github.com/Purfview/whisper-standalone-win), работает на CPU) — размер модели (tiny … large-v3-turbo) и квант (compute type) выбираются прямо в настройках.
 - **Импорт готовых субтитров** — загрузи свой `.srt`/`.ass` как готовый транскрипт: текст и тайминг берутся прямо из файла вместо авто-распознавания (спикеров всё равно раздаёт диаризация). Галочка **«субтитры уже на языке перевода»** пропускает и перевод — англ. ролик + твои русские сабы → русский дубляж напрямую из них, без ASR и без MT.
@@ -95,7 +95,7 @@
 - **WebView2** — предустановлен в Windows 11 (в Windows 10 ставится автоматически)
 - **Диск:** ~15 ГБ на модели, движки и рантайм (тянутся при первом запуске) + место под проекты
 
-На машине с NVIDIA вручную ставится только свежий **[драйвер NVIDIA](https://www.nvidia.com/Download/index.aspx)**. Всё остальное — модели (Higgs Audio v3, Gemma-4 12B + vision, Parakeet-TDT, Sortformer, Mel-Band Roformer), движки, CUDA-рантайм и ffmpeg — приложение скачивает кнопкой при первом запуске.
+На машине с NVIDIA вручную ставится только свежий **[драйвер NVIDIA](https://www.nvidia.com/Download/index.aspx)**. Всё остальное — модели (Higgs Audio v3, Gemma-4 12B + vision, Parakeet-TDT, Nemotron 3 Diarization, Mel-Band Roformer), движки, CUDA-рантайм и ffmpeg — приложение скачивает кнопкой при первом запуске.
 
 ## Быстрый старт
 
@@ -110,7 +110,7 @@
 
 `analyze()` — фиксированный первый проход: сепарация → ASR со словными таймингами → диаризация → контекстный перевод + vision (стиль субтитров / тайтлы / бренды) → OCR (раскладка / блюр-боксы). На выходе — редактируемый документ **Project**. Каждая правка это патч Project с превью ~0.17 с/кадр; экспорт пере-прогоняет **только загрязнённые стадии**.
 
-**Стек:** нативная оболочка **Tauri 2 (Rust)** поднимает `dub-server` (axum) на локальном порту и открывает окно на SPA — React 19 + Vite + Tailwind + react-konva поверх JASSUB. Движки: Parakeet-TDT или Whisper (ASR) · Sortformer (диаризация) · Gemma-4-12B GGUF (перевод + vision, llama.cpp) · Higgs Audio v3 (TTS) · Mel-Band Roformer (сепарация, BSRoformer.cpp) · PP-OCR (ONNX) · ffmpeg/NVENC. **Ни одного Python-процесса в рантайме.**
+**Стек:** нативная оболочка **Tauri 2 (Rust)** поднимает `dub-server` (axum) на локальном порту и открывает окно на SPA — React 19 + Vite + Tailwind + react-konva поверх JASSUB. Движки: Parakeet-TDT или Whisper (ASR) · Nemotron 3 Diarization (диаризация) · Gemma-4-12B GGUF (перевод + vision, llama.cpp) · Higgs Audio v3 (TTS) · Mel-Band Roformer (сепарация, BSRoformer.cpp) · PP-OCR (ONNX) · ffmpeg/NVENC. **Ни одного Python-процесса в рантайме.**
 
 ### Сборка из исходников
 
@@ -150,7 +150,9 @@ cd desktop && npm install && npx tauri build            # 3) десктоп-об
 ## Благодарности
 
 - **[Boson AI](https://huggingface.co/bosonai)** — модель Higgs Audio v3, и **[drbaph / Higgs-Audio-v3-Studio](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio)** — GGUF-кванты и нативный движок `audiocpp_engine.dll`.
-- **[NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)** и **[Sortformer](https://huggingface.co/nvidia)** — ASR и диаризация; ONNX-веса из [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) и [altunenes/parakeet-rs](https://github.com/altunenes/parakeet-rs).
+- **[NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)** (CC-BY-4.0) — ASR; ONNX-веса из [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx), рантайм [altunenes/parakeet-rs](https://github.com/altunenes/parakeet-rs).
+- **[Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra)** от **[Moondream](https://huggingface.co/moondream)** на базе parakeet-tdt-0.6b-v3 от NVIDIA (CC-BY-4.0) — опциональный дообученный ASR с меньшим числом ошибок; ONNX-экспорт из [altunenes/parakeet-rs](https://huggingface.co/altunenes/parakeet-rs).
+- **[NVIDIA Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization)** (Streaming Sortformer v3, [OpenMDW-1.1](https://openmdw.ai/license/1-1/)) — диаризация спикеров, до 8 голосов; ONNX-экспорт из [altunenes/parakeet-rs](https://huggingface.co/altunenes/parakeet-rs).
 - **[Google Gemma](https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf)** — Gemma-4 12B (перевод + vision), через [llama.cpp](https://github.com/ggml-org/llama.cpp).
 - **[chenmozhijin / BSRoformer.cpp](https://github.com/chenmozhijin/BSRoformer.cpp)** и **[GaboxR67](https://huggingface.co/GaboxR67)** — нативный движок и модель Mel-Band Roformer.
 
@@ -166,4 +168,4 @@ cd desktop && npm install && npx tauri build            # 3) десктоп-об
 
 ## Лицензия
 
-Код приложения — [MIT](LICENSE). Веса моделей сохраняют свои лицензии (Higgs Audio v3 — research/non-commercial Boson AI; Gemma — Gemma Terms; и т.д.) — аудит перед каждым релизом.
+Код приложения — [MIT](LICENSE). Веса моделей сохраняют свои лицензии (Higgs Audio v3 — research/non-commercial Boson AI; Gemma — Gemma Terms; Parakeet и Parakeet Ultra — CC-BY-4.0; Nemotron 3 Diarization — OpenMDW-1.1; и т.д.) — аудит перед каждым релизом.

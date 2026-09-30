@@ -230,7 +230,7 @@
   <h2 data-i18n="feat_h2">Everything, running on your machine</h2>
   <div class="featgrid">
     <div class="feat"><span class="fic">🎙️</span><p data-i18n="f1"><b>Voice cloning</b> — the original timbre speaks the new language (Higgs Audio v3).</p></div>
-    <div class="feat"><span class="fic">👥</span><p data-i18n="f2"><b>Speaker diarization</b> — a distinct voice per speaker (NVIDIA Sortformer, up to 4).</p></div>
+    <div class="feat"><span class="fic">👥</span><p data-i18n="f2"><b>Speaker diarization</b> — a distinct voice per speaker (NVIDIA Nemotron 3 Diarization, up to 8).</p></div>
     <div class="feat"><span class="fic">🖼️</span><p data-i18n="f3"><b>On-screen text localization</b> — OCR blurs the original and prints a matched localized title.</p></div>
     <div class="feat"><span class="fic">🌐</span><p data-i18n="f4"><b>Local translation + vision</b> — Gemma-4 12B translates and reads the frame layout.</p></div>
     <div class="feat"><span class="fic">🎚️</span><p data-i18n="f5"><b>SOTA vocal separation</b> — Mel-Band Roformer keeps the backing track intact.</p></div>
@@ -323,7 +323,7 @@ const T={
    m5n:"Транскрипт",m5d:"Чистый транскрипт с диаризацией, караоке-подсветкой, голосами в один клик и экспортом .srt / .txt.",
    feat_h2:"Всё работает на твоём компьютере",
    f1:"<b>Клонирование голоса</b> — тембр оригинала говорит на новом языке (Higgs Audio v3).",
-   f2:"<b>Диаризация спикеров</b> — отдельный голос на каждого (NVIDIA Sortformer, до 4).",
+   f2:"<b>Диаризация спикеров</b> — отдельный голос на каждого (NVIDIA Nemotron 3 Diarization, до 8).",
    f3:"<b>Локализация текста в кадре</b> — OCR заблюривает оригинал и печатает подходящий локализованный титр.",
    f4:"<b>Локальный перевод + vision</b> — Gemma-4 12B переводит и читает раскладку кадра.",
    f5:"<b>SOTA-разделение вокала</b> — Mel-Band Roformer сохраняет музыкальную дорожку.",
@@ -366,7 +366,7 @@ const T={
    m5n:"转录",m5d:"干净的说话人分离转录，卡拉OK跟读，一键生成声音，导出 .srt / .txt。",
    feat_h2:"一切都在你的电脑上运行",
    f1:"<b>声音克隆</b> —— 原始音色说出新语言（Higgs Audio v3）。",
-   f2:"<b>说话人分离</b> —— 每位说话人独立声音（NVIDIA Sortformer，最多 4 个）。",
+   f2:"<b>说话人分离</b> —— 每位说话人独立声音（NVIDIA Nemotron 3 Diarization，最多 8 个）。",
    f3:"<b>画面文字本地化</b> —— OCR 模糊原文并叠加匹配的本地化标题。",
    f4:"<b>本地翻译 + 视觉</b> —— Gemma-4 12B 翻译并读取画面布局。",
    f5:"<b>顶尖人声分离</b> —— Mel-Band Roformer 保留背景音乐。",
@@ -409,7 +409,7 @@ const T={
    m5n:"Transcripción",m5d:"Transcripción diarizada limpia con karaoke, voces en un clic y exportación .srt / .txt.",
    feat_h2:"Todo funciona en tu equipo",
    f1:"<b>Clonación de voz</b> — el timbre original habla el nuevo idioma (Higgs Audio v3).",
-   f2:"<b>Diarización de hablantes</b> — una voz distinta por hablante (NVIDIA Sortformer, hasta 4).",
+   f2:"<b>Diarización de hablantes</b> — una voz distinta por hablante (NVIDIA Nemotron 3 Diarization, hasta 8).",
    f3:"<b>Localización de texto en pantalla</b> — el OCR difumina el original e imprime un título localizado a juego.",
    f4:"<b>Traducción local + visión</b> — Gemma-4 12B traduce y lee la composición del fotograma.",
    f5:"<b>Separación vocal SOTA</b> — Mel-Band Roformer conserva la pista de fondo.",
@@ -452,7 +452,7 @@ const T={
    m5n:"Transcrição",m5d:"Transcrição diarizada limpa com karaokê, vozes num clique e exportação .srt / .txt.",
    feat_h2:"Tudo roda na sua máquina",
    f1:"<b>Clonagem de voz</b> — o timbre original fala o novo idioma (Higgs Audio v3).",
-   f2:"<b>Diarização de locutores</b> — uma voz distinta por locutor (NVIDIA Sortformer, até 4).",
+   f2:"<b>Diarização de locutores</b> — uma voz distinta por locutor (NVIDIA Nemotron 3 Diarization, até 8).",
    f3:"<b>Localização de texto na tela</b> — o OCR desfoca o original e imprime um título localizado combinando.",
    f4:"<b>Tradução local + visão</b> — Gemma-4 12B traduz e lê o layout do quadro.",
    f5:"<b>Separação vocal SOTA</b> — Mel-Band Roformer preserva a trilha de fundo.",
@@ -495,7 +495,7 @@ const T={
    m5n:"Transcription",m5d:"Transcription diarisée propre avec karaoké, voix en un clic et export .srt / .txt.",
    feat_h2:"Tout tourne sur votre machine",
    f1:"<b>Clonage de voix</b> — le timbre original parle la nouvelle langue (Higgs Audio v3).",
-   f2:"<b>Diarisation des locuteurs</b> — une voix distincte par locuteur (NVIDIA Sortformer, jusqu'à 4).",
+   f2:"<b>Diarisation des locuteurs</b> — une voix distincte par locuteur (NVIDIA Nemotron 3 Diarization, jusqu'à 8).",
    f3:"<b>Localisation du texte à l'écran</b> — l'OCR floute l'original et imprime un titre localisé assorti.",
    f4:"<b>Traduction locale + vision</b> — Gemma-4 12B traduit et lit la composition de l'image.",
    f5:"<b>Séparation vocale SOTA</b> — Mel-Band Roformer préserve la piste de fond.",

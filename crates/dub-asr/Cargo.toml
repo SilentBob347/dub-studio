@@ -3,15 +3,16 @@ name = "dub-asr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ASR + диаризация над parakeet-rs (Parakeet-TDT + Sortformer)"
+description = "ASR + диаризация над parakeet-rs (Parakeet-TDT + Nemotron 3 Diarization)"
 
 [dependencies]
 # load-dynamic: onnxruntime подгружается из onnxruntime.dll в рантайме, а не линкуется статически.
 # Это обходит рассинхрон MSVC STL (статическая libort_sys собрана новее локального тулчейна) и заодно
 # делает движок портативным (DLL кладётся рядом с бинарём / ищется по ORT_DYLIB_PATH).
-# Строго 0.3.7: 0.3.8 не грузит Sortformer v2 (diar_streaming_sortformer_4spk-v2.onnx).
+# Строго 0.3.8: диаризация — только Nemotron 3 Diarization (nemotron3_diar_v3.onnx, до 8 спикеров);
+# Sortformer v2 (diar_streaming_sortformer_4spk-v2.onnx) эта версия не грузит.
 # default-features = false: дефолт parakeet-rs включает ort/default (download-binaries + TLS).
-parakeet-rs = { version = "=0.3.7", default-features = false, features = ["sortformer", "load-dynamic", "api-28"] }
+parakeet-rs = { version = "=0.3.8", default-features = false, features = ["sortformer", "load-dynamic", "api-28"] }
 # ort через load-dynamic (disable-linking): onnxruntime.dll 1.28.2 грузится в рантайме через
 # ORT_DYLIB_PATH (ensure_ort_dylib), а не линкуется (статическая libort_sys собрана новее локального
 # MSVC STL и не слинкуется). Версия строго rc.13 — под onnxruntime 1.28.2; DLL с другим OrtApi

@@ -43,8 +43,18 @@ function isConsoleCall(n: ts.Node): boolean {
     && ts.isIdentifier(n.expression.expression) && CONSOLE_OBJ.has(n.expression.expression.text);
 }
 
+function flattenKeys(o: Record<string, unknown>, prefix = "", out = new Set<string>()): Set<string> {
+  for (const [k, v] of Object.entries(o)) {
+    if (v && typeof v === "object") flattenKeys(v as Record<string, unknown>, `${prefix}${k}.`, out);
+    else out.add(`${prefix}${k}`);
+  }
+  return out;
+}
+const TRANSLATION_KEYS = flattenKeys(JSON.parse(readFileSync(join(SRC_DIR, "locales", "en.json"), "utf8")));
+
 function isPropValue(n: ts.Node): boolean {
   const p = n.parent;
+  if (ts.isStringLiteral(n) && TRANSLATION_KEYS.has(n.text)) return false;
   return ts.isPropertyAssignment(p) && p.initializer === n && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) && PROP_NAMES.has(p.name.text);
 }
 

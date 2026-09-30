@@ -58,7 +58,7 @@ function LanguageSwitcher() {
 // резолвится при генерации.
 const VARIANT_SLOT: Record<string, [string, string]> = {
   higgs: ["tts", "q8_0"], "higgs-q6_k": ["tts", "q6_k"], "higgs-q4_k_m": ["tts", "q4_k_m"],
-  parakeet: ["asr", "int8"], "parakeet-fp32": ["asr", "fp32"],
+  parakeet: ["asr", "int8"], "parakeet-fp32": ["asr", "fp32"], "parakeet-ultra": ["asr", "ultra"],
   gemma: ["mt", "q4_0"], "gemma-q5_0": ["mt", "q5_0"], "gemma-q6_k": ["mt", "q6_k"], "gemma-q8_0": ["mt", "q8_0"],
   roformer: ["sep", "Q8_0"], "roformer-q5": ["sep", "Q5_0"], "roformer-q4": ["sep", "Q4_0"],
   "whisper-tiny": ["whisper_model", "tiny"], "whisper-base": ["whisper_model", "base"],
@@ -68,6 +68,14 @@ const VARIANT_SLOT: Record<string, [string, string]> = {
 // Какой из ids сейчас активен по выбору (active.json из capabilities.selection).
 const activeVariantId = (ids: string[], sel: Record<string, string>): string | undefined =>
   ids.find((id) => { const m = VARIANT_SLOT[id]; return !!m && sel[m[0]] === m[1]; });
+
+type VariantI18n = Record<string, { label: "asrVariant.int8" | "asrVariant.fp32" | "asrVariant.ultra"; hint: "asrVariant.int8Hint" | "asrVariant.fp32Hint" | "asrVariant.ultraHint" }>;
+// Варианты Parakeet: int8 и fp32 — базовая модель NVIDIA, Ultra — её дообученная Moondream версия.
+const ASR_VARIANT_I18N: VariantI18n = {
+  parakeet: { label: "asrVariant.int8", hint: "asrVariant.int8Hint" },
+  "parakeet-fp32": { label: "asrVariant.fp32", hint: "asrVariant.fp32Hint" },
+  "parakeet-ultra": { label: "asrVariant.ultra", hint: "asrVariant.ultraHint" },
+};
 
 // 25 европейских языков, которые распознаёт дефолтный ASR Parakeet-TDT v3. Источник вне этого набора
 // требует Whisper (99 языков) — переключаем движок автоматически с уведомлением.
@@ -170,14 +178,15 @@ function ModelsSection() {
   // модель с выбором кванта: дропдаун вариантов + скачать выбранный. КОНТРОЛИРУЕМЫЙ — выбранное значение
   // берётся из поднятого picks / активного выбора (active.json), НЕ из внутреннего useState (иначе ре-рендер
   // секции сбрасывал бы дропдаун на дефолт). При смене — пишем picks и активируем на бэке (если установлен).
-  const VariantPicker = ({ base, ids }: { base: string; ids: string[] }) => {
+  const VariantPicker = ({ base, ids, i18n }: { base: string; ids: string[]; i18n?: VariantI18n }) => {
     const variants = ids.map(get).filter(Boolean) as SetupComponent[];
     const installed = variants.find((v) => v.installed);
     const sel = cap?.selection ?? {};
     const pick = picks[ids[0]] ?? activeVariantId(ids, sel) ?? installed?.id ?? variants[0]?.id ?? "";
     const c = get(pick);
     if (!c) return null;
-    const quant = (v: SetupComponent) => (v.name.match(/\b(q\d[\w]*|int8|fp32|f16|large-v3-turbo|large-v3|tiny|base|small|medium)\b/i)?.[1] ?? v.name);
+    const quant = (v: SetupComponent) => i18n?.[v.id] ? t(i18n[v.id].label) : (v.name.match(/\b(q\d[\w]*|int8|fp32|f16|large-v3-turbo|large-v3|tiny|base|small|medium)\b/i)?.[1] ?? v.name);
+    const hint = i18n?.[c.id] ? t(i18n[c.id].hint) : "";
     const active = prog?.id === c.id;
     return (
       <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
@@ -185,6 +194,7 @@ function ModelsSection() {
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${variants.some((v) => v.installed) ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />
           <div className="min-w-0 flex-1">
             <div className="text-[12px] font-medium truncate">{base}</div>
+            {hint && <div className="text-[10px] leading-snug text-[var(--color-muted)]">{hint}</div>}
             <div className="mono text-[10px] text-[var(--color-muted)] truncate">{c.vram ? `${fmtBytes(c.vram)} VRAM · ` : ""}{fmtBytes(c.size)} {t("settings.disk")}{c.installed ? "" : ` · ${t("settings.notInstalled")}`}</div>
           </div>
           <select value={pick} onChange={(e) => {
@@ -323,7 +333,7 @@ function ModelsSection() {
             <div className="text-[11px] text-[var(--color-muted)]">{t("cloud.asrHint")}</div>
           </div>
         ) : asrEngine === "parakeet" ? (
-          <VariantPicker base="Parakeet-TDT 0.6B v3" ids={["parakeet", "parakeet-fp32"]} />
+          <VariantPicker base="Parakeet-TDT 0.6B v3" ids={["parakeet", "parakeet-fp32", "parakeet-ultra"]} i18n={ASR_VARIANT_I18N} />
         ) : (
           <>
             {rowOf("whisper-engine")}
@@ -373,7 +383,7 @@ function ModelsSection() {
         {selv("sep_backend") === "cpu" ? rowOf("bsroformer-engine-cpu") : rowOf("bsroformer-engine")}
       </Group>
       <Group label={t("settings.roleDiar")}>
-        {/* На чём считать диаризацию — свои табы (Sortformer onnx: CUDA-EP / CPU-провайдер). */}
+        {/* На чём считать диаризацию — свои табы (Nemotron 3 Diarization onnx: CUDA-EP / CPU-провайдер). */}
         <BackendTabs k="diar_backend" />
         {rowOf("sortformer")}
       </Group>
@@ -3913,7 +3923,7 @@ function fmtBytes(n: number) {
 const QUANT_GROUP: Record<string, string> = {
   higgs: "higgs", "higgs-q6_k": "higgs", "higgs-q4_k_m": "higgs",
   gemma: "gemma", "gemma-q5_0": "gemma", "gemma-q6_k": "gemma", "gemma-q8_0": "gemma",
-  parakeet: "parakeet", "parakeet-fp32": "parakeet",
+  parakeet: "parakeet", "parakeet-fp32": "parakeet", "parakeet-ultra": "parakeet",
   roformer: "roformer", "roformer-q5": "roformer", "roformer-q4": "roformer",
 };
 
@@ -4043,6 +4053,7 @@ function FirstRun() {
                                 : <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-surface-2)] text-[var(--color-muted)] uppercase tracking-wide shrink-0">{t("setup.alt")}</span>}
                               {c.installed && <span className="text-[10px] text-[var(--color-accent)] shrink-0">{t("setup.installed")}</span>}
                             </div>
+                            {ASR_VARIANT_I18N[c.id] && <div className="text-[11px] leading-snug text-[var(--color-muted)]">{t(ASR_VARIANT_I18N[c.id].hint)}</div>}
                             {active && <div className="mt-1 h-1 rounded-full bg-[var(--color-surface-2)] overflow-hidden"><div className="h-full bg-[var(--color-accent)]" style={{ width: `${prog!.pct[c.id] ?? 0}%` }} /></div>}
                           </div>
                           <span className="mono text-[11px] text-[var(--color-muted)] shrink-0">{fmtBytes(c.size)}{c.vram ? ` · ${fmtBytes(c.vram)} VRAM` : ""}</span>
@@ -4376,7 +4387,8 @@ function MultiLangView() {
 
 // Режим «Транскрипт»: диаризованный транскрипт (analyze mode=transcribe) + создание голосов из спикеров
 // (speaker-voice, ref-текст авто-транскрибируется на рендере) + экспорт .srt/.txt. Отдельный экран, не Editor.
-const SPK_PALETTE = ["#7fb3ff", "#f79bd3", "#c6f24e", "#ffb454"];   // до 4 спикеров
+// Цвет на каждого из 8 спикеров, которых различает диаризация (Nemotron 3 Diarization).
+const SPK_PALETTE = ["#7fb3ff", "#f79bd3", "#c6f24e", "#ffb454", "#b79cff", "#5fe0c8", "#ff8a7a", "#f2e15c"];
 
 function TranscriptView() {
   const { t, i18n } = useTranslation();
@@ -4606,11 +4618,11 @@ export default function App() {
     // ASR в футере — из ФАКТИЧЕСКОГО выбора (active.json), не из статичного имени Parakeet-модели:
     // юзер переключил движок в «Моделях» -> строка обязана показать то, чем реально пойдёт прогон.
     const sel = (c as { selection?: Record<string, string> }).selection ?? {};
-    const asrLabel = sel.asr_engine === "whisper" ? `whisper ${sel.whisper_model || "auto"}` : c.asr_model;
+    const asrLabel = sel.asr_engine === "whisper" ? `whisper ${sel.whisper_model || "auto"}` : `${c.asr_model}${sel.asr ? ` ${sel.asr}` : ""}`;
     const parts = [c.device, `ASR ${asrLabel}`];
     if (c.models?.llm) parts.push(`MT+vision ${base(c.models.llm)}`);
     if (c.models?.tts) parts.push(`TTS ${c.models.tts}${c.tts_quant ? ` ${c.tts_quant}` : ""}`);
-    parts.push("sep BSRoformer", "diar Sortformer", "OCR PP-OCR");   // фикс-движки пайплайна
+    parts.push("sep BSRoformer", "diar Nemotron 3", "OCR PP-OCR");   // фикс-движки пайплайна
     setCap(parts.join(" · "));
   }).catch(() => setCapOffline(true)); }, []);
   // boot: resume ?pid=… project, else gate on /setup/status — missing required components -> «first run».

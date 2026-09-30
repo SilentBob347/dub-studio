@@ -10,8 +10,8 @@
 //!
 //! Классы источников (все URL — ровно те, что уже использованы; см. crates/README.md, PORT-CONTRACT.md,
 //! Higgs voiceclean.rs):
-//!   • модели — прямые файлы HF (higgs-q8_0/*, gemma-4 + mmproj, parakeet-tdt int8, sortformer, roformer
-//!     voc_fv6-Q8_0);
+//!   • модели — прямые файлы HF (higgs-q8_0/*, gemma-4 + mmproj, parakeet-tdt int8, nemotron 3 diarization,
+//!     roformer voc_fv6-Q8_0);
 //!   • сайдкары/движки — zip-релизы GitHub (BSRoformer.cpp v0.1.0, llama.cpp b11146 win-cuda-13.4,
 //!     onnxruntime 1.28.2, ffmpeg BtbN) + audiocpp_engine.dll (HF);
 //!   • CUDA-runtime — PyPI-wheel'ы NVIDIA (cudart 13.4.92 / cublas 13.8.0.4 / cuDNN 9.27.0.42) + redist cuFFT
@@ -117,9 +117,11 @@ pub struct Marker {
 //  URL-константы (источник истины; сверены HEAD-запросами, размеры = байт-в-байт с диском)
 // ═══════════════════════════════════════════════════════════════════════════
 
-// HF: Sortformer v2 диаризация (altunenes/parakeet-rs).
-const HF_SORTFORMER: &str =
-    "https://huggingface.co/altunenes/parakeet-rs/resolve/main/diar_streaming_sortformer_4spk-v2.onnx";
+// HF: Nemotron 3 Diarization (Streaming Sortformer v3, до 8 спикеров) — ONNX под parakeet-rs 0.3.8
+// (altunenes/parakeet-rs, папка nemotron-3-diarization) + лицензия OpenMDW-1.1 рядом с моделью. Ревизия
+// закреплена sha коммита, а не main: размеры ниже верны именно для неё.
+const HF_NEMOTRON_DIAR: &str = "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/nemotron-3-diarization/nemotron3_diar_v3.onnx";
+const HF_NEMOTRON_DIAR_LICENSE: &str = "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/nemotron-3-diarization/LICENSE";
 // HF: Mel-Band Roformer voc_fv6-Q8_0 (chenmozhijin/BSRoformer-GGUF).
 const HF_ROFORMER: &str = "https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/main/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q8_0.gguf";
 // GitHub: BSRoformer.cpp движок win-cuda-13.1.0 zip (chenmozhijin/BSRoformer.cpp v0.1.0).
@@ -346,6 +348,32 @@ pub fn manifest() -> Vec<Component> {
             markers: &[Marker { rel: "models/tdt-fp32/encoder-model.onnx", expect: 41_770_866 }, Marker { rel: "models/tdt-fp32/encoder-model.onnx.data", expect: 2_435_420_160 }, Marker { rel: "models/tdt-fp32/vocab.txt", expect: 93_939 }],
             external_url: None,
         },
+        // Parakeet Ultra (Moondream): дообученный parakeet-tdt-0.6b-v3 той же архитектуры, словаря и 25 языков,
+        // fp32. ONNX — altunenes/parakeet-rs/parakeet-ultra; nemo128.onnx и config.json дополняют папку до
+        // раскладки tdt-fp32 (файлы байт-в-байт те же, что у базовой модели). Ревизии закреплены sha коммитов.
+        Component {
+            id: "parakeet-ultra",
+            name: "Parakeet Ultra 0.6B (fp32)",
+            purpose: "Распознавание речи (ASR) — дообученная Moondream версия, меньше ошибок",
+            requirement: Requirement::Optional,
+            delivery: Delivery::Download,
+            size: 2_596_031_917,
+            files: &[
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/encoder-model.onnx", dest_rel: "models/tdt-ultra/encoder-model.onnx", size: 87_857_063, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/encoder-model.onnx.data", dest_rel: "models/tdt-ultra/encoder-model.onnx.data", size: 2_435_420_160, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/decoder_joint-model.onnx", dest_rel: "models/tdt-ultra/decoder_joint-model.onnx", size: 72_520_894, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/vocab.txt", dest_rel: "models/tdt-ultra/vocab.txt", size: 93_939, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/tdt/nemo128.onnx", dest_rel: "models/tdt-ultra/nemo128.onnx", size: 139_764, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/config.json", dest_rel: "models/tdt-ultra/config.json", size: 97, extract: Extract::None },
+            ],
+            markers: &[
+                Marker { rel: "models/tdt-ultra/encoder-model.onnx", expect: 87_857_063 },
+                Marker { rel: "models/tdt-ultra/encoder-model.onnx.data", expect: 2_435_420_160 },
+                Marker { rel: "models/tdt-ultra/decoder_joint-model.onnx", expect: 72_520_894 },
+                Marker { rel: "models/tdt-ultra/vocab.txt", expect: 93_939 },
+            ],
+            external_url: None,
+        },
         // ── АЛЬТЕРНАТИВНЫЙ ASR-ДВИЖОК: Whisper (Purfview standalone faster-whisper) ──────────
         // Бинарь-onefile (CTranslate2 CPU из коробки; GPU опц. с CUDA11-либами). Выбор в настройках:
         // движок Parakeet/Whisper + РАЗНЫЕ модели (tiny…large-v3-turbo) + РАЗНЫЕ кванты (compute_type).
@@ -480,17 +508,21 @@ pub fn manifest() -> Vec<Component> {
             markers: &[Marker { rel: "models/whisper/faster-whisper-large-v3-turbo/model.bin", expect: 1_617_884_929 }, Marker { rel: "models/whisper/faster-whisper-large-v3-turbo/tokenizer.json", expect: 2_710_337 }],
             external_url: None,
         },
+        // Диаризация. Маркер — только файл Nemotron: у старых установок лежит лишь Sortformer v2
+        // (models/sortformer/…4spk-v2.onnx, его parakeet-rs 0.3.8 не грузит), и компонент для них недостающий —
+        // догружается первым запуском или on-demand перед анализом. Старый файл не трогаем.
         Component {
             id: "sortformer",
-            name: "Sortformer v2 (диаризация)",
-            purpose: "Разделение спикеров (кто когда говорит)",
+            name: "Nemotron 3 Diarization (до 8 спикеров)",
+            purpose: "Разделение спикеров (кто когда говорит), до 8 голосов",
             requirement: Requirement::Recommended,
             delivery: Delivery::Download,
-            size: 492_243_002,
+            size: 400_509_316,
             files: &[
-                FileSpec { url: HF_SORTFORMER, dest_rel: "models/sortformer/diar_streaming_sortformer_4spk-v2.onnx", size: 492_243_002, extract: Extract::None },
+                FileSpec { url: HF_NEMOTRON_DIAR, dest_rel: "models/nemotron-diar/nemotron3_diar_v3.onnx", size: 400_506_656, extract: Extract::None },
+                FileSpec { url: HF_NEMOTRON_DIAR_LICENSE, dest_rel: "models/nemotron-diar/LICENSE", size: 2_660, extract: Extract::None },
             ],
-            markers: &[Marker { rel: "models/sortformer/diar_streaming_sortformer_4spk-v2.onnx", expect: 492_243_002 }],
+            markers: &[Marker { rel: "models/nemotron-diar/nemotron3_diar_v3.onnx", expect: 400_506_656 }],
             external_url: None,
         },
         Component {
@@ -768,7 +800,8 @@ fn vram_estimate(id: &str) -> u64 {
         "gemma-q8_0" => gb(14.0),
         "parakeet" => gb(1.1),
         "parakeet-fp32" => gb(2.7),
-        "sortformer" => gb(0.6),
+        "parakeet-ultra" => gb(2.7),
+        "sortformer" => gb(0.5),
         "roformer" => gb(0.5),
         "roformer-q5" => gb(0.45),
         "roformer-q4" => gb(0.4),
@@ -924,15 +957,7 @@ pub fn import_from_dir(repo_root: &Path, src_dir: &Path, only: Option<&str>) -> 
             if marker_ok(repo_root, m) {
                 continue;
             }
-            let base = Path::new(m.rel).file_name().and_then(|s| s.to_str()).map(|s| s.to_lowercase());
-            let Some(base) = base else { continue };
-            let Some(cands) = map.get(&base) else { continue };
-            // предпочитаем точное совпадение размера, иначе первый попавшийся.
-            let pick = cands
-                .iter()
-                .find(|(_, sz)| m.expect != 0 && *sz == m.expect)
-                .or_else(|| cands.first());
-            if let Some((src, _)) = pick {
+            if let Some(src) = pick_import_source(&c, m, &map) {
                 if let Some(parent) = dest.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -946,6 +971,46 @@ pub fn import_from_dir(repo_root: &Path, src_dir: &Path, only: Option<&str>) -> 
         }
     }
     imported
+}
+
+/// Размер `sz` годится для маркера: неизвестный expect — любой, иначе в пределах ±3% от expect.
+fn import_size_fits(m: &Marker, sz: u64) -> bool {
+    m.expect == 0 || sz.abs_diff(m.expect).saturating_mul(100) <= m.expect.saturating_mul(3)
+}
+
+/// Исходный файл для маркера `m` компонента `c` из индекса `map` (basename в нижнем регистре -> файлы).
+/// Кандидат — файл с тем же именем и подходящим размером (точный в приоритете). Каталог-источник
+/// отбрасывается, если в нём лежит одноимённый файл ДРУГОГО маркера той же папки назначения с неподходящим
+/// размером: это файлы другой модели. Так Parakeet fp32 и Parakeet Ultra (одинаковые имена, у
+/// encoder-model.onnx.data ещё и одинаковый размер) не смешиваются в одной папке.
+fn pick_import_source<'a>(
+    c: &Component,
+    m: &Marker,
+    map: &'a std::collections::HashMap<String, Vec<(PathBuf, u64)>>,
+) -> Option<&'a PathBuf> {
+    let base_of = |rel: &str| Path::new(rel).file_name().and_then(|s| s.to_str()).map(|s| s.to_lowercase());
+    let cands = map.get(&base_of(m.rel)?)?;
+    let dest_dir = Path::new(m.rel).parent();
+    let siblings: Vec<&Marker> = c
+        .markers
+        .iter()
+        .filter(|s| s.rel != m.rel && Path::new(s.rel).parent() == dest_dir)
+        .collect();
+    let dir_conflicts = |dir: Option<&Path>| {
+        siblings.iter().any(|s| {
+            base_of(s.rel)
+                .and_then(|b| map.get(&b))
+                .is_some_and(|files| files.iter().any(|(p, sz)| p.parent() == dir && !import_size_fits(s, *sz)))
+        })
+    };
+    let ok: Vec<&(PathBuf, u64)> = cands
+        .iter()
+        .filter(|(p, sz)| import_size_fits(m, *sz) && !dir_conflicts(p.parent()))
+        .collect();
+    ok.iter()
+        .find(|(_, sz)| m.expect != 0 && *sz == m.expect)
+        .or_else(|| ok.first())
+        .map(|(p, _)| p)
 }
 
 // ── Полный статус (для GET /setup/status) ────────────────────────────────────
@@ -1723,6 +1788,96 @@ mod tests {
                 Delivery::External => {
                     assert!(c.external_url.is_some(), "{}: External без url", c.id);
                 }
+            }
+        }
+    }
+
+    fn comp(id: &str) -> Component {
+        manifest().into_iter().find(|c| c.id == id).unwrap_or_else(|| panic!("нет компонента {id}"))
+    }
+
+    #[test]
+    fn diarization_component_is_nemotron_at_dub_asr_path() {
+        let c = comp("sortformer");
+        let want = format!("models/{}/{}", dub_asr::DIAR_MODEL_DIR, dub_asr::DIAR_MODEL_FILE);
+        assert_eq!(c.markers.len(), 1);
+        assert_eq!(c.markers[0].rel, want);
+        assert!(c.files.iter().any(|f| f.dest_rel == want));
+        assert!(c.files.iter().any(|f| f.dest_rel == format!("models/{}/LICENSE", dub_asr::DIAR_MODEL_DIR)));
+        for x in manifest() {
+            assert!(x.markers.iter().all(|m| !m.rel.contains("4spk-v2")), "{}: маркер на Sortformer v2", x.id);
+        }
+    }
+
+    #[test]
+    fn new_model_components_pinned_and_sized() {
+        for id in ["sortformer", "parakeet-ultra"] {
+            let c = comp(id);
+            let sum: u64 = c.files.iter().map(|f| f.size).sum();
+            assert_eq!(c.size, sum, "{id}: size != сумме файлов");
+            for f in c.files {
+                assert!(f.size > 0, "{id}: {} без размера", f.dest_rel);
+                assert!(!f.url.contains("/resolve/main/"), "{id}: {} не закреплён ревизией", f.url);
+            }
+            for m in c.markers {
+                let f = c.files.iter().find(|f| f.dest_rel == m.rel).expect("маркер без файла");
+                assert_eq!(f.size, m.expect, "{id}: {} маркер != размеру файла", m.rel);
+            }
+        }
+    }
+
+    fn index(files: &[(&str, u64)]) -> std::collections::HashMap<String, Vec<(PathBuf, u64)>> {
+        let mut map: std::collections::HashMap<String, Vec<(PathBuf, u64)>> = Default::default();
+        for (p, sz) in files {
+            let p = PathBuf::from(p);
+            let base = p.file_name().unwrap().to_string_lossy().to_lowercase();
+            map.entry(base).or_default().push((p, *sz));
+        }
+        map
+    }
+
+    const FP32_DIR: &[(&str, u64)] = &[
+        ("src/fp32/encoder-model.onnx", 41_770_866),
+        ("src/fp32/encoder-model.onnx.data", 2_435_420_160),
+        ("src/fp32/decoder_joint-model.onnx", 72_520_893),
+        ("src/fp32/vocab.txt", 93_939),
+    ];
+    const ULTRA_DIR: &[(&str, u64)] = &[
+        ("src/ultra/encoder-model.onnx", 87_857_063),
+        ("src/ultra/encoder-model.onnx.data", 2_435_420_160),
+        ("src/ultra/decoder_joint-model.onnx", 72_520_894),
+        ("src/ultra/vocab.txt", 93_939),
+    ];
+
+    fn picks(id: &str, map: &std::collections::HashMap<String, Vec<(PathBuf, u64)>>) -> Vec<Option<String>> {
+        let c = comp(id);
+        c.markers
+            .iter()
+            .map(|m| pick_import_source(&c, m, map).map(|p| p.to_string_lossy().replace('\\', "/")))
+            .collect()
+    }
+
+    #[test]
+    fn import_never_fills_ultra_from_fp32_folder() {
+        let map = index(FP32_DIR);
+        assert!(picks("parakeet-ultra", &map).iter().all(Option::is_none), "{:?}", picks("parakeet-ultra", &map));
+        assert!(picks("parakeet-fp32", &map).iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn import_never_fills_fp32_from_ultra_folder() {
+        let map = index(ULTRA_DIR);
+        assert!(picks("parakeet-fp32", &map).iter().all(Option::is_none), "{:?}", picks("parakeet-fp32", &map));
+        assert!(picks("parakeet-ultra", &map).iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn import_takes_each_variant_from_its_own_folder() {
+        let both: Vec<(&str, u64)> = FP32_DIR.iter().chain(ULTRA_DIR).copied().collect();
+        let map = index(&both);
+        for (id, dir) in [("parakeet-ultra", "src/ultra/"), ("parakeet-fp32", "src/fp32/")] {
+            for p in picks(id, &map) {
+                assert!(p.as_deref().is_some_and(|p| p.starts_with(dir)), "{id}: {p:?}");
             }
         }
     }

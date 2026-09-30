@@ -9,7 +9,7 @@
 | Крейт | Назначение | Референс (Python) |
 |-------|-----------|-------------------|
 | `audiocpp` | FFI над `audiocpp_engine.dll` — Higgs Audio v3 TTS + клон голоса. Самостоятельный (без Tauri). | `dubengine/tts.py`, `voices.py` |
-| `dub-asr` | ASR со словными таймстемпами (Parakeet-TDT-v3) + диаризация (Sortformer v2) через parakeet-rs/ONNX. | `dubengine/asr.py`, `diarize.py` |
+| `dub-asr` | ASR со словными таймстемпами (Parakeet-TDT-v3) + диаризация (Nemotron 3 Diarization) через parakeet-rs/ONNX. | `dubengine/asr.py`, `diarize.py` |
 | `dub-core` | Типы `Project` (serde, extra="allow" round-trip) и `EngineOpts`. | `dubengine/project.py`, `opts.py` |
 | `dub-sep` | Вокал/инструментал сепарация — Mel-Band Roformer voc_fv6-Q8_0 через BSRoformer.cpp (сайдкар). Инструментал = mix−vocals. | `dubengine/separate.py` (движок ЗАМЕНЁН приказом юзера) |
 | `dub-captions` | ASS-субтитры (build: титры+дублированные субтитры, 26 пресетов) + ffmpeg/libass burn (gblur+оверлей, NVENC). Метрики — ab_glyph. | `dubengine/captions.py` |
@@ -42,7 +42,12 @@ cargo build --workspace --examples
   (тот же 8-битный дефолт, что в Python-референсе `asr.py` `quantization="int8"`). **int8 требует Level1**
   (см. ниже): дефолтный parakeet-rs Level3 виснет при создании CPU-сессии на квант-узлах
   (DynamicQuantizeLinear/MatMulInteger). GPU-провайдер (`--features cuda`) снимает ограничение.
-- **Sortformer v2** — HF `altunenes/parakeet-rs`, `diar_streaming_sortformer_4spk-v2.onnx` → `models/sortformer/`.
+- **Parakeet Ultra (ONNX), fp32** — опциональный вариант ASR: дообученный Moondream parakeet-tdt-0.6b-v3 (та же
+  архитектура, словарь и 25 языков, меньше ошибок), CC-BY-4.0. HF `altunenes/parakeet-rs`, папка `parakeet-ultra/`:
+  `encoder-model.onnx` + `.data`, `decoder_joint-model.onnx`, `vocab.txt` → `models/tdt-ultra/`.
+- **Nemotron 3 Diarization** (Streaming Sortformer v3, до 8 спикеров, OpenMDW-1.1) — HF `altunenes/parakeet-rs`,
+  `nemotron-3-diarization/nemotron3_diar_v3.onnx` + `LICENSE` → `models/nemotron-diar/`. Нужен parakeet-rs 0.3.8;
+  Sortformer v2 (`diar_streaming_sortformer_4spk-v2.onnx`) эта версия не грузит.
 - **Higgs Audio v3 веса, Q8_0** — дефолт Higgs-Ultimate `higgs-q8_0` (★ recommended, gguf ~5.4ГБ). HF
   `drbaph/Higgs-Audio-v3-Studio`, путь `models/higgs-q8_0/`: `q8_0.gguf` + `config.json`,
   `chat_template.jinja`, `tokenizer.json`, `tokenizer_config.json`, `higgs_audio_v2_tokenizer_config.json`.
@@ -57,9 +62,9 @@ export ORT_DYLIB_PATH="D:\Projects\TEMP\dub-studio\models\runtime\onnxruntime.dl
 # транскрипция:
 ./target/release/examples/asr --wav in.wav --tdt models/tdt
 # с диаризацией:
-./target/release/examples/asr --wav in.wav --tdt models/tdt --diarize --sortformer models/sortformer/diar_streaming_sortformer_4spk-v2.onnx
+./target/release/examples/asr --wav in.wav --tdt models/tdt --diarize --diar models/nemotron-diar/nemotron3_diar_v3.onnx
 ```
-Вывод: JSON `{"segments":[{start,end,text,words:[{word,start,end}]}]}` (или `{turns, segments}` с --diarize).
+Вывод: JSON `{"segments":[{start,end,text,words:[{word,start,end}]}]}` (или `{turns, n_speakers, segments}` с --diarize).
 
 `DUB_ASR_OPT_LEVEL` (0..3, дефолт 1) — уровень оптимизации графа ONNX. **Важно:** на int8-кванте
 дефолтный parakeet-rs Level3 виснет при создании CPU-сессии на минуты; крейт понижает до Level1.
@@ -96,7 +101,7 @@ cd desktop && npx tauri build --no-bundle      # -> desktop/src-tauri/target/rel
 Собрано и проверено (`cargo build --workspace --examples` + `cargo test --workspace` зелёные, 9 тестов):
 - **Higgs Q8_0 синтез** реален: TTS русской фразы и voice_clone прогнаны на CUDA (RTX 4090), движок
   `audiocpp_engine.dll` v0.2.3 + self-contained CUDA13/vcruntime DLL. Артефакты — не тишина (-24dB).
-- **analyze-ядро** (`POST /projects/{pid}/analyze`) как джоба: ffmpeg extract 16k mono → Sortformer
+- **analyze-ядро** (`POST /projects/{pid}/analyze`) как джоба: ffmpeg extract 16k mono → Nemotron 3 Diarization
   turns (single-speaker деградация при <2 спикеров) → TDT int8 словные таймстемпы → Project. Прогнан
   на реальном ролике (docs/example_original.mp4): 11 сегментов, spk=0, слова, валидный русский UTF-8.
 - **PATCH** segment/subpos/mode (атомарно tmp+rename), проверено на живом сервере.
