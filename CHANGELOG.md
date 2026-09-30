@@ -10,12 +10,16 @@ release notes on GitHub are taken from the release's section.
 
 - **Less speeding up of dubbed lines.** The silence the voice leaves around a line is cut before
   the line is fitted to its slot, and long pauses inside it shrink when it would not fit
-  otherwise. The render log says how much was cut and how many lines stayed within the speed-up
-  limit thanks to it. Projects dubbed earlier voice their lines once more on the next render.
+  otherwise. A line that fitted with its silence is placed shorter than its slot, not slowed down.
+  The render log says how much was cut and how many lines stayed within the speed-up limit thanks
+  to it. Projects dubbed earlier voice their lines once more on the next render.
 - **Cloned voices keep their high frequencies.** A cloned voice's reference is cut from the
   separated vocals in full band instead of 16 kHz, its edges fall on pauses between words and its
-  transcript is exactly the words it contains. Without separation it comes from the original mix,
-  and the render log says so.
+  transcript is exactly the words it contains. Only when neither the analysis nor the render
+  separated the voice does it come from the original mix, and the render log says so.
+- **Voices made from a speaker are full band too.** They are cut from the project's separated vocals
+  the same way; when the line cannot be separated from the music, making the voice fails with the
+  reason instead of saving it with the music.
 
 ### Fixed
 

@@ -629,11 +629,11 @@ pub fn to_wav(src: &Path, dst: &Path) -> Result<(), String> {
     ])
 }
 
-fn trim_args(src: &Path, dst: &Path, start: f64, end: f64, sr: u32) -> Vec<OsString> {
-    let (ss, to, ar) = (format!("{start:.3}"), format!("{end:.3}"), sr.to_string());
+fn cut_args(src: &Path, dst: &Path, start: f64, end: f64, sr: u32, ac: u32) -> Vec<OsString> {
+    let (ss, to, ar, ac) = (format!("{start:.3}"), format!("{end:.3}"), sr.to_string(), ac.to_string());
     os_args(&[
         OsStr::new("-y"), OsStr::new("-ss"), OsStr::new(&ss), OsStr::new("-to"), OsStr::new(&to),
-        OsStr::new("-i"), src.as_os_str(), OsStr::new("-af"), OsStr::new(SYNC_AF), OsStr::new("-ac"), OsStr::new("1"),
+        OsStr::new("-i"), src.as_os_str(), OsStr::new("-af"), OsStr::new(SYNC_AF), OsStr::new("-ac"), OsStr::new(&ac),
         OsStr::new("-ar"), OsStr::new(&ar), dst.as_os_str(),
     ])
 }
@@ -641,7 +641,12 @@ fn trim_args(src: &Path, dst: &Path, start: f64, end: f64, sr: u32) -> Vec<OsStr
 /// Вырезать [start,end] в mono @ sr Гц. Порт media.trim(..., sr=16000): keep-сплайс 24к, клипы голоса 16к.
 /// Пишет атомарно (seg-файлы — кэш по существованию).
 pub fn trim(src: &Path, dst: &Path, start: f64, end: f64, sr: u32) -> Result<(), String> {
-    dub_core::atomic::write_with(dst, |tmp| run_ff_args(&trim_args(src, tmp, start, end, sr)))
+    cut(src, dst, start, end, sr, 1)
+}
+
+/// Вырезать [start,end] в sr Гц с ac каналами (вход сепарации — 44.1 кГц стерео). Пишет атомарно.
+pub fn cut(src: &Path, dst: &Path, start: f64, end: f64, sr: u32, ac: u32) -> Result<(), String> {
+    dub_core::atomic::write_with(dst, |tmp| run_ff_args(&cut_args(src, tmp, start, end, sr, ac)))
 }
 
 /// Фейды 15 мс на обоих краях рефа: разворот клипа даёт фейду в конце ту же точку отсчёта, что в начале,
@@ -903,7 +908,8 @@ mod lossless_tests {
             ("extract_wav_16k_mono", extract_wav_16k_mono_args(i, o)),
             ("extract_audio", extract_audio_args(i, o, 44_100, 2)),
             ("to_16k_mono", to_16k_mono_args(i, o)),
-            ("trim", trim_args(i, o, 1.0, 2.0, 24_000)),
+            ("trim", cut_args(i, o, 1.0, 2.0, 24_000, 1)),
+            ("cut", cut_args(i, o, 1.0, 2.0, 44_100, 2)),
             ("trim_ref", trim_ref_args(i, o, 1.0, 2.0)),
             ("encode_preview_aac", preview_aac_args(i, o)),
         ];

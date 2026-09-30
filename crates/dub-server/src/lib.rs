@@ -818,8 +818,9 @@ async fn record_stop(State(st): State<AppState>) -> Json<Value> {
     Json(json!({ "name": name, "voices": list_voice_names(&st.voices_dir) }))
 }
 
-/// POST /projects/{pid}/speaker-voice {speaker, name} — сделать голос из спикера: вырезать его
-/// длиннейшую реплику из источника → voices/<name>.wav (16k mono, <=12с). Порт «Сделать голос» Higgs.
+/// POST /projects/{pid}/speaker-voice {speaker, name} — сделать голос из спикера: его длиннейшая
+/// реплика (<=12с) чистым вокалом в полной полосе → voices/<name>.wav (render::speaker_voice_clip).
+/// Порт «Сделать голос» Higgs.
 async fn speaker_voice(
     State(st): State<AppState>,
     axum::extract::Path(pid): axum::extract::Path<String>,
@@ -844,8 +845,7 @@ async fn speaker_voice(
     let Some(cand) = cand else {
         return (StatusCode::BAD_REQUEST, "у спикера нет реплик").into_response();
     };
-    let (start, end) = (cand.start, cand.end.min(cand.start + 12.0));
-    let ref_text = cand.src_text.trim().to_string();   // реф-текст = расшифровка реплики (как Higgs build_speaker_reference)
+    let cand = cand.clone();
     let input = std::fs::read_to_string(dir.join("source.txt")).unwrap_or_default();
     let input = if !input.trim().is_empty() { PathBuf::from(input.trim()) } else { dir.join("source.mp4") };
     let out = st.voices_dir.join(format!("{name}.wav"));
@@ -855,28 +855,18 @@ async fn speaker_voice(
     let model = st.bsroformer_model.clone();
     let tmp = dir.join("_voicecut");
     let res = tokio::task::spawn_blocking(move || {
-        std::fs::create_dir_all(&voices_dir).ok();
-        std::fs::create_dir_all(&tmp).ok();
-        let raw = tmp.join("cut.wav");
-        media::trim(&input, &raw, start, end, 16_000)?;
-        // очистка голоса: вокал-сепарация (Mel-Band Roformer) убирает фон/музыку из рефа (как voiceclean в
-        // Higgs) — клон цепляется за чистый голос. Движку нужен 44.1к; без установленного движка -> сырой клип.
-        let src_for_ref = if cli.is_file() && model.is_file() {
-            let clip44 = tmp.join("cut44.wav");
-            match media::extract_audio(&raw, &clip44, 44_100, 2)
-                .and_then(|_| dub_sep::separate(&clip44, &tmp.join("stems"), &cli, &model).map_err(|e| e.to_string()))
-            {
-                Ok(sep) => sep.vocals,
-                Err(_) => raw.clone(),
-            }
-        } else {
-            raw.clone()
-        };
-        media::to_16k_mono(&src_for_ref, &out)?;   // реф в 16k mono
-        if !ref_text.is_empty() {
-            let _ = std::fs::write(&txt, &ref_text);   // голос несёт свой ref-текст в библиотеке
+        std::fs::create_dir_all(&voices_dir).map_err(|e| format!("{}: {e}", voices_dir.display()))?;
+        let made = render::speaker_voice_clip(&cand, 12.0, &dir, &input, (&cli, &model), &tmp, &out);
+        let cleaned =
+            if tmp.exists() { std::fs::remove_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display())) } else { Ok(()) };
+        let text = made?;
+        cleaned?;
+        // Голос несёт в библиотеке текст, который в нём звучит; без него старый текст того же имени убирается.
+        match text {
+            Some(t) => std::fs::write(&txt, t).map_err(|e| format!("{}: {e}", txt.display()))?,
+            None if txt.exists() => std::fs::remove_file(&txt).map_err(|e| format!("{}: {e}", txt.display()))?,
+            None => {}
         }
-        let _ = std::fs::remove_dir_all(&tmp);
         Ok::<(), String>(())
     })
     .await;
