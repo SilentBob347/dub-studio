@@ -391,3 +391,39 @@ compose всегда даёт титру bbox (матч ИЛИ fallback цент
 | POST | `/engine/openrouter/catalog/refresh` | Скачать каталог заново; ответ как у GET |
 | POST | `/engine/openrouter/verify` | `{key}` -> `{ok:true, data}` \| `{ok:false, error}` без сохранения |
 | GET | `/engine/server/models?url=` | Модели локального сервера (`GET <url>/v1/models` через сервер студии): `{models:[id]}`; ключ из `/engine/server/key` — только если он сохранён для этого `url`; 502 `{error: server_unreachable, detail}` |
+
+## Видео по ссылке (yt-dlp) — **done**
+
+- Инструмент — компонент `ytdlp` менеджера моделей (`setup.rs`): yt-dlp.exe закреплённой версии и deno (JS-рантайм,
+  без которого yt-dlp не решает задачи YouTube). Раз в сутки при пробе или загрузке проверяется новый релиз yt-dlp:
+  он ставится рядом (`tools/yt-dlp/update`), сверяется с SHA2-256SUMS своего релиза и отвечает на `--version`,
+  только потом становится рабочим (`tools/yt-dlp/update.json`); провал оставляет прежний exe.
+- Каждый вызов yt-dlp: `--ignore-config`, `--no-playlist`, свой deno (`--js-runtimes`), ffmpeg студии, `--proxy` —
+  маршрут прокси студии для этой ссылки (пустой — напрямую), вывод в UTF-8.
+- Загрузка идёт своим потоком мимо GPU-очереди джоб, состояние — `workspace/.fetch/fetches.json` (переживает
+  перезапуск: идущая становится `interrupted`, «продолжить» докачивает `.part` из `workspace/.fetch/<id>`). Шаги:
+  `-J` с выбором формата → `--load-info-json` с прогрессом (`--progress-template`) → субтитры площадки (`subs_lang`,
+  только загруженные людьми, сведённые в SRT) отдельным `--load-info-json --skip-download --write-subs` после видео:
+  их сбой — предупреждение `subs_failed`, а не провал загрузки → файл переезжает в `workspace/<pid>/source.<ext>`,
+  имя проекта — название видео, субтитры площадки — `import_subs.srt`, как при загрузке файла. Проект создаётся без
+  анализа; окно ставит его на стартовый экран как выбранный файл («Начать обработку» — analyze, «Ручной режим» —
+  редактор), агент продолжает `project_analyze`.
+- Качество → формат: `best` = `bv*+ba/b`, `1080|720|480` = `bv*[height<=?N]+ba/b[height<=?N]/wv*+ba/w`, видео сводится
+  в mp4; `audio` = `ba/b` с `-x`.
+- Ошибки — `{error, detail, hint}`: `bad_url`, `bad_quality`, `cookies_invalid` 400; `not_found` 404; `tool_missing`,
+  `ffmpeg_missing`, `busy`, `running` 409; `network`, `proxy`, `rate_limited` 502; `disk_space` 507; `io` 500;
+  остальное от площадки 422: `unsupported_url`, `playlist`, `live`, `geo_blocked`, `age_restricted`,
+  `login_required`, `private`, `members_only`, `drm`, `unavailable`, `format_unavailable`, `no_audio`, `outdated`, `ytdlp_failed`.
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/url/probe?url=&cookies=` | `yt-dlp -J`: `{url, title, duration, thumbnail, thumbnail_data (data: URI через прокси студии), thumbnail_error, uploader, extractor, max_height, has_video, has_audio, qualities, subtitles:[{lang, name, formats}], auto_subtitles, expected_bytes, tool_version}`; `cookies` — путь к cookies.txt |
+| POST | `/url/probe` | То же, тело `{url, cookies?, cookies_text?}` (содержимое cookies.txt — окно не знает путей файлов) |
+| POST | `/projects/from_url` | `{url, quality: best\|1080\|720\|480\|audio, subs_lang?, cookies?, cookies_text?}` → `{fetch}`; готовый проект — `fetch.pid` |
+| GET | `/url/fetches` | `{fetches:[{id, url, quality, subsLang, cookies, status: downloading\|completed\|failed\|cancelled\|interrupted, phase: probe\|download\|merge\|extract\|subtitles\|project\|done, title, duration, downloaded, total, speedBps, etaS, pid, subsImported, warning: subs_missing\|subs_failed\|subs_empty, warningDetail, errorCode, error, hint, toolVersion, startedAt, updatedAt}]}` новые первыми, не больше 20 |
+| GET | `/url/fetches/{id}` | Одна загрузка |
+| POST | `/url/fetches/{id}/cancel` | Погасить yt-dlp со всеми потомками, недокачанное удалить → `{fetch}` |
+| POST | `/url/fetches/{id}/resume` | Прерванную или упавшую — заново с теми же настройками и докачкой → `{fetch}` |
+| DELETE | `/url/fetches/{id}` | Убрать не идущую загрузку из списка вместе с недокачанным → `{ok}` |
+| GET | `/url/tool` | `{installed, version, pinnedVersion, updated, latest, checkedAt, updateAvailable, updating, lastError}` |
+| POST | `/url/tool/update` | Проверить релизы сейчас и поставить новый yt-dlp в фоне → `{started, tool}` |

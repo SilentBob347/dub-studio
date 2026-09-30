@@ -43,6 +43,19 @@ release notes on GitHub are taken from the release's section.
   frame rate drift and cut pieces.
 - **What's new** window with the release notes, and a README on six languages with every download,
   what runs where, troubleshooting and the models' licenses.
+- **A video by its link.** Paste a link on the start screen (YouTube and the other sites
+  yt-dlp knows), see the title, length and preview, pick the quality (best, 1080p, 720p,
+  480p or audio only) and, if the site has them, its subtitles made by people: they come
+  into the project as imported subtitles; when they cannot be downloaded, the video still
+  comes, without them. The download runs in the background beside the dubbing jobs, survives
+  a restart of the app and continues where it stopped; the downloaded video then waits on the
+  start screen like a chosen file: Start processing dubs it with the settings there, Manual
+  mode opens it in the editor. A video that wants a signed-in browser (age check, members, bot
+  check) takes a cookies.txt; a blocked, private or DRM video says why and what to do. The
+  downloader is an optional component in Settings → Models (yt-dlp with deno, pinned and
+  checked by SHA-256); a newer yt-dlp is checked for once a day and used only after it
+  passes its checks, and the version with an Update button is shown there. The same through
+  MCP: `url_probe`, `project_create_from_url` and the `url_*` tools.
 
 ### Changed
 
@@ -89,6 +102,11 @@ release notes on GitHub are taken from the release's section.
 - **Sound no longer drifts from the picture on clips with broken timestamps.** Audio is read by
   its timestamps, with gaps filled by silence, so on screen recordings, phone clips and remuxed
   files the recognition, the dub and the subtitles stay in sync to the end.
+- **The extra voices list shows the whole catalog.** It stopped at the first 500 voices of
+  the dataset.
+- **Voice downloads are checked.** The voice pack and the extra voices come from a pinned
+  revision; the pack and every voice are checked against their SHA-256 before they are kept,
+  and a broken download no longer leaves a half file in the library.
 
 ## 2026-08-06 — 3.1.1
 

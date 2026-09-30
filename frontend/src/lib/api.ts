@@ -263,6 +263,43 @@ async function coded<T>(r: Response): Promise<T> {
 const sendCoded = <T>(method: "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<T> =>
   fetch(`${BASE}${path}`, body === undefined ? { method } : { method, headers: JSON_HEADERS, body: JSON.stringify(body) }).then(coded<T>);
 const getCoded = <T>(path: string): Promise<T> => fetch(`${BASE}${path}`).then(coded<T>);
+const postCoded = <T>(path: string, body: unknown): Promise<T> =>
+  fetch(`${BASE}${path}`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) }).then(coded<T>);
+
+// Видео по ссылке (yt-dlp): проба, загрузка в новый проект мимо очереди джоб, сам инструмент.
+export type UrlQuality = "best" | "1080" | "720" | "480" | "audio";
+export type UrlTrack = { lang: string; name: string | null; formats: string[] };
+export type UrlProbe = {
+  url: string; title: string; duration: number | null; uploader: string | null; extractor: string | null;
+  thumbnail: string | null; thumbnail_data: string | null; thumbnail_error: string | null;
+  max_height: number | null; has_video: boolean; has_audio: boolean; qualities: UrlQuality[];
+  subtitles: UrlTrack[]; auto_subtitles: UrlTrack[]; expected_bytes: number | null; tool_version: string;
+};
+export type UrlFetchStatus = "downloading" | "completed" | "failed" | "cancelled" | "interrupted";
+export type UrlFetch = {
+  id: string; url: string; quality: UrlQuality; subsLang: string | null; cookies: boolean;
+  status: UrlFetchStatus; phase: string; title: string | null; duration: number | null;
+  downloaded: number; total: number | null; speedBps: number; etaS: number | null;
+  pid: string | null; subsImported: boolean; warning: string | null; warningDetail: string | null;
+  errorCode: string | null; error: string | null; hint: string | null; toolVersion: string | null;
+  startedAt: number; updatedAt: number;
+};
+export type UrlTool = {
+  installed: boolean; version: string; pinnedVersion: string; updated: boolean; latest: string | null;
+  checkedAt: number; updateAvailable: boolean; updating: boolean; lastError: string | null; lastErrorCode: string | null;
+};
+export const urlApi = {
+  // cookiesText — содержимое cookies.txt: окно выбирает файл, а путь к нему браузер не отдаёт.
+  probe: (url: string, cookiesText: string | null) => postCoded<UrlProbe>("/url/probe", { url, cookies_text: cookiesText }),
+  start: (req: { url: string; quality: UrlQuality; subs_lang: string | null; cookies_text: string | null }) => postCoded<{ fetch: UrlFetch }>("/projects/from_url", req),
+  list: () => getCoded<{ fetches: UrlFetch[] }>("/url/fetches"),
+  get: (id: string) => getCoded<UrlFetch>(`/url/fetches/${encodeURIComponent(id)}`),
+  cancel: (id: string) => postCoded<{ fetch: UrlFetch }>(`/url/fetches/${encodeURIComponent(id)}/cancel`, {}),
+  resume: (id: string) => postCoded<{ fetch: UrlFetch }>(`/url/fetches/${encodeURIComponent(id)}/resume`, {}),
+  forget: (id: string) => sendCoded<{ ok: boolean }>("DELETE", `/url/fetches/${encodeURIComponent(id)}`),
+  tool: () => getCoded<UrlTool>("/url/tool"),
+  updateTool: () => postCoded<{ started: boolean; tool: UrlTool }>("/url/tool/update", {}),
+};
 
 export type OpenRouterSettings = { configured: boolean; source: "environment" | "local_store" | null; environment_variable: string };
 // Прокси: режим (как в Windows / свой / без прокси), тип для адреса без схемы, адрес без пароля и problem —
@@ -342,7 +379,7 @@ export const api = {
   recordStart: (name: string, device?: string) => postJson<{ ok: boolean; name?: string; error?: string }>("/record/start", { name, device }),
   recordStop: () => fetch(`${BASE}/record/stop`, { method: "POST" }).then(j<{ name: string | null; voices: string[] }>),
   voicesDownloadPack: () => fetch(`${BASE}/voices/download-pack`, { method: "POST" }).then(j<{ job_id: string }>),
-  voicesCatalog: () => getJson<{ voices: { name: string; gender: string; url: string }[] }>("/voices/catalog"),
+  voicesCatalog: () => getCoded<{ voices: { name: string; gender: string; url: string }[] }>("/voices/catalog"),
   voicesGet: (name: string) => postJson<{ ok: boolean; voices?: string[]; error?: string }>("/voices/get", { name }),
   voiceSampleUrl: (name: string) => `${BASE}/voices/sample?name=${encodeURIComponent(name)}`,   // прослушка выбранного голоса (<audio>)
   voicesRename: (from: string, to: string) => postJson<{ voices: string[] }>("/voices/rename", { from, to }),

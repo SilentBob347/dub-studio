@@ -115,6 +115,7 @@ const NAMES = {
   onnxruntime: "ONNX Runtime",
   "onnxruntime-gpu": "ONNX Runtime GPU (CUDA)",
   ffmpeg: "FFmpeg (static build)",
+  ytdlp: "yt-dlp + deno",
   "cuda-runtime": "CUDA runtime (cudart, cuBLAS, cuFFT)",
   cudnn: "cuDNN 9",
 };

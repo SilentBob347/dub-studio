@@ -160,11 +160,17 @@ pub fn stop() -> Result<std::path::PathBuf, String> {
     Ok(st.path)
 }
 
-const VOICE_PACK_URL: &str =
-    "https://huggingface.co/datasets/nerualdreming/VibeVoice/resolve/main/voice-pack.zip";
+// Пак голосов VibeVoice (HF) закреплён коммитом: размер и SHA-256 (lfs.oid) — этой ревизии.
+const VOICE_PACK_URL: &str = "https://huggingface.co/datasets/nerualdreming/VibeVoice/resolve/5c884b3cbdc932c39a5167951c4072120e1a0310/voice-pack.zip";
+const VOICE_PACK_SIZE: u64 = 104_685_334;
+const VOICE_PACK_SHA256: &str = "682e73c189dbe9bc66fc35bc8fb29438641155957a917a7cc914f2f176a65264";
 
-// Датасет доп-голосов (mp3+txt пары), поиск/фильтр/прослушка/скачка в поп-апе.
+// Датасет доп-голосов (mp3+txt пары) закреплён коммитом: список и файлы одной ревизии. У mp3 (LFS) есть SHA-256,
+// у txt (обычные файлы git, по SHA-256 Hugging Face их не описывает) — точный размер.
 const VOICES_DATASET: &str = "Slait/russia_voices";
+const VOICES_REVISION: &str = "215d799f529bfe8815063064246b5c09e4b380d6";
+/// Больше этого голос датасета не бывает (самый крупный ~10 МБ).
+const VOICE_FILE_LIMIT: u64 = 64 * 1024 * 1024;
 
 fn hf_client() -> Result<reqwest::blocking::Client, String> {
     dub_llm::net::builder()
@@ -173,88 +179,173 @@ fn hf_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| format!("http: {e}"))
 }
 
-/// Каталог доп-голосов из HF-датасета: [{name, gender, url}]. Кэшируется в статике на время процесса.
-pub fn catalog() -> serde_json::Value {
-    static CACHE: OnceLock<serde_json::Value> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let url = format!("https://huggingface.co/api/datasets/{VOICES_DATASET}/tree/main?recursive=1");
-            let Ok(client) = hf_client() else { return serde_json::json!({ "voices": [] }) };
-            let Ok(resp) = client.get(&url).send() else { return serde_json::json!({ "voices": [] }) };
-            let Ok(txt) = resp.text() else { return serde_json::json!({ "voices": [] }) };
-            let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&txt) else { return serde_json::json!({ "voices": [] }) };
-            let mut voices = Vec::new();
-            for it in items {
-                let path = it.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if !path.ends_with(".mp3") {
-                    continue;
-                }
-                let name = path.trim_end_matches(".mp3");
-                let gender = if name.contains("Female") { "female" } else if name.contains("Male") { "male" } else { "?" };
-                voices.push(serde_json::json!({
-                    "name": name,
-                    "gender": gender,
-                    "url": format!("https://huggingface.co/datasets/{VOICES_DATASET}/resolve/main/{path}"),
-                }));
-            }
-            serde_json::json!({ "voices": voices })
-        })
-        .clone()
+fn voice_file_url(path: &str) -> String {
+    format!("https://huggingface.co/datasets/{VOICES_DATASET}/resolve/{VOICES_REVISION}/{path}")
 }
 
-/// Скачать один голос датасета (mp3 + txt) в каталог голосов.
+/// Следующая страница списка файлов HF: заголовок `Link: <…>; rel="next"`.
+fn next_page(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let link = headers.get("link")?.to_str().ok()?;
+    link.split(',').find_map(|part| {
+        let (url, rel) = part.split_once(';')?;
+        rel.contains("rel=\"next\"").then(|| url.trim().trim_start_matches('<').trim_end_matches('>').to_string())
+    })
+}
+
+/// Голоса из списка файлов датасета: mp3 с SHA-256 и размером, txt рядом — с размером.
+fn voices_of(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let txt: std::collections::HashMap<&str, u64> = items
+        .iter()
+        .filter_map(|it| Some((it.get("path")?.as_str()?.strip_suffix(".txt")?, it.get("size")?.as_u64()?)))
+        .collect();
+    let mut voices: Vec<serde_json::Value> = items
+        .iter()
+        .filter_map(|it| {
+            let path = it.get("path")?.as_str()?;
+            let name = path.strip_suffix(".mp3")?;
+            let lfs = it.get("lfs")?;
+            let sha256 = lfs.get("oid")?.as_str()?;
+            let size = lfs.get("size")?.as_u64()?;
+            let gender = if name.contains("Female") { "female" } else if name.contains("Male") { "male" } else { "?" };
+            Some(serde_json::json!({
+                "name": name,
+                "gender": gender,
+                "url": voice_file_url(path),
+                "size": size,
+                "sha256": sha256,
+                "txt_size": txt.get(name).copied(),
+            }))
+        })
+        .collect();
+    voices.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    voices
+}
+
+fn catalog_cache() -> &'static std::sync::Mutex<Option<serde_json::Value>> {
+    static CACHE: OnceLock<std::sync::Mutex<Option<serde_json::Value>>> = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Каталог доп-голосов из HF-датасета закреплённой ревизии: [{name, gender, url, size, sha256, txt_size}]. Ревизия
+/// не меняется, поэтому удачный ответ живёт до конца процесса; неудачный не запоминается.
+pub fn catalog() -> Result<serde_json::Value, String> {
+    if let Some(v) = catalog_cache().lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Ok(v);
+    }
+    let client = hf_client()?;
+    let mut url = Some(format!("https://huggingface.co/api/datasets/{VOICES_DATASET}/tree/{VOICES_REVISION}?recursive=1"));
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    while let Some(page) = url.take() {
+        let resp = client.get(&page).send().and_then(|r| r.error_for_status()).map_err(|e| format!("{page}: {e}"))?;
+        url = next_page(resp.headers());
+        let chunk: Vec<serde_json::Value> = resp.json().map_err(|e| format!("{page}: не список файлов: {e}"))?;
+        items.extend(chunk);
+        if items.len() > 100_000 {
+            return Err(format!("{page}: список файлов датасета не кончается"));
+        }
+    }
+    let v = serde_json::json!({ "voices": voices_of(&items) });
+    *catalog_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(v.clone());
+    Ok(v)
+}
+
+/// Скачать `url` в `dest` через .part: размер и (если задан) SHA-256 сверяются до того, как файл появится под своим
+/// именем. `progress(получено)` — по ходу.
+fn fetch_checked(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &std::path::Path,
+    size: u64,
+    sha256: Option<&str>,
+    progress: &dyn Fn(u64),
+) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let part = dest.with_extension(format!("{}.part", dest.extension().and_then(|e| e.to_str()).unwrap_or("")));
+    let result = (|| -> Result<(), String> {
+        let mut resp = client.get(url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("{url}: {e}"))?;
+        let mut f = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+        let mut buf = [0u8; 1 << 16];
+        let mut got = 0u64;
+        loop {
+            let n = resp.read(&mut buf).map_err(|e| format!("{url}: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            got += n as u64;
+            if got > size {
+                return Err(format!("{url}: больше закреплённых {size} байт"));
+            }
+            f.write_all(&buf[..n]).map_err(|e| format!("{}: {e}", part.display()))?;
+            progress(got);
+        }
+        f.flush().map_err(|e| format!("{}: {e}", part.display()))?;
+        if got != size {
+            return Err(format!("{url}: пришло {got} байт, закреплено {size}"));
+        }
+        if let Some(want) = sha256 {
+            let got = crate::setup::sha256_file(&part, &|| false)
+                .map_err(|e| format!("{}: {e}", part.display()))?
+                .unwrap_or_default();
+            if got != want {
+                return Err(format!("{url}: SHA-256 {got} не совпал с закреплённым {want}"));
+            }
+        }
+        std::fs::rename(&part, dest).map_err(|e| format!("{}: {e}", dest.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
+}
+
+/// Скачать один голос датасета (mp3 + txt, если он есть) в каталог голосов, сверив с каталогом закреплённой ревизии.
 pub fn fetch_voice(dir: &std::path::Path, name: &str) -> Result<(), String> {
-    use std::io::Write;
     if name.is_empty() || name.contains("..") || name.contains('/') || name.contains('\\') {
         return Err("плохое имя".into());
     }
+    let catalog = catalog()?;
+    let entry = catalog["voices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|v| v["name"] == name)
+        .cloned()
+        .ok_or_else(|| format!("голоса {name} нет в датасете {VOICES_DATASET}"))?;
+    let size = entry["size"].as_u64().filter(|s| *s <= VOICE_FILE_LIMIT).ok_or_else(|| format!("{name}: размер в каталоге не годится"))?;
+    let sha256 = entry["sha256"].as_str().ok_or_else(|| format!("{name}: нет SHA-256 в каталоге"))?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let client = hf_client()?;
     let base = std::path::Path::new(name).file_name().and_then(|s| s.to_str()).unwrap_or(name);
-    for ext in ["mp3", "txt"] {
-        let url = format!("https://huggingface.co/datasets/{VOICES_DATASET}/resolve/main/{name}.{ext}");
-        let resp = client.get(&url).send().map_err(|e| format!("GET {ext}: {e}"))?;
-        if !resp.status().is_success() {
-            if ext == "txt" { continue; } // txt может отсутствовать — не критично
-            return Err(format!("HTTP {} для {name}.{ext}", resp.status().as_u16()));
+    fetch_checked(&client, &voice_file_url(&format!("{name}.mp3")), &dir.join(format!("{base}.mp3")), size, Some(sha256), &|_| {})?;
+    if let Some(txt) = entry["txt_size"].as_u64() {
+        if txt > VOICE_FILE_LIMIT {
+            return Err(format!("{name}.txt: размер в каталоге не годится"));
         }
-        let bytes = resp.bytes().map_err(|e| format!("тело {ext}: {e}"))?;
-        let mut f = std::fs::File::create(dir.join(format!("{base}.{ext}"))).map_err(|e| e.to_string())?;
-        f.write_all(&bytes).map_err(|e| e.to_string())?;
+        fetch_checked(&client, &voice_file_url(&format!("{name}.txt")), &dir.join(format!("{base}.txt")), txt, None, &|_| {})?;
     }
     Ok(())
 }
 
-/// Скачать пак голосов (VibeVoice) и распаковать в `dir` (плоско, .mp3+.txt пары). Прогресс -> cb.
+/// Скачать пак голосов (VibeVoice) закреплённой ревизии, сверить SHA-256 и распаковать в `dir` (плоско, .mp3+.txt
+/// пары). Прогресс -> cb.
 pub fn download_pack(dir: &std::path::Path, cb: &dyn Fn(serde_json::Value)) -> Result<serde_json::Value, String> {
-    use std::io::{Read, Write};
     std::fs::create_dir_all(dir).map_err(|e| format!("создать {}: {e}", dir.display()))?;
     cb(serde_json::json!({ "stage": "voicepack", "msg": "скачивание пака голосов", "pct": 0 }));
     let client = dub_llm::net::builder()
         .timeout(None)
         .build()
         .map_err(|e| format!("http: {e}"))?;
-    let mut resp = client.get(VOICE_PACK_URL).send().map_err(|e| format!("GET пак: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {} для пака", resp.status().as_u16()));
-    }
-    let total = resp.content_length().unwrap_or(0);
-    let tmp = dir.join("_voice-pack.zip");
-    let mut f = std::fs::File::create(&tmp).map_err(|e| format!("создать zip: {e}"))?;
-    let mut buf = [0u8; 1 << 16];
-    let mut got = 0u64;
-    loop {
-        let n = resp.read(&mut buf).map_err(|e| format!("чтение: {e}"))?;
-        if n == 0 { break; }
-        f.write_all(&buf[..n]).map_err(|e| format!("запись: {e}"))?;
-        got += n as u64;
-        if total > 0 {
-            cb(serde_json::json!({ "stage": "voicepack", "msg": "скачивание пака голосов", "pct": (got as f64 / total as f64 * 90.0) }));
+    let zip_path = dir.join("_voice-pack.zip");
+    let last = std::sync::Mutex::new(0u64);
+    fetch_checked(&client, VOICE_PACK_URL, &zip_path, VOICE_PACK_SIZE, Some(VOICE_PACK_SHA256), &|got| {
+        let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+        if got - *last >= 1 << 20 || got == VOICE_PACK_SIZE {
+            *last = got;
+            cb(serde_json::json!({ "stage": "voicepack", "msg": "скачивание пака голосов", "pct": (got as f64 / VOICE_PACK_SIZE as f64 * 90.0) }));
         }
-    }
-    drop(f);
+    })?;
     cb(serde_json::json!({ "stage": "voicepack", "msg": "распаковка", "pct": 92 }));
-    let zf = std::fs::File::open(&tmp).map_err(|e| format!("открыть zip: {e}"))?;
+    let zf = std::fs::File::open(&zip_path).map_err(|e| format!("открыть zip: {e}"))?;
     let mut zip = zip::ZipArchive::new(zf).map_err(|e| format!("zip: {e}"))?;
     let mut count = 0;
     for i in 0..zip.len() {
@@ -270,7 +361,65 @@ pub fn download_pack(dir: &std::path::Path, cb: &dyn Fn(serde_json::Value)) -> R
         std::io::copy(&mut file, &mut o).map_err(|e| format!("распаковка {name}: {e}"))?;
         count += 1;
     }
-    let _ = std::fs::remove_file(&tmp);
+    drop(zip);
+    if let Err(e) = std::fs::remove_file(&zip_path) {
+        tracing::warn!("{}: архив пака не удалён после распаковки: {e}", zip_path.display());
+    }
     cb(serde_json::json!({ "stage": "voicepack", "msg": format!("готово: {count} файлов"), "pct": 100 }));
     Ok(serde_json::json!({ "extracted": count }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_downloads_are_pinned_to_a_commit() {
+        for url in [VOICE_PACK_URL.to_string(), voice_file_url("RU_Female_x.mp3")] {
+            assert!(!url.contains("/resolve/main/"), "{url}");
+            let rev = url.split("/resolve/").nth(1).and_then(|r| r.split('/').next()).unwrap_or_default();
+            assert!(rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()), "{url}");
+        }
+        assert_eq!(VOICE_PACK_SHA256.len(), 64);
+    }
+
+    #[test]
+    fn the_catalog_takes_hashes_from_the_tree_and_follows_its_pages() {
+        let items: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"type":"file","oid":"fd3a","size":6038690,"lfs":{"oid":"d4c4af1c2704a671f9352cd300b80bb92eee4d88b7642b84aa073009140cc710","size":6038690},"path":"RU_Female_abramova_oljga.mp3"},
+            {"type":"file","oid":"517a","size":7928,"path":"RU_Female_abramova_oljga.txt"},
+            {"type":"file","oid":"aa","size":10,"path":"RU_Male_no_lfs.mp3"},
+            {"type":"file","oid":"bb","size":5,"lfs":{"oid":"cc","size":5},"path":"RU_Male_x.mp3"}
+        ]"#).unwrap();
+        let v = voices_of(&items);
+        assert_eq!(v.len(), 2, "an mp3 without a SHA-256 is not offered");
+        assert_eq!(v[0]["name"], "RU_Female_abramova_oljga");
+        assert_eq!((v[0]["size"].as_u64(), v[0]["txt_size"].as_u64(), v[0]["gender"].as_str()), (Some(6038690), Some(7928), Some("female")));
+        assert!(v[0]["url"].as_str().unwrap().contains(VOICES_REVISION));
+        assert_eq!(v[1]["txt_size"], serde_json::Value::Null);
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("link", "<https://huggingface.co/api/datasets/Slait/russia_voices/tree/x?recursive=1&cursor=abc>; rel=\"next\"".parse().unwrap());
+        assert_eq!(next_page(&h).as_deref(), Some("https://huggingface.co/api/datasets/Slait/russia_voices/tree/x?recursive=1&cursor=abc"));
+        assert_eq!(next_page(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn a_download_is_checked_before_it_takes_its_name() {
+        use dub_llm::test_http::{serve, Reply};
+        use sha2::{Digest, Sha256};
+        let body = b"voice bytes".to_vec();
+        let sha: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
+        let server = serve(vec![Reply::bytes(200, "audio/mpeg", body.clone()), Reply::bytes(200, "audio/mpeg", body.clone()), Reply::bytes(200, "audio/mpeg", body.clone())]);
+        let client = reqwest::blocking::Client::builder().no_proxy().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("v.mp3");
+        let n = body.len() as u64;
+        fetch_checked(&client, &format!("{}/v", server.base()), &dest, n, Some(&sha), &|_| {}).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        let other = dir.path().join("w.mp3");
+        assert!(fetch_checked(&client, &format!("{}/v", server.base()), &other, n, Some(&"0".repeat(64)), &|_| {}).unwrap_err().contains("SHA-256"));
+        assert!(fetch_checked(&client, &format!("{}/v", server.base()), &other, n + 1, None, &|_| {}).unwrap_err().contains("закреплено"));
+        assert!(!other.exists(), "a file that failed its check never appears");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no .part is left");
+    }
 }

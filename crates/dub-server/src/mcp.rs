@@ -24,7 +24,7 @@ mod atomic;
 mod window;
 
 pub use window::{window_events, window_focus, window_result};
-pub(crate) use window::{carry, carry_job, save_with_revision, track, REV_HEADER};
+pub(crate) use window::{carry, carry_job, save_with_revision, tell_windows, track, REV_HEADER};
 
 /// The studio's API router, set once the service has built it.
 static API: OnceLock<Router> = OnceLock::new();
@@ -404,6 +404,7 @@ fn redact(value: Value) -> Value {
 fn shape(name: &str, args: &Value, value: Value) -> Value {
     let detailed = args.get("response_format").and_then(Value::as_str) == Some("detailed");
     match name {
+        "url_probe" => compact_probe(value),
         _ if detailed => value,
         "project_get" => compact_project(&value, args),
         "project_transcript" => transcript(&value, args),
@@ -450,10 +451,31 @@ fn shape(name: &str, args: &Value, value: Value) -> Value {
     }
 }
 
+/// A probe as an agent chooses from it, whatever response_format says: the preview picture's base64
+/// is the window's, the automatic subtitles are only their languages, and no track names its file
+/// formats, which the download picks itself.
+fn compact_probe(mut value: Value) -> Value {
+    if let Value::Object(fields) = &mut value {
+        fields.remove("thumbnail_data");
+        fields.remove("thumbnail_error");
+        if let Some(Value::Array(tracks)) = fields.get_mut("subtitles") {
+            for track in tracks.iter_mut() {
+                *track = json!({ "lang": track["lang"], "name": track["name"] });
+            }
+        }
+        if let Some(Value::Array(tracks)) = fields.get_mut("auto_subtitles") {
+            for track in tracks.iter_mut() {
+                *track = track["lang"].take();
+            }
+        }
+    }
+    value
+}
+
 // ---------------------------------------------------------------- waiting
 
 async fn status_summary() -> Value {
-    let (jobs, setup) = tokio::join!(fetch("/jobs"), fetch("/setup/status"));
+    let (jobs, setup, by_link) = tokio::join!(fetch("/jobs"), fetch("/setup/status"), fetch("/url/fetches"));
     let mut summary = json!({});
     match jobs.and_then(|jobs| job_rows(&jobs)) {
         Ok(rows) => {
@@ -474,7 +496,47 @@ async fn status_summary() -> Value {
         }
         Err(problem) => summary["models_error"] = problem.into(),
     }
+    match by_link {
+        Ok(listed) => {
+            let rows = listed["fetches"].as_array().into_iter().flatten().map(fetch_row);
+            let (done, working): (Vec<Value>, Vec<Value>) = rows.partition(finished);
+            if let Some(jobs) = summary["jobs"].as_array_mut() {
+                jobs.extend(working);
+            }
+            if let Some(ended) = summary["finished_jobs"].as_array_mut() {
+                ended.extend(done.into_iter().take(3));
+            }
+        }
+        Err(problem) => summary["url_downloads_error"] = problem.into(),
+    }
     summary
+}
+
+/// A download by link runs beside the job queue like the models download: it is shown and waited for as work of
+/// kind download, and its result names the project it made.
+fn fetch_row(fetch: &Value) -> Value {
+    let status = match fetch["status"].as_str() {
+        Some("downloading") => "running",
+        Some("completed") => "done",
+        Some("failed") => "error",
+        Some(other) => other,
+        None => "unknown",
+    };
+    let pct = match (fetch["downloaded"].as_f64(), fetch["total"].as_f64()) {
+        (Some(done), Some(total)) if total > 0.0 => Value::from((done / total * 100.0).min(100.0).round()),
+        _ => Value::Null,
+    };
+    let mut row = json!({ "id": fetch["id"], "kind": "download", "pid": fetch["pid"], "status": status, "stage": fetch["phase"], "msg": fetch["title"], "pct": pct, "url": fetch["url"] });
+    if fetch["status"] == "completed" {
+        row["result"] = json!({ "project_id": fetch["pid"], "subs_imported": fetch["subsImported"] });
+    }
+    if !fetch["warning"].is_null() {
+        row["warning"] = json!({ "code": fetch["warning"], "detail": fetch["warningDetail"] });
+    }
+    if !fetch["errorCode"].is_null() {
+        row["error"] = json!({ "code": fetch["errorCode"], "detail": fetch["error"], "hint": fetch["hint"] });
+    }
+    row
 }
 
 /// The models download runs beside the job queue: while it goes it is shown and waited for as work of
@@ -500,6 +562,9 @@ fn busy(summary: &Value) -> Result<Vec<String>, String> {
     Ok(summary["jobs"].as_array().into_iter().flatten().map(|job| job["kind"].as_str().unwrap_or("unknown").to_string()).collect())
 }
 
+/// The id of a download by link starts so; a job id is hex and never does.
+const DOWNLOAD_BY_LINK: &str = "url";
+
 /// How long one wait holds a call: clients give up on a tool call after about
 /// a minute, so a wait answers before that and the agent calls it again.
 const WAIT_DEFAULT: u64 = 30;
@@ -513,10 +578,17 @@ async fn wait_for(args: &Value) -> Result<Value, String> {
     let until = args.get("until").and_then(Value::as_str).unwrap_or("idle").to_string();
     loop {
         let (done, now) = match &job {
+            Some(job) if job.starts_with(DOWNLOAD_BY_LINK) => {
+                let state = fetch(&format!("/url/fetches/{}", segment(job)))
+                    .await
+                    .map_err(|why| format!("No download by link {job} ({why}): its id is fetch.id of project_create_from_url; url_fetches_list shows them."))?;
+                let row = fetch_row(&state);
+                (finished(&row), row)
+            }
             Some(job) => {
                 let state = fetch(&format!("/jobs/{}", segment(job)))
                     .await
-                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool answering done false returned (a models download is waited for with until download). Wait for other work with until."))?;
+                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool answering done false returned, or the fetch.id of project_create_from_url (a models download is waited for with until download). Wait for other work with until."))?;
                 if state.get("status").and_then(Value::as_str).is_none() {
                     return Err(format!("The job {job} has no status: {state}"));
                 }
@@ -563,7 +635,7 @@ fn annotations(name: &str) -> Value {
         "align", "patch", "put", "rename", "save", "hide", "keep", "reorder", "regen", "enable", "resume", "export", "open", "reveal",
     ];
     // reads whose names the rules above miss
-    const READ_NAMES: &[&str] = &["studio_wait", "proxy_test", "openrouter_verify", "project_transcript", "ui_screenshot", "ui_read_page", "ui_console", "editor_state"];
+    const READ_NAMES: &[&str] = &["studio_wait", "proxy_test", "openrouter_verify", "project_transcript", "ui_screenshot", "ui_read_page", "ui_console", "editor_state", "url_probe"];
     // writes over what was stored, so the earlier content is gone: a client asks first
     const OVERWRITES: &[&str] = &[
         "project_put", "project_analyze", "project_retranslate", "project_remix", "project_align", "segment_update", "segments_reorder", "segments_regen_all",
@@ -573,9 +645,12 @@ fn annotations(name: &str) -> Value {
     let changes = CHANGES.iter().any(|verb| name.split('_').any(|word| word == *verb));
     let read_only = READ_NAMES.contains(&name) || !changes && READS.iter().any(|part| name.ends_with(part) || name.contains(&format!("{part}_")));
     let destructive = name.ends_with("_delete") || name.ends_with("_cancel") || name.contains("_cancel_") || name.ends_with("_delete_key") || OVERWRITES.contains(&name);
-    // what reaches the internet: OpenRouter, Hugging Face and every download
+    // what reaches the internet: OpenRouter, Hugging Face, the sites of links and every download
     let open_world = name.starts_with("openrouter_") && !matches!(name, "openrouter_status" | "openrouter_delete_key")
-        || matches!(name, "models_download" | "voice_download" | "voices_download_pack" | "voices_catalog" | "proxy_test");
+        || matches!(
+            name,
+            "models_download" | "voice_download" | "voices_download_pack" | "voices_catalog" | "proxy_test" | "url_probe" | "project_create_from_url" | "url_fetch_resume" | "url_tool_update"
+        );
     let title = name.replace('_', " ");
     // a one-call tool on a file finds its project again and answers from the finished work
     let idempotent = read_only || name.ends_with("_set") || name.contains("_select") || name.ends_with("_file");
@@ -827,7 +902,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "studio_wait",
-                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool still at work returned it), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, download, voices_pack, separate, detect_text - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
+                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool still at work returned it, or the fetch.id of project_create_from_url), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, download (models and downloads by link), voices_pack, separate, detect_text - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
                 schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "download", "voices_pack", "separate", "detect_text"] }, "seconds": { "type": "integer" } }), &[]),
                 call: |_| composite("wait"),
             },
@@ -1112,6 +1187,71 @@ fn tools() -> &'static [Tool] {
                     }
                     Ok(Call { method: Method::POST, path: "/projects".into(), payload: Payload::Form { fields: Vec::new(), files } })
                 },
+            },
+            // ---------------------------------------------------------------- videos by link
+            Tool {
+                name: "url_probe",
+                description: "Look at a video link before downloading it (YouTube and the other sites yt-dlp knows): title, length, uploader, the highest height, the qualities worth offering, the site's subtitles made by people (subtitles, each with lang and name) apart from the languages of the automatic ones (auto_subtitles), the expected size and the preview's link (thumbnail). cookies is the path of a cookies.txt for videos that need a signed-in browser (age, members, bot checks). A refusal names its code and what to do (hint). Needs the component ytdlp (models_download).",
+                schema: || object(json!({ "url": { "type": "string", "description": "link of one video" }, "cookies": { "type": "string", "description": "path of a Netscape cookies.txt" } }), &["url"]),
+                call: |args| get(format!("/url/probe{}", query(&[("url", Some(text(args, "url")?)), ("cookies", given(args, "cookies"))]))),
+            },
+            Tool {
+                name: "project_create_from_url",
+                description: "Download a video by its link into a new project, in the background beside the jobs (not as a graphics-card job): quality best, 1080, 720, 480 or audio; subs_lang takes the site's subtitles made by people in that language (a lang of url_probe's subtitles) as the project's imported subtitles; cookies is the path of a cookies.txt. Answers the download (fetch.id): studio_wait with that id as job_id, or until download; when it is done its result names the project_id, and project_analyze is next. The user answers for their right to the content.",
+                schema: || {
+                    object(
+                        json!({
+                            "url": { "type": "string", "description": "link of one video" },
+                            "quality": { "type": "string", "enum": ["best", "1080", "720", "480", "audio"] },
+                            "subs_lang": { "type": "string", "description": "language of the site's subtitles made by people, from url_probe" },
+                            "cookies": { "type": "string", "description": "path of a Netscape cookies.txt" },
+                        }),
+                        &["url"],
+                    )
+                },
+                call: |args| post("/projects/from_url".into(), body_without(args, &["response_format"])),
+            },
+            Tool {
+                name: "url_fetches_list",
+                description: "The downloads by link, newest first: id, link, quality, status (downloading, completed, failed, cancelled, interrupted), phase, bytes, speed, the project it made (pid), a warning about the subtitles, and the error with its code and hint.",
+                schema: nothing,
+                call: |_| get("/url/fetches".into()),
+            },
+            Tool {
+                name: "url_fetch_get",
+                description: "One download by link, as url_fetches_list shows it.",
+                schema: || id_only("id", "download id from project_create_from_url or url_fetches_list"),
+                call: |args| get(format!("/url/fetches/{}", segment(&text(args, "id")?))),
+            },
+            Tool {
+                name: "url_fetch_cancel",
+                description: "Stop a download by link: yt-dlp and what it started are stopped and the part downloaded is deleted.",
+                schema: || id_only("id", "download id"),
+                call: |args| post(format!("/url/fetches/{}/cancel", segment(&text(args, "id")?)), json!({})),
+            },
+            Tool {
+                name: "url_fetch_resume",
+                description: "Continue an interrupted or failed download by link from where it stopped, with the same settings (after fixing what its hint said: a proxy, cookies, an update of yt-dlp).",
+                schema: || id_only("id", "download id"),
+                call: |args| post(format!("/url/fetches/{}/resume", segment(&text(args, "id")?)), json!({})),
+            },
+            Tool {
+                name: "url_fetch_delete",
+                description: "Remove a finished, failed or interrupted download from the list, with what it downloaded partly; the project it made stays.",
+                schema: || id_only("id", "download id"),
+                call: |args| send(Method::DELETE, format!("/url/fetches/{}", segment(&text(args, "id")?)), json!({})),
+            },
+            Tool {
+                name: "url_tool_status",
+                description: "The yt-dlp that downloads by link: whether the component is there, the version in use, the pinned one, the latest release and when it was checked, whether an update runs, and why the last one failed.",
+                schema: nothing,
+                call: |_| get("/url/tool".into()),
+            },
+            Tool {
+                name: "url_tool_update",
+                description: "Check for a newer yt-dlp now (it is checked once a day anyway) and install it beside the pinned one: it is used only after its SHA-256 matches its release and it runs; otherwise the one in use stays. Runs in the background: url_tool_status shows when it is over.",
+                schema: nothing,
+                call: |_| post("/url/tool/update".into(), json!({})),
             },
             Tool {
                 name: "project_get",
@@ -2165,6 +2305,13 @@ mod tests {
                 { "id": "j2", "kind": "analyze", "pid": "p1", "status": "done", "stage": "done", "msg": "", "pct": 100.0, "result": { "project_id": "p1" } },
             ] })
         };
+        let fetches = || {
+            vec![
+                json!({ "id": "urla1", "url": "https://v.example/a", "status": "downloading", "phase": "download", "title": "A clip", "downloaded": 25, "total": 100, "pid": null, "warning": null, "errorCode": null }),
+                json!({ "id": "urlb2", "url": "https://v.example/b", "status": "completed", "phase": "done", "title": "B clip", "downloaded": 9, "total": 9, "pid": "p9", "subsImported": true, "warning": null, "errorCode": null }),
+                json!({ "id": "urlc3", "url": "https://v.example/c", "status": "failed", "phase": "probe", "title": null, "downloaded": 0, "total": null, "pid": null, "warning": null, "errorCode": "geo_blocked", "error": "not available in your country", "hint": "set a proxy" }),
+            ]
+        };
         let router = Router::new()
             .route("/jobs", get(move |Query(asked): Query<std::collections::HashMap<String, String>>| async move {
                 Json(asked.get("pid").and_then(|pid| atomic::stub::jobs(pid)).unwrap_or_else(jobs))
@@ -2182,6 +2329,24 @@ mod tests {
                 { "id": "higgs", "name": "Higgs", "requirement": "required", "installed": false, "size": 5, "bytesOnDisk": 0, "vram": 1, "missing": ["a"] },
                 { "id": "ocr", "name": "OCR", "requirement": "recommended", "installed": true, "size": 1, "bytesOnDisk": 1, "vram": 0, "missing": [] },
             ] })) }))
+            .route("/url/fetches", get(move || async move { Json(json!({ "fetches": fetches() })) }))
+            .route("/url/fetches/{id}", get(move |Segment(id): Segment<String>| async move {
+                match fetches().into_iter().find(|f| f["id"] == id.as_str()) {
+                    Some(f) => Json(f).into_response(),
+                    None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response(),
+                }
+            }))
+            .route("/url/probe", get(|| async {
+                let formats = json!(["json3", "srv1", "srv2", "srv3", "ttml", "srt", "vtt"]);
+                let auto: Vec<Value> = (0..157).map(|n| json!({ "lang": format!("l{n:03}"), "name": format!("Language {n} from English"), "formats": formats })).collect();
+                Json(json!({
+                    "url": "https://www.youtube.com/watch?v=abc", "title": "A long clip", "duration": 600.0, "thumbnail": "https://i.ytimg.com/vi/abc/hqdefault.jpg",
+                    "thumbnail_data": format!("data:image/jpeg;base64,{}", "A".repeat(60_000)), "thumbnail_error": null, "uploader": "Someone", "extractor": "Youtube",
+                    "max_height": 2160, "has_video": true, "has_audio": true, "qualities": ["best", "1080", "720", "480", "audio"],
+                    "subtitles": [{ "lang": "en", "name": "English", "formats": formats }, { "lang": "ru", "name": "Russian", "formats": formats }],
+                    "auto_subtitles": auto, "expected_bytes": 123456789, "tool_version": "2026.09.01",
+                }))
+            }))
             .route("/engine/capabilities", get(|| async { Json(json!({ "selection": { "or_key": "sk-or-secret", "proxy_url": "http://user:pass@host:8080", "bench": "1" }, "asr_engines": ["parakeet", "whisper"] })) }))
             .route(
                 "/projects/{pid}",
@@ -2274,6 +2439,7 @@ mod tests {
         ("GET", "/projects/{pid}/dub", "the audio for the page's player: project_files names the file"),
         ("POST", "/projects/{pid}/save-text", "opens Explorer: project_export_text writes the same file without it"),
         ("GET", "/jobs/{job_id}/events", "the page's progress stream: job_get and studio_wait"),
+        ("POST", "/url/probe", "the page's probe with cookies.txt as its content (a browser does not know file paths): url_probe passes the path"),
         ("POST", "/mcp", "the MCP server itself"),
         ("GET", "/mcp/status", "the settings page's view of the agent"),
         ("GET", "/mcp/window", "the window's own stream of commands: the ui_* and editor_* tools go through it"),
@@ -2287,8 +2453,8 @@ mod tests {
 
     /// What the composite tools read.
     const COMPOSITE_ROUTES: &[(&str, &[(&str, &str)])] = &[
-        ("composite:status", &[("GET", "/jobs"), ("GET", "/setup/status")]),
-        ("composite:wait", &[("GET", "/jobs/x1"), ("GET", "/jobs"), ("GET", "/setup/status")]),
+        ("composite:status", &[("GET", "/jobs"), ("GET", "/setup/status"), ("GET", "/url/fetches")]),
+        ("composite:wait", &[("GET", "/jobs/x1"), ("GET", "/url/fetches/x1"), ("GET", "/jobs"), ("GET", "/setup/status"), ("GET", "/url/fetches")]),
     ];
 
     /// Arguments for every property of a tool, and one set more for each other
@@ -2459,6 +2625,19 @@ mod tests {
         assert!((find("settings_set").call)(&json!({ "key": "or_key", "value": "sk" })).is_err(), "the key goes through openrouter_set_key");
         assert!((find("settings_set").call)(&json!({ "key": "proxy_url", "value": "http://host:1" })).is_err(), "the proxy goes through proxy_settings_set");
         assert!((find("project_create").call)(&json!({ "path": "Z:/nowhere/clip.mp4" })).is_err(), "a file that is not there is refused before the upload");
+        let call = (find("url_probe").call)(&json!({ "url": "https://www.youtube.com/watch?v=a b&t=1", "cookies": "C:/c/cookies.txt" })).unwrap();
+        assert_eq!((call.method.clone(), call.path.as_str()), (Method::GET, "/url/probe?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Da%20b%26t%3D1&cookies=C%3A%2Fc%2Fcookies.txt"));
+        assert!((find("url_probe").call)(&json!({})).is_err(), "a link is required");
+        let call = (find("project_create_from_url").call)(&json!({ "url": "https://v.example/a", "quality": "720", "subs_lang": "en", "response_format": "detailed" })).unwrap();
+        assert_eq!((call.method.clone(), call.path.as_str()), (Method::POST, "/projects/from_url"));
+        match call.payload {
+            Payload::Json(body) => assert_eq!(body, json!({ "url": "https://v.example/a", "quality": "720", "subs_lang": "en" })),
+            _ => panic!("a JSON body"),
+        }
+        let call = (find("url_fetch_delete").call)(&json!({ "id": "urla1" })).unwrap();
+        assert_eq!((call.method.clone(), call.path.as_str()), (Method::DELETE, "/url/fetches/urla1"));
+        let call = (find("url_fetch_resume").call)(&json!({ "id": "urla1" })).unwrap();
+        assert_eq!((call.method, call.path.as_str()), (Method::POST, "/url/fetches/urla1/resume"));
     }
 
     #[test]
@@ -2610,6 +2789,19 @@ mod tests {
         assert_eq!(summary["jobs"][0]["kind"], "render");
         assert_eq!(summary["finished_jobs"][0]["id"], "j2");
         assert_eq!(summary["models"]["missing_required"][0]["id"], "higgs");
+        let by_link = summary["jobs"].as_array().unwrap().iter().find(|job| job["id"] == "urla1").expect("a download by link is running work");
+        assert_eq!((by_link["kind"].clone(), by_link["status"].clone(), by_link["pct"].clone()), (json!("download"), json!("running"), json!(25.0)));
+        assert!(summary["finished_jobs"].as_array().unwrap().iter().any(|job| job["id"] == "urlc3" && job["error"]["code"] == "geo_blocked"));
+
+        let fetched = wait_for(&json!({ "job_id": "urlb2" })).await.unwrap();
+        assert_eq!((fetched["done"].clone(), fetched["state"]["result"]["project_id"].clone()), (json!(true), json!("p9")), "a download by link is waited for by its id");
+        let failed = wait_for(&json!({ "job_id": "urlc3" })).await.unwrap();
+        assert_eq!((failed["done"].clone(), failed["state"]["error"]["hint"].clone()), (json!(true), json!("set a proxy")));
+        let running = wait_for(&json!({ "job_id": "urla1", "seconds": 2 })).await.unwrap();
+        assert_eq!(running["done"], false);
+        assert!(wait_for(&json!({ "job_id": "urlzz" })).await.unwrap_err().starts_with("No download by link urlzz"));
+        let downloads = wait_for(&json!({ "until": "download", "seconds": 2 })).await.unwrap();
+        assert_eq!(downloads["done"], false, "until download waits for the link too");
 
         let frame = call_tool("project_frame", json!({ "pid": "p1", "t": 3.0 })).await;
         assert_eq!(frame["result"]["isError"], true);
@@ -2647,6 +2839,22 @@ mod tests {
         let missing = call_tool("openrouter_status", json!({})).await;
         assert_eq!(missing["result"]["isError"], true);
         assert!(answer_text(&missing).contains("no route GET /engine/openrouter/settings"), "{missing}");
+    }
+
+    #[tokio::test]
+    async fn a_probe_is_what_the_agent_chooses_from() {
+        stub();
+        for args in [json!({ "url": "https://www.youtube.com/watch?v=abc" }), json!({ "url": "https://www.youtube.com/watch?v=abc", "response_format": "detailed" })] {
+            let reply = call_tool("url_probe", args).await;
+            let text = answer_text(&reply);
+            assert!(text.len() < 8_000, "{} characters", text.len());
+            assert!(!text.contains("thumbnail_data") && !text.contains("base64") && !text.contains("vtt"), "{text}");
+            let probe = &reply["result"]["structuredContent"];
+            assert_eq!((probe["title"].clone(), probe["tool_version"].clone(), probe["thumbnail"].clone()), (json!("A long clip"), json!("2026.09.01"), json!("https://i.ytimg.com/vi/abc/hqdefault.jpg")), "{reply}");
+            assert_eq!(probe["subtitles"], json!([{ "lang": "en", "name": "English" }, { "lang": "ru", "name": "Russian" }]));
+            let auto = probe["auto_subtitles"].as_array().unwrap();
+            assert_eq!((auto.len(), auto[0].clone()), (157, json!("l000")));
+        }
     }
 
     #[tokio::test]
