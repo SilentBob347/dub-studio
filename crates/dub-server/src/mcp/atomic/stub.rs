@@ -27,10 +27,11 @@ pub(crate) struct Plan {
     pub analyze: Ends,
     pub render: Ends,
     pub stage: Ends,
-    /// POST analyze answers 409 once, with an analysis already at work.
+    /// POST analyze or separate answers 409 once, with a job of its kind already at work.
     pub conflict: bool,
-    /// The finished render reports a fallback.
-    pub degraded: bool,
+    /// The voice separator is installed: the analysis of a voiced mode and the render of a dub
+    /// leave the stems.
+    pub separator: bool,
     /// The video the render makes, a real file for save-output to copy.
     pub output: Option<String>,
     /// The file is audio: no picture.
@@ -39,7 +40,7 @@ pub(crate) struct Plan {
 
 impl Default for Plan {
     fn default() -> Self {
-        Plan { analyze: Ends::Done, render: Ends::Done, stage: Ends::Done, conflict: false, degraded: false, output: None, audio: false }
+        Plan { analyze: Ends::Done, render: Ends::Done, stage: Ends::Done, conflict: false, separator: true, output: None, audio: false }
     }
 }
 
@@ -153,7 +154,7 @@ pub(crate) fn jobs(pid: &str) -> Option<Value> {
     let mut studio = studio();
     note(&mut studio, pid, format!("GET /jobs?pid={pid}"));
     let project = studio.projects.get(pid)?;
-    let listed: Vec<Value> = studio.jobs.iter().filter(|(_, job)| job.pid == pid).map(|(id, job)| snapshot(id, job, result_of(job, project))).collect();
+    let listed: Vec<Value> = studio.jobs.iter().filter(|(_, job)| job.pid == pid).map(|(id, job)| snapshot(id, job, result_of(job))).collect();
     Some(json!({ "jobs": listed, "project_job": project.last }))
 }
 
@@ -173,7 +174,7 @@ pub(crate) fn job(id: &str) -> Option<Value> {
     if first && job.ends == Ends::Done {
         finish(job, id, project);
     }
-    Some(snapshot(id, job, result_of(job, project)))
+    Some(snapshot(id, job, result_of(job)))
 }
 
 /// What a finished job leaves in its project.
@@ -181,10 +182,12 @@ fn finish(job: &Job, id: &str, project: &mut Project) {
     match job.kind {
         "analyze" => {
             project.body = analyzed(&project.body, &job.query);
+            project.stems |= project.plan.separator && project.body["mode"] != "nodub";
             project.last = json!({ "kind": "analyze", "state": "done", "job_id": id });
         }
         "render" => {
             project.rendered = true;
+            project.stems |= project.plan.separator && project.body["mode"] == "dub";
             for line in project.body["segments"].as_array_mut().into_iter().flatten() {
                 line["dirty"] = false.into();
             }
@@ -195,11 +198,9 @@ fn finish(job: &Job, id: &str, project: &mut Project) {
     }
 }
 
-fn result_of(job: &Job, project: &Project) -> Value {
+fn result_of(job: &Job) -> Value {
     match job.kind {
-        "analyze" if job.query.contains("voice_slots=") => json!({ "project_id": job.pid, "post": { "voice_slots": { "error": "missing_voices", "names": ["Gone"] } } }),
         "analyze" => json!({ "project_id": job.pid }),
-        "render" if project.plan.degraded => json!({ "output": "output.mp4", "degradations": [{ "stage": "separate", "code": "no_separator", "detail": "the background is the original sound" }] }),
         "render" => json!({ "output": "output.mp4" }),
         "separate" => stems(&job.pid),
         _ => regions(&job.pid),
@@ -215,13 +216,12 @@ fn regions(pid: &str) -> Value {
 }
 
 /// The project an analysis with this query makes: two lines, two speakers where it tells them
-/// apart, translated where the mode translates, and what the analysis applies after itself.
+/// apart (speaker 0 a man, speaker 1 a woman), translated where the mode translates, and what the
+/// analysis applies after itself: autocast gives each the first voice of their gender, or leaves
+/// them cloned ("-") where none is given.
 fn analyzed(before: &Value, query: &str) -> Value {
-    let asked: HashMap<&str, String> = query
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .map(|(key, value)| (key, value.replace("%20", " ")))
-        .collect();
+    let uri: axum::http::Uri = format!("/analyze?{query}").parse().expect("the analysis's query is a URI's");
+    let asked: HashMap<String, String> = axum::extract::Query::try_from_uri(&uri).expect("the analysis's query decodes").0;
     let get = |key: &str| asked.get(key).cloned().unwrap_or_default();
     let (mode, subs, tgt) = (get("mode"), get("subs"), get("tgt_lang"));
     let translated = mode == "dub" || mode == "voiceover" || subs == "translate";
@@ -238,7 +238,19 @@ fn analyzed(before: &Value, query: &str) -> Value {
     after["meta"]["src_lang"] = get("src_lang").into();
     after["stage_ckpts"] = json!({ "asr": "k", "translate": "t" });
     after["segments"] = json!([line("s0", 0.5, 1.5, "0", "Hello there"), line("s1", 2.0, 3.0, if speakers { "1" } else { "0" }, "Bye now")]);
-    after["audio"]["voice"] = if asked.contains_key("voice_slots") { json!({ "mode": "voice", "name": "Boris,Vera" }) } else { json!({ "mode": "clone", "name": null }) };
+    after["audio"]["voice"] = match asked.get("voice_slots") {
+        None => json!({ "mode": "clone", "name": null }),
+        Some(slots) => {
+            let slots: Value = serde_json::from_str(slots).expect("voice_slots is JSON");
+            let first = |gender: &str| slots[gender][0].as_str().unwrap_or("-").to_string();
+            let names = if speakers { vec![first("male"), first("female")] } else { vec![first("male")] };
+            if names.iter().all(|name| name == "-") {
+                json!({ "mode": "clone", "name": null })
+            } else {
+                json!({ "mode": "voice", "name": names.join(",") })
+            }
+        }
+    };
     after["audio"]["keep_original_track"] = (get("keep_original") == "1").into();
     after
 }
@@ -314,6 +326,11 @@ pub(crate) fn routes() -> Router {
                         found["cached"] = true.into();
                         Json(found).into_response()
                     }
+                    Some(project) if project.plan.conflict => {
+                        studio.projects.get_mut(&pid).expect("planned").plan.conflict = false;
+                        let id = start(&mut studio, &pid, "separate", String::new());
+                        (StatusCode::CONFLICT, Json(json!({ "error": "job_conflict", "job_id": id, "kind": "separate" }))).into_response()
+                    }
                     Some(_) => Json(json!({ "job_id": start(&mut studio, &pid, "separate", String::new()) })).into_response(),
                 }
             }),
@@ -365,7 +382,8 @@ pub(crate) fn routes() -> Router {
                     (Some(real), true) => real.clone().into(),
                     (None, true) => format!("C:/w/{pid}/output.mp4").into(),
                 };
-                Json(json!({ "folder": format!("C:/w/{pid}"), "output": output, "playable_output": output, "dub_audio": null })).into_response()
+                let (vocals, background) = if project.stems { (stems(&pid)["vocals"].clone(), stems(&pid)["background"].clone()) } else { (Value::Null, Value::Null) };
+                Json(json!({ "folder": format!("C:/w/{pid}"), "output": output, "playable_output": output, "dub_audio": null, "vocals": vocals, "background": background })).into_response()
             }),
         )
         .route(
@@ -376,7 +394,13 @@ pub(crate) fn routes() -> Router {
                 let Some(project) = studio.projects.get(&pid) else { return unplanned(&pid) };
                 let name = body["name"].as_str().unwrap_or("output");
                 let stem = Path::new(name).file_stem().and_then(|stem| stem.to_str()).unwrap_or(name);
-                let target = Path::new(body["dir"].as_str().unwrap_or_default()).join(format!("{stem}.mp4"));
+                let folder = Path::new(body["dir"].as_str().unwrap_or_default());
+                let mut target = folder.join(format!("{stem}.mp4"));
+                let mut n = 2;
+                while target.exists() {
+                    target = folder.join(format!("{stem} ({n}).mp4"));
+                    n += 1;
+                }
                 if let Some(made) = &project.plan.output {
                     std::fs::copy(made, &target).expect("the stub copies the render");
                 }

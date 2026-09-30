@@ -177,11 +177,40 @@ fn source_file(dir: &Path) -> Result<PathBuf, (StatusCode, String)> {
     Ok(input)
 }
 
-/// A job of this module in the studio's one queue.
-async fn enqueue(st: &AppState, kind: &str, pid: &str, job: jobs::JobFn) -> String {
+/// A job of this module, by the kind the studio's job list names it.
+#[derive(Clone, Copy)]
+enum Stage {
+    Separate,
+    DetectText,
+}
+
+impl Stage {
+    fn kind(self) -> &'static str {
+        match self {
+            Stage::Separate => "separate",
+            Stage::DetectText => "detect_text",
+        }
+    }
+}
+
+/// Queues a job of the project and answers {job_id}. The one-call tools (mcp/atomic.rs) look for a
+/// separation or a reading at work by this kind and the project in GET /jobs?pid=.
+async fn enqueue(st: &AppState, stage: Stage, pid: &str, job: jobs::JobFn) -> Response {
     let id = st.jobs.enqueue(job).await;
-    eprintln!("[{kind}] project {pid}: job {id}");
-    id
+    eprintln!("[{}] project {pid}: job {id}", stage.kind());
+    Json(json!({ "job_id": id })).into_response()
+}
+
+/// A result found done, marked as such.
+fn cached(mut found: Value) -> Value {
+    found["cached"] = true.into();
+    found
+}
+
+/// The voice and the background, when both are separated.
+fn stems_of(stems: &Path) -> Option<Value> {
+    let (vocals, background) = (stems.join("vocals.wav"), stems.join("instrumental.wav"));
+    (vocals.is_file() && background.is_file()).then(|| json!({ "vocals": vocals.to_string_lossy(), "background": background.to_string_lossy() }))
 }
 
 /// POST /projects/{pid}/separate — the voice and the background (music, effects) of the
@@ -197,18 +226,26 @@ pub async fn separate(State(st): State<AppState>, AxPath(pid): AxPath<String>) -
         Ok(input) => input,
         Err(refused) => return refused.into_response(),
     };
-    let stems = dir.join("stems");
-    let (vocals, background) = (stems.join("vocals.wav"), stems.join("instrumental.wav"));
-    if vocals.is_file() && background.is_file() {
-        return Json(json!({ "cached": true, "vocals": vocals.to_string_lossy(), "background": background.to_string_lossy() })).into_response();
+    if let Some(found) = stems_of(&dir.join("stems")) {
+        return Json(cached(found)).into_response();
     }
     let model = models::resolve_sep(&st.models_root, &models::load_selection(&st.models_root));
     if !model.is_file() {
         return (StatusCode::CONFLICT, format!("the voice separator's model is not installed ({}): models_status names it, models_download fetches it", model.display())).into_response();
     }
     let cli = dub_sep::engine_cli(&st.repo_root, models::stage_backend(&st.models_root, "sep_backend"));
-    let (repo_root, models_root) = (st.repo_root.clone(), st.models_root.clone());
-    let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
+    let job = separation(dir, input, cli, model, st.repo_root.clone(), st.models_root.clone());
+    enqueue(&st, Stage::Separate, &pid, job).await
+}
+
+/// The separation as a job. A second one queued for the project while the first was at work
+/// answers the first one's stems.
+fn separation(dir: PathBuf, input: PathBuf, cli: PathBuf, model: PathBuf, repo_root: PathBuf, models_root: PathBuf) -> jobs::JobFn {
+    Box::new(move |progress: jobs::ProgressFn| {
+        let stems = dir.join("stems");
+        if let Some(found) = stems_of(&stems) {
+            return Ok(found);
+        }
         let cb = |ev: Value| progress(ev);
         crate::ensure_job_components(&repo_root, &models_root, false, false, &cb)?;
         if !cli.is_file() {
@@ -222,8 +259,7 @@ pub async fn separate(State(st): State<AppState>, AxPath(pid): AxPath<String>) -
         cb(json!({ "stage": "separate", "msg": "сепарация (Mel-Band Roformer voc_fv6-Q8_0)" }));
         let split = dub_sep::separate(&audio_hq, &stems, &cli, &model).map_err(|e| format!("сепарация: {e}"))?;
         Ok(json!({ "vocals": split.vocals.to_string_lossy(), "background": split.instrumental.to_string_lossy() }))
-    });
-    Json(json!({ "job_id": enqueue(&st, "separate", &pid, job).await })).into_response()
+    })
 }
 
 /// The analysis's own detection settings (ocr.rs), so that what the agent reads is what the
@@ -257,21 +293,33 @@ pub async fn detect_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
     }
     let file = dir.join(REGIONS_FILE);
     if file.is_file() {
-        let read = std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|text| serde_json::from_str::<Value>(&text).map_err(|e| e.to_string()));
-        return match read {
-            Ok(mut found) => {
-                found["cached"] = true.into();
-                Json(found).into_response()
-            }
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("read {}: {e}", file.display())).into_response(),
+        return match read_regions(&file) {
+            Ok(found) => Json(cached(found)).into_response(),
+            Err(why) => (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
         };
     }
     let ocr = dub_ocr::OcrPaths::under(&st.models_root);
     if !ocr.all_exist() {
         return (StatusCode::CONFLICT, format!("the on-screen text reader is not installed ({}): models_status names it, models_download fetches it", ocr.det.display())).into_response();
     }
-    let fps = st.opts.caption_fps.max(1);
-    let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
+    let job = reading(input, dir, ocr, st.opts.caption_fps.max(1), (width, height));
+    enqueue(&st, Stage::DetectText, &pid, job).await
+}
+
+/// The text read before, as text_regions.json holds it.
+fn read_regions(file: &Path) -> Result<Value, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("read {}: {e}", file.display()))
+}
+
+/// The reading as a job. A second one queued for the project while the first was at work
+/// answers what the first one read.
+fn reading(input: PathBuf, dir: PathBuf, ocr: dub_ocr::OcrPaths, fps: i32, (width, height): (i64, i64)) -> jobs::JobFn {
+    Box::new(move |progress: jobs::ProgressFn| {
+        let file = dir.join(REGIONS_FILE);
+        if file.is_file() {
+            return read_regions(&file);
+        }
         progress(json!({ "stage": "ocr_detect", "msg": "детекция вшитого текста (PP-OCR DBNet+CRNN)" }));
         let (regions, _) = dub_ocr::detect_regions(&input, &dir, &ocr, fps, OCR_MIN_DUR, OCR_IOU, OCR_PAD, OCR_JITTER, OCR_SCORE)?;
         let found = json!({
@@ -287,8 +335,7 @@ pub async fn detect_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
         });
         write_json(&file, &found)?;
         Ok(found)
-    });
-    Json(json!({ "job_id": enqueue(&st, "detect_text", &pid, job).await })).into_response()
+    })
 }
 
 #[cfg(test)]
@@ -392,6 +439,26 @@ mod tests {
         assert_eq!(source_of(root.path()), "window");
     }
 
+    #[test]
+    fn a_job_queued_again_answers_the_first_ones_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let nowhere = dir.path().join("not-installed");
+        let quiet: jobs::ProgressFn = std::sync::Arc::new(|_| {});
+        let stems = dir.path().join("stems");
+        std::fs::create_dir_all(&stems).unwrap();
+        for name in ["vocals.wav", "instrumental.wav"] {
+            std::fs::write(stems.join(name), b"w").unwrap();
+        }
+        let job = separation(dir.path().into(), nowhere.clone(), nowhere.clone(), nowhere.clone(), nowhere.clone(), nowhere.clone());
+        let split = job(quiet.clone()).expect("the stems are there: no engine is needed");
+        assert!(split["vocals"].as_str().unwrap().ends_with("vocals.wav") && split["background"].as_str().unwrap().ends_with("instrumental.wav"), "{split}");
+
+        let read = json!({ "count": 1, "regions": [{ "text": "EXIT", "x": 10, "y": 20, "w": 120, "h": 40, "t0": 1.0, "t1": 3.5 }] });
+        write_json(&dir.path().join(REGIONS_FILE), &read).unwrap();
+        let job = reading(nowhere.clone(), dir.path().into(), dub_ocr::OcrPaths::under(&nowhere), 4, (1280, 720));
+        assert_eq!(job(quiet).expect("the text was read: no reader is needed"), read);
+    }
+
     #[tokio::test]
     async fn separated_stems_are_answered_without_a_job_and_audio_has_no_text_to_read() {
         let root = tempfile::tempdir().unwrap();
@@ -407,18 +474,25 @@ mod tests {
             (status, String::from_utf8_lossy(&bytes).into_owned())
         };
 
+        let listed = || async {
+            let (_, listed) = read(crate::project_files::files(State(st.clone()), AxPath(pid.clone())).await).await;
+            serde_json::from_str::<Value>(&listed).unwrap()
+        };
         let stems = st.workspace.join(&pid).join("stems");
         std::fs::create_dir_all(&stems).unwrap();
         std::fs::write(stems.join("vocals.wav"), b"v").unwrap();
         let (status, why) = read(separate(State(st.clone()), AxPath(pid.clone())).await).await;
         assert_eq!(status, StatusCode::CONFLICT, "half the stems are not the answer, and no separator is installed here: {why}");
         assert!(why.contains("not installed"), "{why}");
+        let half = listed().await;
+        assert!(half["vocals"].as_str().unwrap().ends_with("vocals.wav") && half["background"].is_null(), "{half}");
         std::fs::write(stems.join("instrumental.wav"), b"i").unwrap();
         let (status, body) = read(separate(State(st.clone()), AxPath(pid.clone())).await).await;
         assert_eq!(status, StatusCode::OK);
         let body: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(body["cached"], true);
         assert!(body["vocals"].as_str().unwrap().ends_with("vocals.wav") && body["background"].as_str().unwrap().ends_with("instrumental.wav"));
+        assert_eq!((listed().await["vocals"].clone(), listed().await["background"].clone()), (body["vocals"].clone(), body["background"].clone()), "the project's files name the stems");
 
         let (status, why) = read(detect_text(State(st.clone()), AxPath(pid.clone())).await).await;
         assert_eq!(status, StatusCode::CONFLICT);

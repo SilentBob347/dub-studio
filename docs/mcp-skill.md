@@ -97,6 +97,14 @@ The same results come two ways.
   takes longer it answers `done: false` with the `job` at work: `studio_wait` with its
   `job_id`, then call the tool again with the same arguments - the finished stages are
   kept, and `dub_file` goes on from the analysis to the render.
+- `dub_file` tells what fell back in `degradations`, read off the finished dub:
+  `background_not_separated` (no voice separator: no music or effects under the dub),
+  `ocr_skipped` (no on-screen text reader: the text in the picture stays as it is),
+  `single_speaker` (every line voiced as one speaker; its detail says whether the diarizer
+  is missing), `voices_not_cast` (autocast left these `speakers` on their own cloned voice),
+  `voices_not_as_asked`, `no_speech`. Tell the user; `models_status` and `models_download`
+  bring a missing model. Its copy in `out_dir` is `<file>.<tgt_lang>`, or with (2), (3)
+  when that name is another file's; called again, it answers the copy already there.
 - **Work in the studio** - when the result needs looking at and fixing: the translation
   line by line, the speakers, the voices and the characters, the look of the subtitles,
   titles, blur, several languages: `project_create`, `project_analyze`, the edits and

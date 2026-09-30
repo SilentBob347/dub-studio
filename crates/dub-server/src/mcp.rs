@@ -1195,7 +1195,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_files",
-                description: "Where the project's files are on this computer: the folder, the video it was made from, the finished output and its playable copy, the dubbed audio, project.json, casting.json and the subtitle and text files written.",
+                description: "Where the project's files are on this computer: the folder, the video it was made from, the finished output and its playable copy, the dubbed audio, project.json, casting.json, the separated voice and background (vocals, background) and the subtitle and text files written.",
                 schema: project_only,
                 call: |args| get(project_path(args, "/files")?),
             },

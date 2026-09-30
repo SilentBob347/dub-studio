@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use super::super::tests::{answer_text, call_tool, stub};
 use super::stub::{self as studio, Ends, Plan};
-use super::ROUTES;
+use super::{degradations, Voices, ROUTES};
 
 fn media(pid: &str) -> String {
     format!("C:/media/{pid}.mp4")
@@ -128,7 +128,7 @@ async fn a_dub_runs_every_stage_once_and_keeps_its_copy() {
     std::fs::write(&output, b"the dubbed video").unwrap();
     let out_dir = folder.path().join("out");
     std::fs::create_dir_all(&out_dir).unwrap();
-    studio::plan("db1", Plan { output: Some(output.to_string_lossy().into_owned()), degraded: true, ..Plan::default() });
+    studio::plan("db1", Plan { output: Some(output.to_string_lossy().into_owned()), ..Plan::default() });
     let arguments = json!({ "path": media("db1"), "tgt_lang": "ru", "voice": "pack:Anna", "keep_original": true, "out_dir": out_dir.to_string_lossy() });
     let dubbed = answer("dub_file", arguments.clone()).await.unwrap();
     assert_eq!(dubbed["done"], true, "{dubbed}");
@@ -144,8 +144,7 @@ async fn a_dub_runs_every_stage_once_and_keeps_its_copy() {
     assert_eq!(std::fs::read(&saved).unwrap(), b"the dubbed video");
     assert_eq!(dubbed["video"], output.to_string_lossy().as_ref());
     assert_eq!(dubbed["stages"], json!({ "analysis": "done now", "voices": { "mode": "voice", "names": "Anna", "second_track": true }, "render": "done now" }));
-    assert_eq!(dubbed["degradations"][0]["code"], "no_separator", "{dubbed}");
-    assert_eq!(dubbed["degradations"][0]["job"], "render");
+    assert_eq!(dubbed["degradations"], json!([]), "separated, the text reader there, two speakers, Anna as asked: {dubbed}");
 
     studio::forget_log("db1");
     let again = answer("dub_file", arguments).await.unwrap();
@@ -165,8 +164,8 @@ async fn autocast_goes_with_the_analysis_and_wrong_voices_are_refused() {
     let analysis = log.iter().find(|entry| entry.starts_with("POST /projects/ac1/analyze")).unwrap();
     assert!(analysis.contains("mode=voiceover") && analysis.contains("voice_slots=") && analysis.contains("Boris") && analysis.contains("Vera"), "{analysis}");
     assert_eq!(asked("ac1", "PATCH /projects/ac1"), 0, "the analysis deals the voices: {log:?}");
-    assert_eq!(dubbed["stages"]["voices"]["mode"], "voice");
-    assert_eq!(dubbed["degradations"][0], json!({ "job": "analyze", "stage": "voices", "code": "missing_voices", "detail": ["Gone"] }));
+    assert_eq!(dubbed["stages"]["voices"], json!({ "mode": "voice", "names": "Boris,Vera", "second_track": false }));
+    assert_eq!(dubbed["degradations"], json!([]), "a voice-over keeps the original under it, so nothing is separated: {dubbed}");
 
     for (arguments, says) in [
         (json!({ "voice": "pack:Nobody" }), "no voice Nobody"),
@@ -223,6 +222,8 @@ async fn voice_and_background_and_the_text_in_the_picture_are_one_call_each() {
 #[tokio::test]
 async fn every_one_call_tool_calls_only_the_routes_it_declares() {
     let folder = tempfile::tempdir().unwrap();
+    let output = folder.path().join("output.mp4");
+    std::fs::write(&output, b"the dubbed video").unwrap();
     let calls = [
         ("transcribe_file", "rt1", json!({})),
         ("translate_file", "rt2", json!({ "tgt_lang": "ru" })),
@@ -231,7 +232,7 @@ async fn every_one_call_tool_calls_only_the_routes_it_declares() {
         ("detect_text_file", "rt5", json!({})),
     ];
     for (tool, pid, extra) in calls {
-        studio::plan(pid, Plan::default());
+        studio::plan(pid, Plan { output: Some(output.to_string_lossy().into_owned()), ..Plan::default() });
         let mut arguments = json!({ "path": media(pid) });
         arguments.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         answer(tool, arguments).await.unwrap_or_else(|why| panic!("{tool}: {why}"));
@@ -261,4 +262,137 @@ fn a_one_call_tool_on_a_file_is_idempotent_and_changes_something() {
         assert_eq!((hints["readOnlyHint"].clone(), hints["idempotentHint"].clone(), hints["destructiveHint"].clone()), (json!(false), json!(true), json!(false)), "{name}");
     }
     assert_eq!(super::super::annotations("export_subtitles")["readOnlyHint"], false);
+}
+
+#[tokio::test]
+async fn what_fell_back_is_read_off_the_dub() {
+    studio::plan("dg1", Plan { separator: false, ..Plan::default() });
+    let dubbed = answer("dub_file", json!({ "path": media("dg1"), "tgt_lang": "de", "voice": "autocast", "male_voices": ["Boris"] })).await.unwrap();
+    assert_eq!(dubbed["stages"]["voices"]["names"], "Boris,-", "{dubbed}");
+    let codes: Vec<&str> = dubbed["degradations"].as_array().unwrap().iter().map(|item| item["code"].as_str().unwrap()).collect();
+    assert_eq!(codes, ["background_not_separated", "voices_not_cast"], "{dubbed}");
+    assert_eq!(dubbed["degradations"][1]["speakers"], json!(["1"]), "the woman got no voice: {dubbed}");
+    assert!(studio::log("dg1").contains(&"GET /projects/dg1/files".to_string()));
+}
+
+#[tokio::test]
+async fn a_copy_under_a_taken_name_is_made_once() {
+    let folder = tempfile::tempdir().unwrap();
+    let output = folder.path().join("output.mp4");
+    std::fs::write(&output, b"the voice-over").unwrap();
+    let out_dir = folder.path().join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let foreign = out_dir.join("sv1.ru.mp4");
+    std::fs::write(&foreign, b"the dub made before, another file").unwrap();
+    studio::plan("sv1", Plan { output: Some(output.to_string_lossy().into_owned()), ..Plan::default() });
+    let arguments = json!({ "path": media("sv1"), "tgt_lang": "ru", "mode": "voiceover", "out_dir": out_dir.to_string_lossy() });
+    let first = answer("dub_file", arguments.clone()).await.unwrap();
+    let copy = out_dir.join("sv1.ru (2).mp4");
+    assert_eq!(first["saved"], copy.to_string_lossy().as_ref(), "{first}");
+    for _ in 0..2 {
+        let again = answer("dub_file", arguments.clone()).await.unwrap();
+        assert_eq!(again["saved"], first["saved"], "{again}");
+    }
+    assert_eq!(asked("sv1", "POST /projects/sv1/save-output"), 1, "{:?}", studio::log("sv1"));
+    assert_eq!(std::fs::read_dir(&out_dir).unwrap().count(), 2, "the other file and one copy");
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"the dub made before, another file");
+}
+
+#[tokio::test]
+async fn a_separation_queued_by_another_call_is_waited_for_not_run_twice() {
+    studio::plan("sp3", Plan { conflict: true, ..Plan::default() });
+    let split = answer("separate_file", json!({ "path": media("sp3") })).await.unwrap();
+    assert_eq!(split, json!({ "done": true, "project_id": "sp3", "vocals": "C:/w/sp3/stems/vocals.wav", "background": "C:/w/sp3/stems/instrumental.wav" }));
+    assert_eq!(asked("sp3", "POST /projects/sp3/separate"), 2, "refused as a second job, then answered from the first: {:?}", studio::log("sp3"));
+    assert_eq!(asked("sp3", "GET /jobs/"), 1, "{:?}", studio::log("sp3"));
+}
+
+/// A dubbed project as the studio holds it: two lines of the speakers, video, nothing on screen.
+fn held(mode: &str, speakers: [&str; 2], voice: Value) -> Value {
+    json!({
+        "mode": mode,
+        "meta": { "width": 1280, "height": 720 },
+        "audio": { "voice": voice, "keep_music": true },
+        "captions": { "blur_boxes": [], "titles": [] },
+        "segments": [{ "id": "s0", "speaker": speakers[0] }, { "id": "s1", "speaker": speakers[1] }],
+    })
+}
+
+fn setup(ocr_missing: &[&str], diarizer: bool) -> Value {
+    json!({ "components": [
+        { "id": "ocr", "installed": ocr_missing.is_empty(), "missing": ocr_missing },
+        { "id": "sortformer", "installed": diarizer, "missing": [] },
+    ] })
+}
+
+fn stems() -> Value {
+    json!({ "vocals": "C:/w/p/stems/vocals.wav", "background": "C:/w/p/stems/instrumental.wav" })
+}
+
+fn codes(found: &[Value]) -> Vec<&str> {
+    found.iter().map(|item| item["code"].as_str().unwrap()).collect()
+}
+
+#[test]
+fn the_text_reader_is_missing_only_without_its_detector_or_recogniser() {
+    let project = held("dub", ["0", "1"], json!({ "mode": "clone", "name": null }));
+    let found = degradations(&project, &stems(), &setup(&["models/ocr/det.onnx"], true), &Voices::Clone).unwrap();
+    assert_eq!(codes(&found), ["ocr_skipped"]);
+    let found = degradations(&project, &stems(), &setup(&["models/ocr/rec_cyrillic.onnx", "models/ocr/cls.onnx"], true), &Voices::Clone).unwrap();
+    assert_eq!(codes(&found), ["ocr_skipped"]);
+    let without_cls = degradations(&project, &stems(), &setup(&["models/ocr/cls.onnx"], true), &Voices::Clone).unwrap();
+    assert!(without_cls.is_empty(), "the analysis reads without the orientation model: {without_cls:?}");
+
+    let mut blurred = project.clone();
+    blurred["captions"]["blur_boxes"] = json!([{ "x": 1, "y": 2, "w": 3, "h": 4 }]);
+    assert!(degradations(&blurred, &stems(), &setup(&["models/ocr/det.onnx"], true), &Voices::Clone).unwrap().is_empty(), "text was read, so the reader was there");
+    let mut audio = project.clone();
+    audio["meta"]["width"] = json!(0);
+    assert!(degradations(&audio, &stems(), &setup(&["models/ocr/det.onnx"], true), &Voices::Clone).unwrap().is_empty(), "audio has no picture");
+
+    let unknown = degradations(&project, &stems(), &json!({ "components": [] }), &Voices::Clone).unwrap_err();
+    assert!(unknown.contains("no component ocr"), "{unknown}");
+}
+
+#[test]
+fn one_speaker_and_the_background_say_why() {
+    let clone = json!({ "mode": "clone", "name": null });
+    let alone = held("dub", ["0", "0"], clone.clone());
+    let found = degradations(&alone, &stems(), &setup(&[], false), &Voices::Clone).unwrap();
+    assert_eq!(codes(&found), ["single_speaker"]);
+    assert!(found[0]["detail"].as_str().unwrap().contains("diarizer is not installed"), "{found:?}");
+    let found = degradations(&alone, &stems(), &setup(&[], true), &Voices::Clone).unwrap();
+    assert!(found[0]["detail"].as_str().unwrap().starts_with("one speaker was heard"), "{found:?}");
+
+    let unseparated = json!({ "vocals": null, "background": null });
+    let found = degradations(&held("dub", ["0", "1"], clone.clone()), &unseparated, &setup(&[], true), &Voices::Clone).unwrap();
+    assert_eq!(codes(&found), ["background_not_separated"]);
+    assert!(degradations(&held("voiceover", ["0", "1"], clone.clone()), &unseparated, &setup(&[], true), &Voices::Clone).unwrap().is_empty(), "a voice-over lays the whole original under it");
+    let mut no_music = held("dub", ["0", "1"], clone.clone());
+    no_music["audio"]["keep_music"] = json!(false);
+    assert!(degradations(&no_music, &unseparated, &setup(&[], true), &Voices::Clone).unwrap().is_empty(), "the music was turned off, not lost");
+
+    let mut silent = held("dub", ["0", "1"], clone);
+    silent["segments"] = json!([]);
+    assert_eq!(codes(&degradations(&silent, &unseparated, &setup(&[], true), &Voices::Clone).unwrap()), ["no_speech"], "without lines the render keeps the original sound");
+}
+
+#[test]
+fn voices_other_than_asked_are_named_by_speaker() {
+    let pack = Voices::Pack("Anna".into());
+    let all_anna = held("dub", ["0", "1"], json!({ "mode": "voice", "name": "Anna" }));
+    assert!(degradations(&all_anna, &stems(), &setup(&[], true), &pack).unwrap().is_empty(), "an empty place takes the first name");
+    let mixed = held("dub", ["0", "1"], json!({ "mode": "voice", "name": "Anna,-" }));
+    let found = degradations(&mixed, &stems(), &setup(&[], true), &pack).unwrap();
+    assert_eq!(codes(&found), ["voices_not_as_asked"]);
+    assert!(found[0]["detail"].as_str().unwrap().contains("speaker 1: own cloned voice"), "{found:?}");
+    let found = degradations(&all_anna, &stems(), &setup(&[], true), &Voices::Clone).unwrap();
+    assert_eq!(codes(&found), ["voices_not_as_asked"]);
+
+    let autocast = Voices::Autocast { male: vec!["Boris".into()], female: vec![] };
+    let nobody = degradations(&held("dub", ["0", "1"], json!({ "mode": "clone", "name": null })), &stems(), &setup(&[], true), &autocast).unwrap();
+    assert_eq!((codes(&nobody), nobody[0]["speakers"].clone()), (vec!["voices_not_cast"], json!(["0", "1"])));
+    assert!(degradations(&held("dub", ["0", "1"], json!({ "mode": "voice", "name": "Boris,Vera" })), &stems(), &setup(&[], true), &autocast).unwrap().is_empty());
+    let subtitles = held("nodub", ["0", "0"], json!({ "mode": "clone", "name": null }));
+    assert!(degradations(&subtitles, &json!({}), &setup(&[], false), &autocast).unwrap().is_empty(), "subtitles voice nothing");
 }

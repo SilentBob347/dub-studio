@@ -46,6 +46,7 @@ pub(super) const ROUTES: &[(&str, &[(&str, &str)])] = &[
             ("GET", "/projects/x1/files"),
             ("POST", "/projects/x1/render"),
             ("POST", "/projects/x1/save-output"),
+            ("GET", "/setup/status"),
         ],
     ),
     ("composite:atomic:separate_file", &[("POST", "/projects/from-path"), ("GET", "/jobs"), ("GET", "/jobs/x1"), ("POST", "/projects/x1/separate")]),
@@ -111,7 +112,7 @@ pub(super) fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "dub_file",
-            description: "A video or audio file on this computer dubbed into tgt_lang in one call, as the studio makes it: speech recognised and translated, the on-screen text blurred and translated, the lines voiced, mixed over the background and rendered. mode: dub (the speakers' voices replaced, the default), voiceover (the translation over the quieted original) or subtitles (the original audio, subtitles burned in). voice: clone (each speaker's own voice, the default), autocast (library voices dealt out by each speaker's gender, the talkiest first: male_voices and female_voices name them, from voices_list) or pack:<name> (one library voice for everyone). subs: translation (the default), original or none; burn false keeps them out of the picture. keep_original adds the original audio as a second track. out_dir copies the result into a folder on this computer as <file>.<tgt_lang>. It answers the finished video and audio, the project_id, what each stage did and what fell back (degradations). Analysis and render take minutes: when they take longer than seconds the answer is done false with the running job - studio_wait with its job_id, then call dub_file again with the same arguments: the finished stages are kept and the next one starts.",
+            description: "A video or audio file on this computer dubbed into tgt_lang in one call, as the studio makes it: speech recognised and translated, the on-screen text blurred and translated, the lines voiced, mixed over the background and rendered. mode: dub (the speakers' voices replaced, the default), voiceover (the translation over the quieted original) or subtitles (the original audio, subtitles burned in). voice: clone (each speaker's own voice, the default), autocast (library voices dealt out by each speaker's gender, the talkiest first: male_voices and female_voices name them, from voices_list) or pack:<name> (one library voice for everyone). subs: translation (the default), original or none; burn false keeps them out of the picture. keep_original adds the original audio as a second track. out_dir copies the result into a folder on this computer as <file>.<tgt_lang> (with (2), (3) when that name is another file's; called again, the copy already there is answered). It answers the finished video and audio, the project_id, what each stage did and what fell back (degradations, each with its stage, code and detail): background_not_separated (no voice separator: the dub has no music or effects under it), ocr_skipped (no on-screen text reader: the text in the picture is left as it is), single_speaker (every line voiced as one speaker), voices_not_cast (with autocast: these speakers kept their own cloned voice), voices_not_as_asked, no_speech. Analysis and render take minutes: when they take longer than seconds the answer is done false with the running job - studio_wait with its job_id, then call dub_file again with the same arguments: the finished stages are kept and the next one starts.",
             schema: || {
                 object(
                     json!({
@@ -275,19 +276,16 @@ async fn files(pid: &str) -> Result<Value, String> {
     fetch(&format!("/projects/{}/files", segment(pid))).await
 }
 
-/// The project's jobs: the one at work, if any, the finished ones, and its last job as stored
-/// with it (project_job).
+/// The project's jobs: the one at work, if any, and its last job as stored with it (project_job).
 struct Work {
     active: Option<Value>,
-    finished: Vec<Value>,
     last: Value,
 }
 
 async fn work(pid: &str) -> Result<Work, String> {
     let listed = fetch(&format!("/jobs{}", query(&[("pid", Some(pid.to_string()))]))).await.map_err(|why| format!("The studio's jobs cannot be read, so the work on this file cannot be followed: {why}"))?;
-    let rows: Vec<Value> = job_rows(&listed)?.into_iter().filter(|job| job["pid"] == pid).collect();
-    let (done, at_work): (Vec<Value>, Vec<Value>) = rows.into_iter().partition(finished);
-    Ok(Work { active: at_work.into_iter().next(), finished: done, last: listed.get("project_job").cloned().unwrap_or(Value::Null) })
+    let active = job_rows(&listed)?.into_iter().find(|job| job["pid"] == pid && !finished(job));
+    Ok(Work { active, last: listed.get("project_job").cloned().unwrap_or(Value::Null) })
 }
 
 fn job_id(job: &Value) -> Result<String, String> {
@@ -471,9 +469,12 @@ fn content(format: &str, written: &Value) -> Result<Value, String> {
     }
 }
 
-fn speakers(project: &Value) -> usize {
-    let lines = project["segments"].as_array().cloned().unwrap_or_default();
-    lines.iter().map(|line| line["speaker"].as_str().unwrap_or("0").to_string()).collect::<std::collections::BTreeSet<_>>().len()
+/// The speakers of the project's lines in the order the render gives them voices: sorted, a line
+/// without one being speaker 0.
+fn speakers(project: &Value) -> Vec<String> {
+    let lines = project["segments"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let ids: std::collections::BTreeSet<String> = lines.iter().map(|line| line["speaker"].as_str().unwrap_or("0").to_string()).collect();
+    ids.into_iter().collect()
 }
 
 // ---------------------------------------------------------------- the tools
@@ -507,7 +508,7 @@ async fn transcribe(args: &Value, until: Instant) -> Result<Value, String> {
         "format": format,
         "file": written["path"],
         "lines": written["lines"],
-        "speakers": speakers(&project),
+        "speakers": speakers(&project).len(),
         "duration": project["meta"]["duration"],
         "transcript": content(&format, &written)?,
     }))
@@ -687,6 +688,8 @@ async fn dub(args: &Value, until: Instant) -> Result<Value, String> {
         None => None,
     };
     let current = fetch_project(&pid).await?;
+    let setup = fetch("/setup/status").await?;
+    let fell_back = degradations(&current, &made, &setup, &voices)?;
     let heard = &current["audio"]["voice"];
     let voices_used = if mode == "subtitles" {
         json!("none: the original audio")
@@ -707,7 +710,7 @@ async fn dub(args: &Value, until: Instant) -> Result<Value, String> {
             "voices": voices_used,
             "render": if rendered_now { "done now" } else { "done before" },
         },
-        "degradations": degradations(&work(&pid).await?.finished, lines),
+        "degradations": fell_back,
     }))
 }
 
@@ -716,13 +719,17 @@ fn stem(path: &str) -> String {
     Path::new(path).file_stem().map_or_else(|| "dub".to_string(), |stem| stem.to_string_lossy().into_owned())
 }
 
-/// Copies the result into the folder, unless the same copy is there already.
+/// Copies the result into the folder, unless a copy of it is there already: under the name, or
+/// under the name with (2), (3)... that save-output gives a copy when the name is another file's.
 async fn save(pid: &str, output: &str, dir: &str, name: &str) -> Result<String, String> {
     let ext = Path::new(output).extension().map_or_else(|| "mp4".to_string(), |ext| ext.to_string_lossy().into_owned());
-    let target = Path::new(dir).join(format!("{name}.{ext}"));
-    if let (Ok(made), Ok(there)) = (tokio::fs::metadata(output).await, tokio::fs::metadata(&target).await) {
-        let same_time = matches!((made.modified(), there.modified()), (Ok(made), Ok(there)) if there >= made);
-        if made.len() == there.len() && same_time {
+    let made = tokio::fs::metadata(output).await.map_err(|e| format!("the finished video {output} cannot be read: {e}"))?;
+    for n in 1u32.. {
+        let file = if n == 1 { format!("{name}.{ext}") } else { format!("{name} ({n}).{ext}") };
+        let target = Path::new(dir).join(file);
+        let Ok(there) = tokio::fs::metadata(&target).await else { break };
+        let not_older = matches!((made.modified(), there.modified()), (Ok(made), Ok(there)) if there >= made);
+        if there.is_file() && there.len() == made.len() && not_older {
             return Ok(target.to_string_lossy().into_owned());
         }
     }
@@ -735,55 +742,137 @@ async fn save(pid: &str, output: &str, dir: &str, name: &str) -> Result<String, 
     answer["path"].as_str().map(str::to_string).ok_or_else(|| format!("POST {route} answered no path: {answer}"))
 }
 
-/// What fell back on the way, as the project's finished jobs report it, and a dub without lines.
-fn degradations(finished: &[Value], lines: usize) -> Vec<Value> {
-    let mut found: Vec<Value> = Vec::new();
-    for job in finished.iter().filter(|job| job["status"] == "done") {
-        let kind = job["kind"].clone();
-        for item in job["result"]["degradations"].as_array().into_iter().flatten() {
-            let mut item = item.clone();
-            if let Some(fields) = item.as_object_mut() {
-                fields.entry("job").or_insert(kind.clone());
-            }
-            found.push(item);
-        }
-        let slots = &job["result"]["post"]["voice_slots"];
-        if let Some(code) = slots["error"].as_str() {
-            found.push(json!({ "job": kind, "stage": "voices", "code": code, "detail": slots.get("names").cloned().unwrap_or(Value::Null) }));
-        }
+/// A component of the studio's models and engines, as GET /setup/status lists it.
+fn component<'a>(setup: &'a Value, id: &str) -> Result<&'a Value, String> {
+    setup["components"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|component| component["id"] == id)
+        .ok_or_else(|| format!("GET /setup/status lists no component {id}, so what fell back in the dub cannot be told"))
+}
+
+/// Whether a model the analysis reads on-screen text with is missing: it reads only when both
+/// the detector and the recogniser are there (dub_ocr::OcrPaths::all_exist).
+fn reader_missing(setup: &Value) -> Result<bool, String> {
+    let ocr = dub_ocr::OcrPaths::under(Path::new("models"));
+    let missing = component(setup, "ocr")?["missing"].as_array().ok_or_else(|| "GET /setup/status lists no missing files of component ocr".to_string())?;
+    Ok(missing.iter().filter_map(Value::as_str).any(|file| Path::new(file) == ocr.det || Path::new(file) == ocr.rec))
+}
+
+/// The library voice each speaker is voiced with, None for the speaker's own cloned voice, read
+/// from the project's voice as the render reads it: a CSV by speaker, an empty place taking the
+/// first name, "-" keeping the clone.
+fn voice_of_each(heard: &Value, speakers: &[String]) -> Vec<Option<String>> {
+    if heard["mode"] != "voice" {
+        return vec![None; speakers.len()];
     }
+    let names: Vec<&str> = heard["name"].as_str().unwrap_or_default().split(',').map(str::trim).collect();
+    let Some(first) = names.iter().copied().find(|name| !name.is_empty() && *name != crate::voice_slots::CLONE_SLOT) else {
+        return vec![None; speakers.len()];
+    };
+    (0..speakers.len())
+        .map(|at| names.get(at).copied().filter(|name| !name.is_empty()).unwrap_or(first))
+        .map(|name| (name != crate::voice_slots::CLONE_SLOT).then(|| name.to_string()))
+        .collect()
+}
+
+/// What fell back on the way, read off the dub as it came out: its lines, its stems, the text
+/// found in its picture and the voices it speaks with, and the studio's components where a
+/// fallback comes of a model that is not installed.
+fn degradations(project: &Value, made: &Value, setup: &Value, voices: &Voices) -> Result<Vec<Value>, String> {
+    let mut found = Vec::new();
+    let lines = project["segments"].as_array().map_or(0, Vec::len);
+    let voiced = matches!(project["mode"].as_str(), Some("dub" | "voiceover"));
     if lines == 0 {
         found.push(json!({ "stage": "analysis", "code": "no_speech", "detail": "no speech was found: nothing is voiced, the sound is the original" }));
     }
-    found
+    let separated = !made["vocals"].is_null() && !made["background"].is_null();
+    if lines > 0 && project["mode"] == "dub" && project["audio"]["keep_music"] != false && !separated {
+        found.push(json!({
+            "stage": "separation",
+            "code": "background_not_separated",
+            "detail": "the voice was not split from the background, as the voice separator is not installed (models_status): the dub has no music or effects under it, and the speech was recognised on the mixed sound",
+        }));
+    }
+    let empty = |list: &Value| list.as_array().is_none_or(Vec::is_empty);
+    let video = project["meta"]["width"].as_i64().unwrap_or_default() > 0;
+    if video && empty(&project["captions"]["blur_boxes"]) && empty(&project["captions"]["titles"]) && reader_missing(setup)? {
+        found.push(json!({
+            "stage": "text",
+            "code": "ocr_skipped",
+            "detail": "the on-screen text reader is not installed (models_status: ocr): the text burned into the picture is neither blurred nor translated",
+        }));
+    }
+    if lines == 0 || !voiced {
+        return Ok(found);
+    }
+    let speakers = speakers(project);
+    if speakers.len() == 1 {
+        let detail = if component(setup, "sortformer")?["installed"] == false {
+            "the diarizer is not installed (models_status: sortformer), so the speakers were not told apart: every line is voiced as one speaker"
+        } else {
+            "one speaker was heard: every line is voiced as one speaker - right for a clip with one, a sign that the voices were not told apart where there are more"
+        };
+        found.push(json!({ "stage": "diarization", "code": "single_speaker", "detail": detail }));
+    }
+    let given = voice_of_each(&project["audio"]["voice"], &speakers);
+    let heard = || {
+        let each: Vec<String> = speakers.iter().zip(&given).map(|(speaker, voice)| format!("speaker {speaker}: {}", voice.as_deref().unwrap_or("own cloned voice"))).collect();
+        each.join(", ")
+    };
+    match voices {
+        Voices::Autocast { .. } => {
+            let cloned: Vec<&String> = speakers.iter().zip(&given).filter(|(_, voice)| voice.is_none()).map(|(speaker, _)| speaker).collect();
+            if !cloned.is_empty() {
+                found.push(json!({
+                    "stage": "voices",
+                    "code": "voices_not_cast",
+                    "speakers": cloned,
+                    "detail": "these speakers got no library voice of male_voices and female_voices and speak in their own cloned voice: no voice was given for their gender, or the analysis could not deal the voices out",
+                }));
+            }
+        }
+        Voices::Pack(name) if given.iter().any(|voice| voice.as_deref() != Some(name.as_str())) => {
+            found.push(json!({ "stage": "voices", "code": "voices_not_as_asked", "detail": format!("not every speaker speaks with {name}: {}", heard()) }));
+        }
+        Voices::Clone if given.iter().any(Option::is_some) => {
+            found.push(json!({ "stage": "voices", "code": "voices_not_as_asked", "detail": format!("not every speaker speaks in their own cloned voice: {}", heard()) }));
+        }
+        Voices::Pack(_) | Voices::Clone => {}
+    }
+    Ok(found)
 }
 
-/// Runs a single-stage job of the file's media project: at once when its result is there.
+/// Runs a single-stage job of the file's media project: at once when its result is there. A job
+/// the studio refuses to queue twice (409 job_conflict) is waited for, then the stage is asked
+/// for again.
 async fn media_stage(tool: &str, route: &str, stage: &str, args: &Value, until: Instant) -> Result<Value, String> {
     let path = text(args, "path")?;
     let pid = project_of(&path, MEDIA_KEY, tool).await?;
+    let asked = format!("/projects/{}/{route}", segment(&pid));
     let mut started = false;
     loop {
         if let Some(job) = settle(&pid, until).await? {
             return Ok(pending(tool, &pid, &job));
         }
-        let asked = format!("/projects/{}/{route}", segment(&pid));
         let (status, answer) = request(Method::POST, asked.clone(), Some(json!({}))).await?;
-        if !status.is_success() {
-            return Err(refusal(&format!("POST {asked}"), status, &answer));
-        }
-        if answer["cached"] == true {
+        if status.is_success() && answer["cached"] == true {
             return Ok(finish(&pid, answer));
         }
-        if started {
+        let (id, own) = match (status, answer["error"].as_str(), answer["job_id"].as_str()) {
+            (StatusCode::CONFLICT, Some("job_conflict"), Some(id)) => (id.to_string(), false),
+            (status, _, Some(id)) if status.is_success() => (id.to_string(), true),
+            _ => return Err(refusal(&format!("POST {asked}"), status, &answer)),
+        };
+        if own && started {
             return Err(format!("The {stage} of project {pid} finished, yet its result is not there: POST {asked} started it again."));
         }
-        let id = job_id(&answer)?;
         match wait(&id, until).await? {
             Waited::Running(job) => return Ok(pending(tool, &pid, &job)),
-            Waited::Failed(job) => return Err(format!("The {stage} failed: {}", failure(&job))),
-            Waited::Done(job) => return Ok(finish(&pid, job["result"].clone())),
-            Waited::Gone => started = true,
+            Waited::Failed(job) if own => return Err(format!("The {stage} failed: {}", failure(&job))),
+            Waited::Done(job) if own => return Ok(finish(&pid, job["result"].clone())),
+            Waited::Failed(_) | Waited::Done(_) | Waited::Gone => started |= own,
         }
     }
 }

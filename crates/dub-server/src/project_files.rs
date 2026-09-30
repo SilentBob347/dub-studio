@@ -49,6 +49,8 @@ pub async fn files(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> R
         "playable_output": existing(crate::find_output(&dir)),
         "dub_audio": existing(dir.join("dub_audio.m4a")),
         "casting": existing(dir.join("casting.json")),
+        "vocals": existing(dir.join("stems").join("vocals.wav")),
+        "background": existing(dir.join("stems").join("instrumental.wav")),
         "texts": texts,
     }))
     .into_response()
