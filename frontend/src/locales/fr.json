@@ -708,5 +708,43 @@
   "preview": {
     "frameAlt": "Image de l'aperçu",
     "updating": "mise à jour…"
+  },
+  "jobs": {
+    "fromCache": "depuis le cache",
+    "continue": "Reprendre",
+    "continueHint": "Reprendre là où le traitement s'est arrêté : les étapes terminées et les répliques déjà doublées sont réutilisées",
+    "cancel": "Annuler",
+    "cancelling": "Annulation…",
+    "back": "Retour",
+    "dismiss": "Masquer",
+    "failedTitle": "Le traitement s'est arrêté sur une erreur",
+    "failedHint": "Les étapes terminées sont conservées : « Reprendre » repart de là où le traitement s'est arrêté.",
+    "details": "Détails",
+    "queuedAhead": "En file d'attente, tâches avant celle-ci : {{n}}",
+    "atStage": "{{state}} · {{stage}}",
+    "state": {
+      "queued": "En attente",
+      "running": "En cours",
+      "failed": "Erreur",
+      "interrupted": "Interrompu",
+      "cancelled": "Annulé",
+      "done": "Terminé"
+    },
+    "kind": {
+      "analyze": "Analyse",
+      "retranslate": "Traduction",
+      "remix": "Remix",
+      "dub_audio": "Voix du doublage",
+      "render": "Export",
+      "export_lang": "Export dans une autre langue",
+      "download": "Téléchargement des modèles",
+      "voices_pack": "Téléchargement des voix"
+    },
+    "error": {
+      "failed": "La tâche a échoué",
+      "interrupted": "L'application s'est fermée pendant le traitement",
+      "engine_stuck": "Le moteur vocal s'est figé",
+      "job_record_broken": "L'enregistrement de la tâche est endommagé"
+    }
   }
 }

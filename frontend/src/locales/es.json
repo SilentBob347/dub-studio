@@ -708,5 +708,43 @@
   "preview": {
     "frameAlt": "Fotograma de la vista previa",
     "updating": "actualizando…"
+  },
+  "jobs": {
+    "fromCache": "desde caché",
+    "continue": "Continuar",
+    "continueHint": "Continuar desde donde se detuvo: se reutilizan las etapas terminadas y las frases ya locutadas",
+    "cancel": "Cancelar",
+    "cancelling": "Cancelando…",
+    "back": "Atrás",
+    "dismiss": "Ocultar",
+    "failedTitle": "El procesamiento se detuvo con un error",
+    "failedHint": "Las etapas terminadas se guardaron: «Continuar» retoma desde donde se detuvo.",
+    "details": "Detalles",
+    "queuedAhead": "En cola, tareas por delante: {{n}}",
+    "atStage": "{{state}} · {{stage}}",
+    "state": {
+      "queued": "En cola",
+      "running": "En curso",
+      "failed": "Error",
+      "interrupted": "Interrumpido",
+      "cancelled": "Cancelado",
+      "done": "Listo"
+    },
+    "kind": {
+      "analyze": "Análisis",
+      "retranslate": "Traducción",
+      "remix": "Remix",
+      "dub_audio": "Voz del doblaje",
+      "render": "Exportación",
+      "export_lang": "Exportación a otro idioma",
+      "download": "Descarga de modelos",
+      "voices_pack": "Descarga de voces"
+    },
+    "error": {
+      "failed": "La tarea terminó con un error",
+      "interrupted": "La aplicación se cerró durante el trabajo",
+      "engine_stuck": "El motor de voz se bloqueó",
+      "job_record_broken": "El registro de la tarea está dañado"
+    }
   }
 }

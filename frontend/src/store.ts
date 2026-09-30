@@ -4,6 +4,9 @@ import type { Project } from "./lib/api";
 type Stage = "boot" | "setup" | "empty" | "analyzing" | "editor" | "batch" | "multilang";
 export type ExportItem = { id: string; name: string; status: "rendering" | "done" | "error"; msg: string; url?: string; pid?: string };
 export type Activity = { t: number; text: string; kind: "work" | "done" | "error" };   // строка лога «что делает приложение»
+export type CurrentJob = { id: string; kind: string; pid: string };
+// Джоба упала на экране анализа: ждём решения пользователя (продолжить с места остановки или назад).
+export type JobFailure = { pid: string; msg: string; resolve: (choice: "continue" | "back") => void };
 
 type State = {
   stage: Stage;
@@ -40,6 +43,15 @@ type State = {
   setSelBlur: (i: number | null) => void;
   setSelTitle: (i: number | null) => void;
   pushActivity: (text: string, kind?: Activity["kind"]) => void;   // добавить строку в журнал
+  currentJob: CurrentJob | null;     // джоба экрана анализа (для «Отменить»)
+  setCurrentJob: (j: CurrentJob | null) => void;
+  queuedAhead: number | null;        // сколько джоб впереди, пока текущая в очереди
+  setQueuedAhead: (n: number | null) => void;
+  resumedStages: string[];           // стадии, взятые из кэша прошлого прогона (отметка в степпере)
+  markResumed: (stage: string) => void;
+  clearResumed: () => void;
+  jobFailure: JobFailure | null;
+  setJobFailure: (f: JobFailure | null) => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -108,4 +120,13 @@ export const useStore = create<State>((set, get) => ({
     if (last && last.text === clean && last.kind === kind) return {};   // дедуп повторов
     return { activities: [...s.activities, { t: Date.now(), text: clean, kind }].slice(-200) };
   }),
+  currentJob: null,
+  setCurrentJob: (currentJob) => set({ currentJob }),
+  queuedAhead: null,
+  setQueuedAhead: (queuedAhead) => set({ queuedAhead }),
+  resumedStages: [],
+  markResumed: (stage) => set((s) => (s.resumedStages.includes(stage) ? {} : { resumedStages: [...s.resumedStages, stage] })),
+  clearResumed: () => set({ resumedStages: [] }),
+  jobFailure: null,
+  setJobFailure: (jobFailure) => set({ jobFailure }),
 }));

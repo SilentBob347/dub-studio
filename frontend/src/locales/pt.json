@@ -708,5 +708,43 @@
   "preview": {
     "frameAlt": "Quadro da pré-visualização",
     "updating": "atualizando…"
+  },
+  "jobs": {
+    "fromCache": "do cache",
+    "continue": "Continuar",
+    "continueHint": "Continuar de onde parou: as etapas concluídas e as falas já dubladas são reaproveitadas",
+    "cancel": "Cancelar",
+    "cancelling": "Cancelando…",
+    "back": "Voltar",
+    "dismiss": "Ocultar",
+    "failedTitle": "O processamento parou com um erro",
+    "failedHint": "As etapas concluídas foram salvas — «Continuar» retoma de onde parou.",
+    "details": "Detalhes",
+    "queuedAhead": "Na fila, tarefas à frente: {{n}}",
+    "atStage": "{{state}} · {{stage}}",
+    "state": {
+      "queued": "Na fila",
+      "running": "Em andamento",
+      "failed": "Erro",
+      "interrupted": "Interrompido",
+      "cancelled": "Cancelado",
+      "done": "Concluído"
+    },
+    "kind": {
+      "analyze": "Análise",
+      "retranslate": "Tradução",
+      "remix": "Remix",
+      "dub_audio": "Voz da dublagem",
+      "render": "Exportação",
+      "export_lang": "Exportação para outro idioma",
+      "download": "Download de modelos",
+      "voices_pack": "Download de vozes"
+    },
+    "error": {
+      "failed": "A tarefa terminou com erro",
+      "interrupted": "O aplicativo foi fechado durante o trabalho",
+      "engine_stuck": "O motor de voz travou",
+      "job_record_broken": "O registro da tarefa está corrompido"
+    }
   }
 }

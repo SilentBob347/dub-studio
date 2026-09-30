@@ -688,5 +688,43 @@
   "preview": {
     "frameAlt": "预览帧",
     "updating": "更新中…"
+  },
+  "jobs": {
+    "fromCache": "来自缓存",
+    "continue": "继续",
+    "continueHint": "从中断处继续：已完成的阶段和已配音的台词会被复用",
+    "cancel": "取消",
+    "cancelling": "正在取消…",
+    "back": "返回",
+    "dismiss": "隐藏",
+    "failedTitle": "处理因错误而停止",
+    "failedHint": "已完成的阶段已保存——点击“继续”将从中断处接着处理。",
+    "details": "详情",
+    "queuedAhead": "排队中，前面还有 {{n}} 个任务",
+    "atStage": "{{state}} · {{stage}}",
+    "state": {
+      "queued": "排队中",
+      "running": "进行中",
+      "failed": "出错",
+      "interrupted": "已中断",
+      "cancelled": "已取消",
+      "done": "已完成"
+    },
+    "kind": {
+      "analyze": "分析",
+      "retranslate": "翻译",
+      "remix": "重混",
+      "dub_audio": "配音",
+      "render": "导出",
+      "export_lang": "导出为其他语言",
+      "download": "下载模型",
+      "voices_pack": "下载声音"
+    },
+    "error": {
+      "failed": "任务执行出错",
+      "interrupted": "运行期间应用被关闭",
+      "engine_stuck": "配音引擎卡死",
+      "job_record_broken": "任务记录已损坏"
+    }
   }
 }

@@ -698,5 +698,43 @@
   "preview": {
     "frameAlt": "Preview frame",
     "updating": "updating…"
+  },
+  "jobs": {
+    "fromCache": "from cache",
+    "continue": "Continue",
+    "continueHint": "Continue from where it stopped: finished stages and voiced lines are reused",
+    "cancel": "Cancel",
+    "cancelling": "Cancelling…",
+    "back": "Back",
+    "dismiss": "Hide",
+    "failedTitle": "Processing stopped with an error",
+    "failedHint": "Finished stages are saved — Continue picks up where it stopped.",
+    "details": "Details",
+    "queuedAhead": "Queued, tasks ahead: {{n}}",
+    "atStage": "{{state}} · {{stage}}",
+    "state": {
+      "queued": "Queued",
+      "running": "Running",
+      "failed": "Failed",
+      "interrupted": "Interrupted",
+      "cancelled": "Cancelled",
+      "done": "Done"
+    },
+    "kind": {
+      "analyze": "Analysis",
+      "retranslate": "Translation",
+      "remix": "Remix",
+      "dub_audio": "Voice-over",
+      "render": "Export",
+      "export_lang": "Export to another language",
+      "download": "Model download",
+      "voices_pack": "Voice download"
+    },
+    "error": {
+      "failed": "The task failed",
+      "interrupted": "The app closed while it was running",
+      "engine_stuck": "The voice engine froze",
+      "job_record_broken": "The task record is damaged"
+    }
   }
 }

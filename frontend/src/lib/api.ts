@@ -33,11 +33,31 @@ export type Project = {
   render: { burn_cq: number; blur_sigma: number; blur: boolean; codec: string };
   work_dir?: string | null;
 };
+export type JobState = "queued" | "running" | "failed" | "interrupted" | "done" | "cancelled";
+export type JobErrorInfo = { code: string; text: string };
 export type ProjectSummary = {
   pid: string; video: string; tgt_lang: string; mode: string;
   width: number; height: number; duration: number; segments: number;
   audio_only: boolean; mtime: number; done: boolean;
+  // последняя джоба проекта (job.json): прерванную/упавшую можно продолжить с места остановки
+  job_kind: string | null; job_state: JobState | null; job_stage: string | null; job_error: JobErrorInfo | null;
 };
+// Снапшот джобы из очереди сервера (GET /jobs, GET /jobs/{id}).
+export type JobSnapshot = {
+  id: string; kind: string; pid: string | null;
+  status: "queued" | "running" | "done" | "error" | "cancelled";
+  stage: string | null; msg: string | null; pct: number | null; position?: number | null;
+  result?: unknown; error?: string;
+};
+// job.json проекта: последняя джоба с аргументами для «Продолжить».
+export type ProjectJob = {
+  kind: string; args: Record<string, unknown>; state: JobState; stage: string;
+  error: JobErrorInfo | null; job_id: string; resumes: number; started_at: number; updated_at: number;
+};
+// Джоба отменена пользователем — не ошибка, а отдельный исход (watchJob отклоняется этим классом).
+export class JobCancelledError extends Error {
+  constructor() { super("job cancelled"); this.name = "JobCancelledError"; }
+}
 export type ModelStack = { asr: string; llm: string; vision: string; tts: string };
 // Выбор active.json: строковые слоты + флаги секретов. Ключ OpenRouter и пароль прокси сервер не отдаёт.
 export type Selection = { [slot: string]: string | boolean | undefined; or_key_set?: boolean; proxy_password_set?: boolean };
@@ -55,7 +75,7 @@ export type Capabilities = {
   // Видимые лимиты RAM (настройки): prefill-батч Gemma + длина реф-клипа клона.
   llama_ubatches?: string[]; higgs_ref_secs_opts?: string[];
 };
-export type JobEvent = { type: "progress" | "done" | "error"; stage?: string; pct?: number; msg?: string; result?: unknown; error?: string; component?: string; downloaded?: number; total?: number; parts?: { component: string; pct: number }[] };
+export type JobEvent = { type: "queued" | "running" | "progress" | "done" | "error" | "cancelled"; stage?: string; pct?: number; msg?: string; result?: unknown; error?: string; component?: string; downloaded?: number; total?: number; parts?: { component: string; pct: number }[]; position?: number; resumed?: boolean };
 
 // Кастинг персонажей (#115): бэк детектит лица (SCRFD)+эмбеддинги (LVFace)+active-speaker (LR-ASD),
 // кластеризует в персонажей. GET отдаёт список; POST сохраняет имя/заметку о речи/голос дубляжа.
@@ -224,6 +244,11 @@ export const api = {
   pickFolder: () => postJson<{ dir: string | null }>("/pick-folder", {}),   // нативный диалог выбора папки (batch-экспорт в одну папку)
   saveOutput: (pid: string, dir: string, name: string) => postJson<{ ok: boolean; path?: string }>(`/projects/${pid}/save-output`, { dir, name }),   // копия готового output в dir под именем оригинала
   dubUrl: (pid: string, rev = 0) => `${BASE}/projects/${pid}/dub?rev=${rev}`,   // playable dubbed video (frames + dub audio)
+  // Джобы: активные и недавние по проекту (+ его job.json), снапшот, отмена, продолжение с места остановки.
+  jobs: (pid: string) => getJson<{ jobs: JobSnapshot[]; project_job: ProjectJob | null }>(`/jobs?pid=${encodeURIComponent(pid)}`),
+  job: (jobId: string) => getJson<JobSnapshot>(`/jobs/${jobId}`),
+  cancelJob: (jobId: string) => fetch(`${BASE}/jobs/${jobId}/cancel`, { method: "POST" }).then(j<{ id: string; status: string }>),
+  resumeProject: (pid: string) => fetch(`${BASE}/projects/${pid}/resume`, { method: "POST" }).then(j<{ job_id: string; kind: string; project_id: string }>),
   // SSE job progress -> onEvent per message; resolves on done, rejects on error
   watchJob: (jobId: string, onEvent: (e: JobEvent) => void) =>
     new Promise<unknown>((resolve, reject) => {
@@ -234,6 +259,7 @@ export const api = {
           onEvent(e);                                  // a consumer throw must not leak the stream open either
           if (e.type === "done") { es.close(); resolve(e.result); }
           else if (e.type === "error") { es.close(); reject(new Error(e.error)); }
+          else if (e.type === "cancelled") { es.close(); reject(new JobCancelledError()); }
         } catch (err) { es.close(); reject(err instanceof Error ? err : new Error(String(err))); }
       };
       // EventSource fires onerror on transient drops too (it auto-reconnects) — only give up once truly CLOSED

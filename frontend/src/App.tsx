@@ -5,7 +5,7 @@ import { motion } from "motion/react";
 import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, slot, type Selection, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
+import { api, slot, JobCancelledError, type Selection, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
 import i18n, { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
@@ -14,6 +14,12 @@ import ResourceMonitor from "./components/ResourceMonitor";
 import { GENDER_LABEL_KEY, genderKey } from "./lib/gender";
 import OpenRouterKey from "./components/OpenRouterKey";
 import ProxySection from "./components/ProxySection";
+import { ANALYZE_STEPS, STAGE_TO_STEPKEY } from "./lib/stages";
+import { watchTracked, watchWithResume } from "./lib/jobs";
+import CancelJobButton from "./components/CancelJobButton";
+import JobFailurePanel from "./components/JobFailurePanel";
+import ProjectJobBar from "./components/ProjectJobBar";
+import { ContinueJobButton, JobStateLabel } from "./components/RecentJobBadge";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -1090,6 +1096,7 @@ function DropZone() {
       s.setJobSteps(steps);
     }
     s.setProgress("", "", null);             // fresh stepper for this run
+    s.clearResumed();
     try {
       const { project_id } = await api.createProject(file, isAudioFile(file) ? null : subsFile);   // сабы — только для видео
       s.setPid(project_id);
@@ -1114,7 +1121,7 @@ function DropZone() {
       const effCastingRef = effCasting ? castingRef : "";
       const effContentType = effCasting ? contentType : "real";
       const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType);
-      await api.watchJob(job_id, (e) => { if (e.type === "progress") s.setProgress(e.stage || "", e.msg || "", e.pct ?? null); });
+      await watchWithResume(project_id, "analyze", job_id);   // ошибка -> «Продолжить» с места остановки, не сброс
       if (audio === "voiceover") await api.patch(project_id, { op: "voiceover_gain", gain_db: voGain });   // громкость оригинала со старта -> рендер ниже подхватит
       // Блюр-подложка под субтитрами — опция дубляжа/субтитров (дефолт вкл). Патчим, когда сабы вжигаются.
       if (eBurn && eSubs !== "none" && !audioOnly) await api.patch(project_id, { op: "sub_blur", on: subBlur });
@@ -1138,7 +1145,7 @@ function DropZone() {
       if (audio === "dub" || audio === "voiceover") {
         try {
           const r = await api.render(project_id);   // полный дубляж на экране ЗАГРУЗКИ (1:1 питон: analyze -> analyzed.mp4): TTS+микс+бёрн+mux -> output.mp4
-          await api.watchJob(r.job_id, (e) => { if (e.type === "progress") s.setProgress(e.stage || "voicing", e.msg || "", e.pct ?? null); });
+          await watchTracked(project_id, "render", r.job_id, "voicing");
           s.setProject(await api.getProject(project_id));
           // rendered ОСТАЁТСЯ false: покадровое превью <img> (редактирование), а /dub отдаёт готовый дуб
           // (output.mp4) -> плей играет озвучку и двигает скраб -> кадры следуют (1:1 оригинал).
@@ -1146,6 +1153,7 @@ function DropZone() {
       }
       s.setStage("editor"); playSfx("success");
     } catch (err) {
+      if (err instanceof JobCancelledError) { s.setProgress("", "", null); s.setStage("empty"); return; }
       s.setProgress("error", String(err), null);  // surface backend failure instead of hanging on "analyzing"
       s.setStage("empty"); playSfx("error");
     }
@@ -1194,9 +1202,11 @@ function DropZone() {
                           <span>·</span><span className="truncate">{p.mode}</span>
                           <span>·</span><span className="shrink-0">{fmtAgo(p.mtime)}</span>
                           {p.done && <Check size={12} className="text-[var(--color-accent)] shrink-0" />}
+                          <JobStateLabel p={p} />
                         </div>
                       </div>
                     </button>
+                    <ContinueJobButton p={p} onOpen={openProject} />
                     <button onClick={(e) => deleteRecent(e, p.pid, p.video)} title={t("recent.delete")}
                       className="shrink-0 mr-1 p-1.5 rounded-md text-[var(--color-muted)] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] hover:bg-white/5 transition"><Trash2 size={15} /></button>
                   </div>
@@ -1525,26 +1535,6 @@ function DropZone() {
   );
 }
 
-// editor stages mapped to the engine's stage markers (api._run emits `stage` per _timed block + "download").
-type AnalyzeStepKey = "download" | "separating" | "diarizing" | "recognizing" | "translating" | "voicing" | "locating" | "casting" | "assembling";
-const ANALYZE_STEPS: { key: AnalyzeStepKey; stages: string[] }[] = [
-  { key: "download",    stages: ["download"] },
-  { key: "separating",  stages: ["extract_audio", "separate"] },
-  { key: "diarizing",   stages: ["diarize"] },
-  { key: "recognizing", stages: ["asr"] },
-  { key: "translating", stages: ["translate", "translate_ctx", "vision", "rewrite", "rewrite_ctx"] },   // "vision" = ctx-проход (vision layout + перевод транскрипта)
-  { key: "voicing",     stages: ["tts", "mix"] },        // TTS synthesis + mix — runs BETWEEN translate and OCR; without this the stepper blanks (cur=-1) during voice gen
-  // «Находим текст на экране» = ТОЛЬКО OCR-стадии: юзер с выключенной детекцией не должен видеть этот
-  // шаг вовсе (жалоба). Сборка выходного файла (build/burn/mux) — отдельный честный шаг.
-  { key: "locating",    stages: ["ocr_detect", "translate_titles", "translate_tagline"] },
-  { key: "casting",     stages: ["cast_detect", "cast_embed", "cast_speaker"] },   // #115: лица (SCRFD) + эмбеддинги (LVFace) + active-speaker (LR-ASD)
-  { key: "assembling",  stages: ["build", "burn", "mux"] },
-];
-// стадия -> переведённая метка шага (бэкенд шлёт детальный msg по-русски; в UI показываем локализованный
-// ярлык стадии вместо сырого текста, чтобы статус был на языке интерфейса). Неизвестная стадия -> null.
-const STAGE_TO_STEPKEY: Record<string, AnalyzeStepKey> = Object.fromEntries(
-  ANALYZE_STEPS.flatMap((s) => s.stages.map((st) => [st, s.key])),
-);
 // `allowed` — ключи шагов ТЕКУЩЕЙ джобы: стадия отфильтрованного шага (напр. ocr_detect при
 // выключенной детекции) не должна подписываться его ярлыком в статус-строке — вернём null, и
 // строка покажет сырое сообщение бэкенда («детекция вшитого текста отключена»), а не фантомный шаг.
@@ -1558,7 +1548,7 @@ function stageLabel(stage: string | undefined, t: TFunction<"t">, allowed?: stri
 
 function AnalyzeProgress() {
   const { t } = useTranslation();
-  const { progress, audioOnly, jobSteps } = useStore();
+  const { progress, audioOnly, jobSteps, resumedStages, queuedAhead } = useStore();
   // Показываем только шаги текущей джобы (jobSteps из run()); null (открытие по ?pid и т.п.) = все.
   const STEPS = jobSteps ? ANALYZE_STEPS.filter((stp) => jobSteps.includes(stp.key)) : ANALYZE_STEPS;
   const matched = STEPS.findIndex((stp) => stp.stages.includes(progress.stage));
@@ -1583,6 +1573,7 @@ function AnalyzeProgress() {
                   {done ? <Check size={12} /> : active ? <Loader2 size={14} className="animate-spin" /> : <span className="w-1.5 h-1.5 rounded-full bg-current" />}
                 </span>
                 <span className={`text-sm ${active ? "text-[var(--color-text)] font-medium" : done ? "text-[var(--color-muted)]" : "text-[var(--color-muted)]/45"}`}>{t(`analyze.${stp.key}`)}</span>
+                {stp.stages.some((st) => resumedStages.includes(st)) && <span className="ml-auto text-[10px] uppercase tracking-wider text-[var(--color-accent-2)]">{t("jobs.fromCache")}</span>}
                 {active && dl && pct != null && <span className="ml-auto mono text-[11px] text-[var(--color-accent)]">{Math.round(pct)}%</span>}
               </div>
             );
@@ -1593,7 +1584,9 @@ function AnalyzeProgress() {
             ? <div className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-300" style={{ width: `${Math.max(2, Math.min(100, pct))}%` }} />
             : <div className="h-full w-1/3 rounded-full bg-[var(--color-accent)] animate-pulse" />}
         </div>
-        <div className="mt-2 min-h-4 text-center mono text-[12px] text-[var(--color-muted)] break-words">{stageLabel(progress.stage, t, jobSteps) || progress.msg}</div>
+        <div className="mt-2 min-h-4 text-center mono text-[12px] text-[var(--color-muted)] break-words">{queuedAhead != null ? t("jobs.queuedAhead", { n: queuedAhead }) : stageLabel(progress.stage, t, jobSteps) || progress.msg}</div>
+        <JobFailurePanel />
+        <CancelJobButton />
       </div>
     </div>
   );
@@ -4517,6 +4510,7 @@ export default function App() {
   const setPid = useStore((s) => s.setPid);
   const setProject = useStore((s) => s.setProject);
   const setStage = useStore((s) => s.setStage);
+  const pid = useStore((s) => s.pid);
   const [cap, setCap] = useState("");
   const [capOffline, setCapOffline] = useState(false);
   useEffect(() => { api.capabilities().then((c) => {
@@ -4549,6 +4543,7 @@ export default function App() {
       {stage === "batch" && <BatchView />}
       {stage === "multilang" && <MultiLangView />}
       {stage === "editor" && (projMode === "transcribe" ? <TranscriptView /> : <Editor />)}
+      {stage === "editor" && pid && <ProjectJobBar key={pid} pid={pid} />}
       <footer className="mono h-6 px-4 flex items-center gap-2 text-[10px] text-[var(--color-muted)] border-t border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
         <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] shrink-0" /><span className="truncate" title={capOffline ? t("status.backendOffline") : cap}>{capOffline ? t("status.backendOffline") : cap}</span>
       </footer>
