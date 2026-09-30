@@ -12,6 +12,8 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 # Системный прокси (Windows «Параметры → Сеть → Прокси» и HTTP(S)_PROXY/ALL_PROXY/NO_PROXY), как в net.rs студий.
 hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"] }
 http = "1"
+# Логин и пароль прокси в адресе — %XX (RFC 3986 userinfo); кодирование и раскодирование как у url/reqwest.
+percent-encoding = "2"
 regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

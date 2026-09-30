@@ -2,9 +2,10 @@
 //! не уходят никогда — только «задан ли» и источник. Ошибки — JSON `{error: <код>, detail}`: текст для окна
 //! выбирает фронт по коду.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -82,44 +83,58 @@ pub async fn delete_openrouter_settings() -> Response {
 
 // ─── GET|PUT|DELETE /engine/server/key ─────────────────────────────────────
 // Ключ локального OpenAI-совместимого сервера (LM Studio, vLLM с --api-key). Не проверяется: сервер может
-// быть ещё не запущен. Наружу — только «задан ли».
-fn server_key_state() -> Value {
-    json!({ "configured": credentials::local_server_key().is_some() })
+// быть ещё не запущен. Ключ принадлежит адресу, для которого его сохранили: `url` в запросе (адрес в поле
+// окна) или адрес из настроек. Наружу — только «задан ли для этого адреса».
+fn server_key_address(models_root: &Path, url: Option<&str>) -> String {
+    url.map(str::trim).filter(|url| !url.is_empty()).map_or_else(|| crate::models::server_url(models_root), str::to_string)
 }
 
-pub async fn server_key_settings() -> Json<Value> {
-    Json(server_key_state())
+fn server_key_state(address: &str) -> Value {
+    json!({ "configured": credentials::local_server_key_for(address).is_some() })
 }
 
-pub async fn update_server_key(Json(body): Json<Value>) -> Response {
+// GET /engine/server/key?url=
+pub async fn server_key_settings(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Json<Value> {
+    Json(server_key_state(&server_key_address(&st.models_root, q.get("url").map(String::as_str))))
+}
+
+// PUT /engine/server/key {api_key, url?}
+pub async fn update_server_key(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
     let key = body.get("api_key").and_then(Value::as_str).map(str::trim).unwrap_or_default();
     if key.is_empty() {
         return failure(StatusCode::BAD_REQUEST, "empty_key", "api_key is empty; DELETE /engine/server/key removes the key");
     }
-    match credentials::store_local_server_key(Some(key)) {
-        Ok(_) => Json(server_key_state()).into_response(),
+    let address = server_key_address(&st.models_root, body.get("url").and_then(Value::as_str));
+    match credentials::store_local_server_key(&address, Some(key)) {
+        Ok(_) => Json(server_key_state(&address)).into_response(),
         Err(e) if key.contains(['\r', '\n']) => failure(StatusCode::BAD_REQUEST, "invalid_key", format!("{e:#}")),
         Err(e) => failure(StatusCode::INTERNAL_SERVER_ERROR, "store_failed", format!("{e:#}")),
     }
 }
 
-pub async fn delete_server_key() -> Response {
-    match credentials::store_local_server_key(None) {
-        Ok(_) => Json(server_key_state()).into_response(),
+pub async fn delete_server_key(State(st): State<AppState>) -> Response {
+    let address = crate::models::server_url(&st.models_root);
+    match credentials::store_local_server_key(&address, None) {
+        Ok(_) => Json(server_key_state(&address)).into_response(),
         Err(e) => failure(StatusCode::INTERNAL_SERVER_ERROR, "store_failed", format!("{e:#}")),
     }
 }
 
 /// Прокси как его видит окно: режим, тип, адрес без пароля, флаг «пароль задан» и `problem` — почему
-/// сохранённый свой адрес не читается (запросы тогда идут напрямую).
+/// сохранённый свой адрес не читается (запросы тогда идут напрямую). Проверяется адрес, по которому пошли бы
+/// запросы, — вместе с паролем; текст причины его маскирует.
 pub(crate) fn proxy_view(models_root: &Path, secrets: &Path) -> Value {
     let selection = crate::models::load_selection(models_root);
-    let public = crate::models::redact_selection(&selection, false, credentials::proxy_password_in(secrets).is_some());
+    let password = credentials::proxy_password_in(secrets);
+    let public = crate::models::redact_selection(&selection, false, password.is_some());
     let mode = crate::models::proxy_mode(&selection);
     let kind = crate::models::proxy_kind(&selection);
     let url = public.get("proxy_url").and_then(Value::as_str).unwrap_or_default().to_string();
     let problem = match mode {
-        dub_llm::net::ProxyMode::Custom => dub_llm::net::normalize(&url, kind).err().map(|e| format!("{e:#}")),
+        dub_llm::net::ProxyMode::Custom => {
+            let address = crate::models::proxy_address(&selection, password.as_deref()).unwrap_or_default();
+            dub_llm::net::normalize(&address, kind).err().map(|e| format!("{e:#}"))
+        }
         _ => None,
     };
     json!({
@@ -398,6 +413,77 @@ mod tests {
         assert_eq!(probe("http://alice@proxy.lan:3128", None), "http://alice@proxy.lan:3128");
         assert_eq!(probe("http://alice@proxy2.lan:3128", None), "http://alice:hunter2@proxy2.lan:3128");
 
+        std::fs::remove_dir_all(&models).unwrap();
+        std::fs::remove_dir_all(&secrets).unwrap();
+    }
+
+    #[test]
+    fn a_password_with_url_delimiters_keeps_the_route() {
+        let models = scratch("delimiters-models");
+        let secrets = scratch("delimiters-secrets");
+        for password in ["pa/ss", "pa?ss", "pa#ss", "p@ss", "pa:ss", "p@ss:1/x", "pa\\ss", "100%", "пароль"] {
+            let encoded = dub_llm::net::encode_userinfo(password);
+            for form in [
+                json!({ "mode": "custom", "url": "http://bob@1.2.3.4:8000", "password": password }),
+                json!({ "mode": "custom", "url": format!("http://bob:{encoded}@1.2.3.4:8000") }),
+                json!({ "mode": "custom", "url": format!("1.2.3.4:8000:bob:{password}") }),
+            ] {
+                if password.contains(':') && form["url"].as_str().is_some_and(|url| !url.contains("://")) {
+                    continue;
+                }
+                apply_proxy_form(&models, &secrets, &form).unwrap_or_else(|e| panic!("{form}: {e:?}"));
+                assert_eq!(credentials::proxy_password_in(&secrets).as_deref(), Some(password), "{form}");
+                let view = proxy_view(&models, &secrets);
+                assert_eq!((view["problem"].clone(), view["password_set"].clone()), (Value::Null, Value::Bool(true)), "{form}");
+                let shown = view.to_string();
+                assert!(!shown.contains(password) && !shown.contains(&encoded), "{shown}");
+
+                let selection = crate::models::load_selection(&models);
+                let address = crate::models::proxy_address(&selection, credentials::proxy_password_in(&secrets).as_deref()).unwrap();
+                let settings = dub_llm::net::ProxySettings {
+                    mode: dub_llm::net::ProxyMode::Custom,
+                    address: Some(address.clone()),
+                    kind: crate::models::proxy_kind(&selection),
+                };
+                let through = settings.custom_url().unwrap_or_else(|| panic!("{form}: the route went direct"));
+                assert_eq!((through.host_str(), through.port()), (Some("1.2.3.4"), Some(8000)), "{form}");
+                assert_eq!(dub_llm::net::decode_userinfo(through.password().unwrap()), password);
+                let logged = dub_llm::net::masked(through.as_str());
+                assert!(!logged.contains(&encoded) && !logged.contains(password), "{logged}");
+                let probe = proxy_test_address(&models, Some(&secrets), view["url"].as_str().unwrap(), None);
+                assert_eq!(probe, address, "the test probes the saved route");
+            }
+        }
+        std::fs::remove_dir_all(&models).unwrap();
+        std::fs::remove_dir_all(&secrets).unwrap();
+    }
+
+    #[test]
+    fn the_proxy_test_hands_the_password_over_as_is_and_never_answers_with_it() {
+        let proxy = dub_llm::test_http::serve(vec![
+            dub_llm::test_http::Reply::json(407, "{}"),
+            dub_llm::test_http::Reply::json(407, "{}"),
+        ]);
+        let models = scratch("probe-real-models");
+        let secrets = scratch("probe-real-secrets");
+        let saved = proxy.base().replace("http://", "http://bob@");
+        apply_proxy_form(&models, &secrets, &json!({ "mode": "custom", "url": saved, "password": "p@ss:1/x" })).unwrap();
+        let address = proxy_test_address(&models, Some(&secrets), &saved, None);
+        let settings = dub_llm::net::ProxySettings {
+            mode: dub_llm::net::ProxyMode::Custom,
+            address: Some(address),
+            kind: dub_llm::net::ProxyKind::Http,
+        };
+        let answer = dub_llm::net::test(settings).unwrap();
+        assert_eq!((answer["huggingface"].as_bool(), answer["openrouter"].as_bool()), (Some(false), Some(false)), "{answer}");
+        assert!(answer["huggingface_error"].as_str().is_some_and(|e| !e.is_empty()), "{answer}");
+        let text = answer.to_string();
+        assert!(!text.contains("p@ss") && !text.contains("p%40ss"), "{text}");
+        for index in 0..2 {
+            let request = proxy.request(index).to_ascii_lowercase();
+            assert!(request.starts_with("connect "), "{request}");
+            assert!(request.contains("proxy-authorization: basic ym9ionbac3m6ms94"), "bob:p@ss:1/x as is: {request}");
+        }
         std::fs::remove_dir_all(&models).unwrap();
         std::fs::remove_dir_all(&secrets).unwrap();
     }

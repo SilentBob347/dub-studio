@@ -89,7 +89,8 @@ fn start_gemma(o: &LlmOpen, with_mmproj: bool) -> Result<LlmProvider, String> {
     Ok(LlmProvider::Local { _server: server, client })
 }
 
-/// Локальный OpenAI-совместимый сервер: адрес, модель стадии, ключ из хранилища секретов.
+/// Локальный OpenAI-совместимый сервер: адрес, модель стадии, ключ из хранилища секретов — если он сохранён для
+/// этого адреса.
 fn open_server(o: &LlmOpen, mode: LlmMode) -> Result<LlmProvider, String> {
     let url = crate::models::server_url(o.models_root);
     let model = crate::models::server_model(o.models_root, mode.stage());
@@ -99,7 +100,7 @@ fn open_server(o: &LlmOpen, mode: LlmMode) -> Result<LlmProvider, String> {
             LlmMode::Vision => format!("локальный сервер ({url}) выбран для vision, но модель не выбрана"),
         });
     }
-    let client = ChatClient::openai_compatible(&url, model.clone(), crate::credentials::local_server_key())
+    let client = ChatClient::openai_compatible(&url, model.clone(), crate::credentials::local_server_key_for(&url))
         .map_err(|e| format!("клиент локального сервера: {e}"))?;
     Ok(LlmProvider::Remote { client, label: format!("локальный сервер {url} · {model}") })
 }

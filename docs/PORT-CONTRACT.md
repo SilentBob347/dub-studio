@@ -305,8 +305,8 @@ compose всегда даёт титру bbox (матч ИЛИ fallback цент
 | DELETE | `/engine/openrouter/settings` | Удалить сохранённый ключ; ответ как у GET. `environment_key` 409 |
 | GET | `/engine/proxy/settings` | `{mode: system\|custom\|off, kind: http\|https\|socks5\|socks4, on, url, password_set, problem}` — адрес без пароля; `problem` — почему сохранённый свой адрес не читается |
 | PUT | `/engine/proxy/settings` | `{mode?, kind?, url?, password?, on?}`: адрес в любой записи (`host:port:user:pass`, `user:pass@host:port`, `scheme://…`) приводится к URL со схемой по `kind`; `on` — прежняя форма (true = custom, false = off); `password` нет или `""` — оставить сохранённый, `null` — удалить, строка — заменить; пароль, вписанный в адрес, уходит в хранилище; `url: ""` — убрать адрес. Маршрут всех запросов перестраивается сразу. Коды: `proxy_password_without_user`, `invalid_proxy_url`, `invalid_proxy_mode`, `invalid_proxy_kind`, `proxy_url_required`, `invalid_proxy_password`, `invalid_proxy_on` 400, `store_failed` 500 |
-| POST | `/engine/proxy/test` | `{mode?, kind?, url, password?}` (mode по умолчанию custom): HF и OpenRouter параллельно, 15 с, `{ok, hf, openrouter, hf_error, openrouter_error}`; адрес с логином без пароля проверяется с паролем из тела; сохранённый пароль подставляется, только если `url` совпадает с сохранённым адресом |
-| GET/PUT/DELETE | `/engine/server/key` | Ключ локального OpenAI-совместимого сервера: `{configured}`; PUT `{api_key}` (`empty_key`/`invalid_key` 400), DELETE — удалить |
+| POST | `/engine/proxy/test` | `{mode?, kind?, url, password?}` (mode по умолчанию custom): HF и OpenRouter параллельно, 15 с, `{ok, hf, openrouter, hf_error, openrouter_error}`; адрес с логином без пароля проверяется с паролем из тела; сохранённый пароль подставляется, только если `url` совпадает с сохранённым адресом. Пароль хранится как есть и в адрес вставляется %-кодированным: `/ ? # @ :` в нём не меняют хост и порт |
+| GET/PUT/DELETE | `/engine/server/key` | Ключ локального OpenAI-совместимого сервера. Ключ принадлежит адресу, для которого сохранён (без хвостовых `/` и `/v1`), и уходит только на него. GET `?url=` → `{configured}` для этого адреса (по умолчанию `srv_url`); PUT `{api_key, url?}` — сохранить для `url` (по умолчанию `srv_url`), `empty_key`/`invalid_key` 400; DELETE — удалить |
 
 ## Провайдеры LLM, OpenRouter, прокси — **done**
 
@@ -326,4 +326,4 @@ compose всегда даёт титру bbox (матч ИЛИ fallback цент
 | GET | `/engine/openrouter/catalog` | `{refreshed_at, total, counts:{llm, vision, tts, asr}}` |
 | POST | `/engine/openrouter/catalog/refresh` | Скачать каталог заново; ответ как у GET |
 | POST | `/engine/openrouter/verify` | `{key}` -> `{ok:true, data}` \| `{ok:false, error}` без сохранения |
-| GET | `/engine/server/models?url=` | Модели локального сервера (`GET <url>/v1/models` через сервер студии): `{models:[id]}`; 502 `{error: server_unreachable, detail}` |
+| GET | `/engine/server/models?url=` | Модели локального сервера (`GET <url>/v1/models` через сервер студии): `{models:[id]}`; ключ из `/engine/server/key` — только если он сохранён для этого `url`; 502 `{error: server_unreachable, detail}` |

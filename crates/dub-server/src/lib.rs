@@ -53,6 +53,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use jobs::JobQueue;
+/// Маршрут прокси приложения — для клиентов вне сервера (апдейтер десктопа).
+pub use dub_llm::net;
 
 /// E2E-верификация caption-композита БЕЗ ASR/Gemma/TTS: берём УЖЕ проанализированный project.json
 /// (кэш transcript+raw_ctx), заново гоним OCR-стадию + compose (реальная детекция + матчинг титров),

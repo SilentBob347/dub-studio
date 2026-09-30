@@ -173,7 +173,7 @@ fn error_chain(e: &dyn std::error::Error) -> String {
 }
 
 /// Адрес сервера без `/` и `/v1` в конце: пользователи пишут и так, и так.
-fn server_base(url: &str) -> String {
+pub fn server_base(url: &str) -> String {
     let trimmed = url.trim().trim_end_matches('/');
     trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
 }

@@ -208,13 +208,18 @@ pub fn proxy_kind(sel: &Value) -> dub_llm::net::ProxyKind {
     pick(sel, "proxy_kind").and_then(dub_llm::net::ProxyKind::parse).unwrap_or_default()
 }
 
+/// Адрес своего прокси, по которому идут запросы: адрес из active.json (без пароля) и пароль из хранилища.
+pub(crate) fn proxy_address(sel: &Value, password: Option<&str>) -> Option<String> {
+    pick(sel, "proxy_url").map(|url| proxy_with_password(url, password))
+}
+
 /// Маршрут прокси из active.json и хранилища секретов: адрес лежит без пароля, пароль подставляется из хранилища.
 pub fn proxy_settings(mroot: &Path) -> dub_llm::net::ProxySettings {
     let sel = load_selection(mroot);
     dub_llm::net::ProxySettings {
         mode: proxy_mode(&sel),
         kind: proxy_kind(&sel),
-        address: pick(&sel, "proxy_url").map(|url| proxy_with_password(url, crate::credentials::proxy_password().as_deref())),
+        address: proxy_address(&sel, crate::credentials::proxy_password().as_deref()),
     }
 }
 
@@ -247,12 +252,14 @@ fn proxy_userinfo(url: &str) -> Option<(&str, &str, Option<&str>, &str)> {
     Some((&url[..start], user, password, &rest[at + 1..]))
 }
 
-/// Отделить пароль от адреса прокси: (адрес без пароля, пароль). Логин остаётся в адресе.
+/// Отделить пароль от адреса прокси: (адрес без пароля, пароль как есть — %XX раскодированы). Логин остаётся
+/// в адресе.
 pub fn split_proxy_password(url: &str) -> (String, Option<String>) {
     match proxy_userinfo(url) {
-        Some((head, user, Some(password), tail)) => {
-            (format!("{head}{user}@{tail}"), Some(password.to_string()).filter(|p| !p.is_empty()))
-        }
+        Some((head, user, Some(password), tail)) => (
+            format!("{head}{user}@{tail}"),
+            Some(dub_llm::net::decode_userinfo(password)).filter(|p| !p.is_empty()),
+        ),
         _ => (url.to_string(), None),
     }
 }
@@ -262,10 +269,13 @@ pub fn proxy_has_user(url: &str) -> bool {
     proxy_userinfo(url).is_some_and(|(_, user, _, _)| !user.is_empty())
 }
 
-/// Подставить пароль в адрес с логином и без пароля; адрес со своим паролем или без логина — как есть.
+/// Подставить пароль (как есть, не %XX) в адрес с логином и без пароля; адрес со своим паролем или без логина —
+/// как есть. Пароль кодируется %XX: с / ? # @ : адрес иначе читался бы с чужими хостом и портом.
 pub fn proxy_with_password(url: &str, password: Option<&str>) -> String {
     match (proxy_userinfo(url), password.filter(|p| !p.is_empty())) {
-        (Some((head, user, None, tail)), Some(password)) if !user.is_empty() => format!("{head}{user}:{password}@{tail}"),
+        (Some((head, user, None, tail)), Some(password)) if !user.is_empty() => {
+            format!("{head}{user}:{}@{tail}", dub_llm::net::encode_userinfo(password))
+        }
         _ => url.to_string(),
     }
 }
@@ -717,12 +727,18 @@ mod secret_tests {
     fn a_proxy_password_is_split_off_and_put_back() {
         assert_eq!(
             split_proxy_password("http://alice:p%40ss:w@proxy.lan:3128"),
-            ("http://alice@proxy.lan:3128".to_string(), Some("p%40ss:w".to_string()))
+            ("http://alice@proxy.lan:3128".to_string(), Some("p@ss:w".to_string()))
         );
+        assert_eq!(split_proxy_password("http://alice:p@ss@proxy.lan:3128").1.as_deref(), Some("p@ss"), "a raw @ as older versions wrote it");
         assert_eq!(split_proxy_password("socks5://proxy.lan:1080"), ("socks5://proxy.lan:1080".to_string(), None));
         assert_eq!(split_proxy_password("http://alice@proxy.lan:3128"), ("http://alice@proxy.lan:3128".to_string(), None));
         assert_eq!(split_proxy_password("http://alice:@proxy.lan:3128"), ("http://alice@proxy.lan:3128".to_string(), None));
-        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", Some("p%40ss:w")), "http://alice:p%40ss:w@proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", Some("p@ss:w")), "http://alice:p%40ss%3Aw@proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", Some("pa/ss?#")), "http://alice:pa%2Fss%3F%23@proxy.lan:3128");
+        for password in ["p@ss:w", "pa/ss?#", "100%", "пароль"] {
+            let (_, back) = split_proxy_password(&proxy_with_password("http://alice@proxy.lan:3128", Some(password)));
+            assert_eq!(back.as_deref(), Some(password));
+        }
         assert_eq!(proxy_with_password("http://alice:own@proxy.lan:3128", Some("stored")), "http://alice:own@proxy.lan:3128");
         assert_eq!(proxy_with_password("http://proxy.lan:3128", Some("stored")), "http://proxy.lan:3128");
         assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", None), "http://alice@proxy.lan:3128");

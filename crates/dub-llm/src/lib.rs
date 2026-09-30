@@ -15,7 +15,7 @@ mod server;
 pub mod test_http;
 
 pub use answer::without_thinking;
-pub use client::{ChatClient, Endpoint, Message, Part, Sampling};
+pub use client::{server_base, ChatClient, Endpoint, Message, Part, Sampling};
 pub use server::{resolve_llama_bin, LlamaServer, ServerOpts};
 
 use thiserror::Error;

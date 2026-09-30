@@ -114,14 +114,14 @@ pub async fn openrouter_verify(Json(body): Json<Value>) -> Response {
 // ─── GET /engine/server/models?url= — модели локального OpenAI-совместимого сервера ──────────────────────
 // Сервер пользователя (Ollama, LM Studio, vLLM, llama-server) отвечает на GET <адрес>/v1/models списком
 // {data:[{id}]}. Спрашиваем через сервер студии, чтобы окно не ходило на чужой адрес само. Без url — адрес из
-// настроек. Ключ — из хранилища секретов.
+// настроек. Ключ из хранилища уходит только на адрес, для которого его сохранили.
 pub async fn server_models(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Response {
     let url = q
         .get("url")
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| crate::models::server_url(&st.models_root));
-    let res = tokio::task::spawn_blocking(move || list_server_models(&url, crate::credentials::local_server_key()))
+    let res = tokio::task::spawn_blocking(move || list_server_models(&url, crate::credentials::local_server_key_for(&url)))
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
     match res {
@@ -132,8 +132,7 @@ pub async fn server_models(State(st): State<AppState>, Query(q): Query<HashMap<S
 
 /// id моделей сервера по адресу `url` (с `/v1` или без).
 pub(crate) fn list_server_models(url: &str, key: Option<String>) -> Result<Vec<String>, String> {
-    let base = url.trim().trim_end_matches('/');
-    let base = base.strip_suffix("/v1").unwrap_or(base);
+    let base = dub_llm::server_base(url);
     if base.is_empty() {
         return Err("адрес сервера не задан".into());
     }
@@ -540,6 +539,23 @@ where
 mod provider_endpoint_tests {
     use super::*;
     use dub_llm::test_http::{serve, Reply};
+
+    #[test]
+    fn the_saved_server_key_goes_only_to_its_own_address() {
+        let saved = serve(vec![Reply::json(200, r#"{"data":[{"id":"m"}]}"#)]);
+        let foreign = serve(vec![Reply::json(200, r#"{"data":[{"id":"m"}]}"#)]);
+        let dir = std::env::temp_dir().join(format!("dub-server-key-{}-{}", std::process::id(), uuid::Uuid::new_v4().simple()));
+        crate::credentials::store_local_server_key_in(&dir, &format!("{}/v1", saved.base()), Some("lm-secret")).unwrap();
+        let key_for = |url: &str| crate::credentials::local_server_key_in(&dir, url);
+
+        list_server_models(&foreign.base(), key_for(&foreign.base())).unwrap();
+        let sent = foreign.request(0).to_ascii_lowercase();
+        assert!(!sent.contains("authorization:") && !sent.contains("lm-secret"), "{sent}");
+
+        list_server_models(&saved.base(), key_for(&saved.base())).unwrap();
+        assert!(saved.request(0).to_ascii_lowercase().contains("authorization: bearer lm-secret"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_local_server_lists_its_models_in_any_address_form() {

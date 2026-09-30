@@ -176,9 +176,10 @@ export const api = {
   openrouterCatalog: () => getJson<OrCatalog>("/engine/openrouter/catalog"),
   refreshOpenrouterCatalog: () => postJson<OrCatalog>("/engine/openrouter/catalog/refresh", {}),
   // Локальный OpenAI-совместимый сервер: модели по адресу (через сервер студии) и ключ (только «задан ли»).
+  // Ключ принадлежит адресу, для которого его сохранили: на другой адрес сервер студии его не отправит.
   serverModels: (url: string) => getCoded<{ models: string[] }>(`/engine/server/models?url=${encodeURIComponent(url)}`),
-  serverKey: () => getJson<{ configured: boolean }>("/engine/server/key"),
-  saveServerKey: (apiKey: string) => sendCoded<{ configured: boolean }>("PUT", "/engine/server/key", { api_key: apiKey }),
+  serverKey: (url: string) => getJson<{ configured: boolean }>(`/engine/server/key?url=${encodeURIComponent(url)}`),
+  saveServerKey: (apiKey: string, url: string) => sendCoded<{ configured: boolean }>("PUT", "/engine/server/key", { api_key: apiKey, url }),
   deleteServerKey: () => sendCoded<{ configured: boolean }>("DELETE", "/engine/server/key"),
   // Голоса TTS-модели с полом/возрастом/русским (встроенный справочник) — для дропдауна + автокастинга.
   openrouterVoices: (model: string) => getJson<{ voices: { name: string; gender: string; age: string; ru: boolean }[]; supportsRussian: boolean | null }>(`/engine/openrouter/voices?model=${encodeURIComponent(model)}`),

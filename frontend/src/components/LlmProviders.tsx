@@ -17,8 +17,10 @@ const selectCls = "w-full bg-[var(--color-surface)] border border-[var(--color-b
 const tabCls = (on: boolean) =>
   `flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${on ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`;
 
-// Ключ локального сервера: наружу не отдаётся, поле всегда пустое; сохранённый виден по плейсхолдеру.
-function ServerKey() {
+// Ключ локального сервера: наружу не отдаётся, поле всегда пустое; сохранённый виден по плейсхолдеру. Ключ
+// принадлежит адресу, для которого сохранён: `url` — сохранённый адрес, `typedUrl` — адрес в поле (ключ
+// сохраняется для него, даже если адрес ещё не записан).
+function ServerKey({ url, typedUrl }: { url: string; typedUrl: string }) {
   const { t } = useTranslation();
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [key, setKey] = useState("");
@@ -26,8 +28,8 @@ function ServerKey() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   useEffect(() => {
-    api.serverKey().then((s) => setConfigured(s.configured), (e: unknown) => setMsg({ ok: false, text: t("providers.saveFailed", { detail: errorText(e) }) }));
-  }, [t]);
+    api.serverKey(url).then((s) => setConfigured(s.configured), (e: unknown) => setMsg({ ok: false, text: t("providers.saveFailed", { detail: errorText(e) }) }));
+  }, [t, url]);
   const run = async (action: () => Promise<{ configured: boolean }>, done: string) => {
     setBusy(true); setMsg(null);
     try { setConfigured((await action()).configured); setKey(""); setShow(false); setMsg({ ok: true, text: done }); }
@@ -43,7 +45,7 @@ function ServerKey() {
           autoComplete="off" spellCheck={false} className={fieldCls} />
         <button onClick={() => setShow((s) => !s)} aria-label={show ? t("secrets.hide") : t("secrets.show")} title={show ? t("secrets.hide") : t("secrets.show")}
           className="px-2 rounded-md border border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]">{show ? <EyeOff size={13} /> : <Eye size={13} />}</button>
-        <button onClick={() => run(() => api.saveServerKey(key.trim()), t("providers.serverKeyStored"))} disabled={busy || !key.trim()}
+        <button onClick={() => run(() => api.saveServerKey(key.trim(), typedUrl), t("providers.serverKeyStored"))} disabled={busy || !key.trim()}
           className="px-3 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] hover:border-[var(--color-accent)] disabled:opacity-40">{busy ? "…" : t("providers.save")}</button>
         {configured && (
           <button onClick={() => run(() => api.deleteServerKey(), t("providers.serverKeyRemoved"))} disabled={busy} aria-label={t("providers.serverKeyDelete")} title={t("providers.serverKeyDelete")}
@@ -152,7 +154,7 @@ export default function LlmProviders({ selection, hasOrKey, onChanged }: {
                 : t("providers.serverModelCount", { count: serverModels.length })}
             </div>
           </div>
-          <ServerKey />
+          <ServerKey url={savedUrl} typedUrl={urlDraft?.trim() || savedUrl} />
           <div className="mono text-[10px] text-[var(--color-muted)] leading-snug">{t("providers.serverQuality")}</div>
         </div>
       )}
