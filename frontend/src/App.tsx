@@ -3951,12 +3951,13 @@ function FirstRun() {
         }
       });
       const s = await refresh();
+      useStore.getState().pushActivity(t(s.ready ? "setup.ready" : "setup.done"), "done");
       if (s.ready) { setStage("empty"); playSfx("success"); }   // всё скачано -> сразу на стартовый экран, без ручного «Продолжить»
     } catch (e) {
       // SSE-стрим мог оборваться на длинной (часы, десятки ГБ) скачке, хотя джоба ЗАВЕРШИЛАСЬ и всё встало
       // на диск -> перепроверяем реальный статус: если готово, всё равно уходим на стартовый экран (иначе
       // экран «Первого запуска» завис бы на 100%, хотя всё скачано — баг-репорт).
-      try { const s = await refresh(); if (s.ready) { setStage("empty"); playSfx("success"); return; } } catch { /* refresh тоже упал */ }
+      try { const s = await refresh(); if (s.ready) { useStore.getState().pushActivity(t("setup.ready"), "done"); setStage("empty"); playSfx("success"); return; } } catch { /* refresh тоже упал */ }
       setErr(String(e)); useStore.getState().pushActivity(String(e), "error");
     } finally {
       setBusy(false); setProg(null);
