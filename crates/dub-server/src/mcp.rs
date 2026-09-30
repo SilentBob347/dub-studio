@@ -804,7 +804,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "models_select",
-                description: "Use a downloaded variant for its stage (id from models_status): a quantisation of Higgs (higgs, higgs-q6_k, higgs-q4_k_m), of Gemma (gemma, gemma-q5_0, gemma-q6_k, gemma-q8_0) or of the separator (roformer, roformer-q5, roformer-q4), or a speech recogniser (parakeet, parakeet-fp32, whisper-tiny ... whisper-large-v3-turbo). Applies from the next job, no restart.",
+                description: "Use a downloaded variant for its stage (id from models_status): a quantisation of Higgs (higgs, higgs-q6_k, higgs-q4_k_m), of Gemma (gemma, gemma-q5_0, gemma-q6_k, gemma-q8_0) or of the separator (roformer, roformer-q5, roformer-q4), or a speech recogniser (parakeet, parakeet-fp32, parakeet-ultra, whisper-tiny ... whisper-large-v3-turbo). Applies from the next job, no restart.",
                 schema: || id_only("id", "component id from models_status"),
                 call: |args| post("/engine/select".into(), json!({ "id": text(args, "id")? })),
             },
@@ -1094,15 +1094,15 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_export_text",
-                description: "Write the project's lines as a text file, as the window's export buttons do: format srt (numbered subtitles with timing) or txt (one line per phrase with its speaker); text tgt (the translation, the recognised text where a line has none) or src (the recognised original: the transcript). dir is a folder on this computer (the project's own folder when left out, where the file is replaced; in another folder a name already there gets (2), (3)); name is the file's name. Answers the path.",
+                description: "Write the project's lines as a text file, as the window's export buttons do: format srt (numbered subtitles with timing) or txt (one line per phrase with its speaker); text tgt (the translation, the recognised text where a line has none) or src (the recognised original: the transcript). Without dir the file goes into the project's own folder under the fixed name of its kind (subtitles.srt, transcript.srt, translation.txt, transcript.txt), replacing the earlier one; a name of your own needs dir, a folder on this computer, where a name already there gets (2), (3). Answers the path.",
                 schema: || {
                     object(
                         json!({
                             "pid": pid(),
                             "format": { "type": "string", "enum": ["srt", "txt"] },
                             "text": { "type": "string", "enum": ["tgt", "src"] },
-                            "dir": { "type": "string" },
-                            "name": { "type": "string" },
+                            "dir": { "type": "string", "description": "folder on this computer" },
+                            "name": { "type": "string", "description": "the file's name, only together with dir" },
                             "speaker_label": { "type": "string", "description": "the word before each speaker's number in txt, Speaker by default" },
                         }),
                         &["pid", "format"],

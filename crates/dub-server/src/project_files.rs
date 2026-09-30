@@ -54,8 +54,9 @@ pub async fn files(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> R
 
 /// POST /projects/{pid}/export-text {format: srt|txt, text?: tgt|src, dir?, name?, speaker_label?}
 /// — write the lines as a file. Without dir it goes into the project's folder
-/// under its name, as the window's save-text does; in a folder of the user's a
-/// name already there gets (2), (3) instead of being overwritten.
+/// under the fixed name of its kind, replacing the earlier one, as the window's
+/// save-text does; a name of one's own needs dir, and there a name already
+/// taken gets (2), (3) instead of being overwritten.
 pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>, Json(body): Json<Value>) -> Response {
     let dir = match st.proj_dir(&pid) {
         Ok(d) => d,
@@ -82,27 +83,49 @@ pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
         let label = body.get("speaker_label").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).unwrap_or("Speaker");
         txt(&rows, label)
     };
-    let default = match (format, source) {
-        ("srt", false) => "subtitles.srt",
-        ("srt", true) => "transcript.srt",
-        (_, false) => "translation.txt",
-        (_, true) => "transcript.txt",
-    };
-    let name = file_name(body.get("name").and_then(Value::as_str).unwrap_or_default(), format, default);
-    let target = match body.get("dir").and_then(Value::as_str).map(str::trim).filter(|d| !d.is_empty()) {
-        Some(folder) => {
-            let folder = Path::new(folder);
-            if !folder.is_dir() {
-                return (StatusCode::BAD_REQUEST, format!("{} is not a folder on this computer", folder.display())).into_response();
-            }
-            free_name(folder, &name)
-        }
-        None => dir.join(&name),
+    let target = match destination(
+        &dir,
+        body.get("dir").and_then(Value::as_str),
+        body.get("name").and_then(Value::as_str),
+        format,
+        source,
+    ) {
+        Ok(target) => target,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
     if let Err(e) = std::fs::write(&target, content) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("write {}: {e}", target.display())).into_response();
     }
     Json(json!({ "ok": true, "path": target.to_string_lossy(), "lines": rows.len() })).into_response()
+}
+
+/// Where the lines go. In the project's folder only the fixed name of their
+/// kind is written: that folder also holds the studio's own text files
+/// (source.txt names the video, name.txt the project, import_subs.* are the
+/// imported subtitles), which a name of the caller's could replace.
+fn destination(project_dir: &Path, dir: Option<&str>, name: Option<&str>, format: &str, source: bool) -> Result<PathBuf, String> {
+    let fixed = match (format, source) {
+        ("srt", false) => "subtitles.srt",
+        ("srt", true) => "transcript.srt",
+        (_, false) => "translation.txt",
+        (_, true) => "transcript.txt",
+    };
+    let asked = name.map(str::trim).filter(|n| !n.is_empty());
+    match dir.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(folder) => {
+            let folder = Path::new(folder);
+            if !folder.is_dir() {
+                return Err(format!("{} is not a folder on this computer", folder.display()));
+            }
+            Ok(free_name(folder, &file_name(asked.unwrap_or_default(), format, fixed)))
+        }
+        None => match asked {
+            Some(asked) if !file_name(asked, format, fixed).eq_ignore_ascii_case(fixed) => Err(format!(
+                "name {asked:?} needs dir: in the project's folder this file is always {fixed}, so that it cannot replace the project's own files (source.txt, name.txt, the imported subtitles)"
+            )),
+            _ => Ok(project_dir.join(fixed)),
+        },
+    }
 }
 
 /// One line of an export: its timing, speaker and words.
@@ -214,6 +237,33 @@ mod tests {
         assert_eq!(file_name("..\\..\\evil", "srt", "x.srt"), "evil.srt");
         assert_eq!(file_name("Episode 01 (ru).SRT", "srt", "x.srt"), "Episode 01 (ru).SRT");
         assert_eq!(file_name("notes", "txt", "x.txt"), "notes.txt");
+    }
+
+    #[test]
+    fn the_project_folder_takes_only_the_fixed_names() {
+        let project = tempfile::tempdir().unwrap();
+        let folder = project.path();
+        std::fs::write(folder.join("source.txt"), "D:/videos/clip.mp4").unwrap();
+        let refused = destination(folder, None, Some("source"), "txt", true).unwrap_err();
+        assert!(refused.contains("needs dir") && refused.contains("transcript.txt"), "{refused}");
+        assert!(destination(folder, Some("  "), Some("name"), "txt", false).is_err(), "a blank dir is no dir");
+        assert!(destination(folder, None, Some("import_subs"), "srt", false).is_err());
+        assert_eq!(destination(folder, None, None, "srt", false).unwrap(), folder.join("subtitles.srt"));
+        assert_eq!(destination(folder, None, Some(" "), "srt", true).unwrap(), folder.join("transcript.srt"));
+        assert_eq!(destination(folder, None, Some("Subtitles.SRT"), "srt", false).unwrap(), folder.join("subtitles.srt"));
+        assert_eq!(destination(folder, None, None, "txt", false).unwrap(), folder.join("translation.txt"));
+        assert_eq!(std::fs::read_to_string(folder.join("source.txt")).unwrap(), "D:/videos/clip.mp4");
+    }
+
+    #[test]
+    fn a_name_of_ones_own_in_a_folder_never_replaces_a_file() {
+        let project = tempfile::tempdir().unwrap();
+        let folder = project.path();
+        std::fs::write(folder.join("source.txt"), "D:/videos/clip.mp4").unwrap();
+        let path = folder.to_str().unwrap();
+        assert_eq!(destination(folder, Some(path), Some("source"), "txt", true).unwrap(), folder.join("source (2).txt"));
+        assert_eq!(destination(folder, Some(path), None, "srt", false).unwrap(), folder.join("subtitles.srt"));
+        assert!(destination(folder, Some("Z:/nowhere/at/all"), Some("x"), "srt", false).unwrap_err().contains("not a folder"));
     }
 
     #[test]

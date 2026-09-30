@@ -103,7 +103,9 @@ connected and the address to paste.
 1. `project_analyze` with `mode: nodub` (translated subtitles over the original audio) or
    `mode: transcribe` (the transcript in the original language).
 2. `project_export_text` with `format: srt` (or `txt`) and `dir` - `text: src` for the
-   original words, `tgt` for the translation. `project_render` burns the subtitles in
+   original words, `tgt` for the translation; `name` goes with `dir` only (without `dir`
+   the file lands in the project's folder as subtitles.srt, transcript.srt, translation.txt
+   or transcript.txt). `project_render` burns the subtitles in
    instead, `subtitles_burn_set` with `on: false` leaves the picture clean.
 3. Subtitles the user already has: `project_create` with `subtitles_path` (.srt, .ass,
    .ssa); `project_analyze` takes their text and timing instead of recognising speech, and
