@@ -6,20 +6,41 @@
 //! реплику, а повторы («Да!») расходуются по порядку.
 //!
 //! Адаптация под эпизод: студийный DP O(L·W²) и матрица оценок O(L·W) на серии в 400 реплик и 4000 слов
-//! неподъёмны, поэтому кандидаты — только слова в окне ±`WINDOW_SECS` вокруг начала реплики со сдвигом
-//! всего файла (оценка по редким совпавшим словам), а DP идёт по префиксному максимуму. Конец реплики —
-//! конец последнего совпавшего слова (у студии слово без конца), не дальше начала следующей. Реплика без
-//! совпадения сдвигается смещением соседей с сохранением длительности, а не растягивается.
+//! неподъёмны, поэтому кандидаты — только слова в окне ±`WINDOW_SECS` вокруг начала реплики со сдвигом,
+//! а DP идёт по префиксному максимуму. Сдвиг не один на файл: дрейф частоты кадров (25 против 23.976 —
+//! 4.3 %, к концу серии минуты) и вырезанные или вставленные куски (рекап, реклама) меняют его по ходу.
+//! Первый проход центрирует окно на местном сдвиге — пике голосов редких слов в окрестности реплики;
+//! второй — на кривой сдвига по репликам, уверенно совпавшим в первом (`Curve`). Конец реплики — конец последнего
+//! совпавшего слова (у студии слово без конца), не дальше начала следующей. Реплика без совпадения
+//! сдвигается по той же кривой с сохранением длительности, а не растягивается.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
-/// Окно поиска кандидатов вокруг начала реплики (со сдвигом файла), сек.
+/// Окно поиска кандидатов вокруг начала реплики со сдвигом, сек.
 const WINDOW_SECS: f64 = 30.0;
+/// Окрестность реплики по времени файла, голоса из которой дают её местный сдвиг, сек.
+const LOCAL_SECS: f64 = 60.0;
+/// Полуширина пика голосов, сек: дрейф внутри окрестности и неточность ожидаемого времени слова.
+const PEAK_SECS: f64 = 4.0;
+/// Предельный дрейф сдвига, с на секунду файла (25/23.976 — 0.043).
+const MAX_DRIFT: f64 = 0.1;
+/// Расхождение сдвига совпавшей реплики с соседями (сверх MAX_DRIFT на расстояние до них), после
+/// которого она не входит в кривую, сек.
+const OUTLIER_SECS: f64 = 2.0;
+/// Сколько совпавших соседей с каждой стороны сверяет фильтр выбросов кривой.
+const NEIGHBOURS: usize = 4;
+/// Наклон за краем кривой берётся по её крайнему непрерывному куску не длиннее этого, сек.
+const EDGE_SECS: f64 = 600.0;
+/// Крайний кусок короче этого наклона не даёт: разброс начал реплик в нём больше дрейфа, сек.
+const MIN_SLOPE_SECS: f64 = 60.0;
 /// Ниже этой доли сопоставленных реплик субтитры не про эту речь (другой релиз с другим текстом, другой
 /// язык) — тайминги файла оставляем как есть.
 pub const MIN_ALIGNED_SHARE: f64 = 0.3;
 /// Минимальная длительность реплики после выравнивания, сек.
 const MIN_DUR: f64 = 0.3;
+/// Совпадение от этой оценки — полный зачёт в DP и опора кривой сдвига.
+const FULL_CREDIT: f64 = 0.7;
 
 /// Услышанное слово: текст, начало, конец (сек).
 pub type Heard = (String, f64, f64);
@@ -29,7 +50,8 @@ pub type Heard = (String, f64, f64);
 pub enum How {
     /// Совпала с распознанной речью: начало первого и конец последнего совпавшего слова.
     Aligned,
-    /// Не совпала: сдвинута смещением соседних совпавших реплик, длительность сохранена.
+    /// Не совпала: сдвинута по кривой сдвига совпавших реплик (между ними — интерполяция, за краями —
+    /// продолжение с наклоном), длительность сохранена.
     Shifted,
 }
 
@@ -45,7 +67,8 @@ pub struct Placed {
 pub struct Alignment {
     /// По реплике на каждый cue, в исходном порядке.
     pub cues: Vec<Placed>,
-    /// Сдвиг всего файла (речь минус субтитры), сек.
+    /// Сдвиг файла (речь минус субтитры) — медиана по совпавшим репликам, сек; при дрейфе и вырезках
+    /// сдвиг меняется по ходу, это его середина.
     pub offset: f64,
     /// Доля сопоставленных реплик.
     pub share: f64,
@@ -95,17 +118,17 @@ fn best_window(written: &[char], heard: &[(String, f64, f64)], start: usize, spa
     best
 }
 
-/// Грубый сдвиг файла для центрирования окна поиска: каждое слово реплики длиной от 4 букв, встреченное
-/// в речи не больше 3 раз, голосует за (время слова − его ожидаемое время в реплике по доле символов);
-/// пик гистограммы по 0.5 с — сдвиг. Нет голосов — 0.
-fn estimate_offset(cues: &[(f64, f64, Vec<String>)], heard: &[(String, f64, f64)]) -> f64 {
+/// Голоса редких слов за сдвиг: слово реплики длиной от 4 букв, встреченное в речи не больше 3 раз,
+/// голосует каждым вхождением парой (ожидаемое время слова в файле по доле символов реплики, время в
+/// речи минус ожидаемое). По возрастанию времени в файле.
+fn votes(cues: &[(f64, f64, Vec<String>)], heard: &[(String, f64, f64)]) -> Vec<(f64, f64)> {
     let mut index: HashMap<&str, Vec<f64>> = HashMap::new();
     for (w, s, _) in heard {
         if w.chars().count() >= 4 {
             index.entry(w.as_str()).or_default().push(*s);
         }
     }
-    let mut votes: HashMap<i64, (usize, f64)> = HashMap::new();
+    let mut out: Vec<(f64, f64)> = Vec::new();
     for (start, end, tokens) in cues {
         let total: usize = tokens.iter().map(|t| t.chars().count()).sum::<usize>().max(1);
         let mut before = 0usize;
@@ -119,19 +142,262 @@ fn estimate_offset(cues: &[(f64, f64, Vec<String>)], heard: &[(String, f64, f64)
             if times.len() > 3 {
                 continue;
             }
-            for &at in times {
-                let d = at - expected;
-                let e = votes.entry((d / 0.5).round() as i64).or_insert((0, 0.0));
-                e.0 += 1;
-                e.1 += d;
+            out.extend(times.iter().map(|&at| (expected, at - expected)));
+        }
+    }
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out
+}
+
+/// Пик сдвигов: самый населённый отрезок длиной 2·PEAK_SECS (при равенстве — ближе к нулю), значение —
+/// медиана попавших в него. Меньше двух голосов в пике — пика нет: одиночное совпадение редкого слова
+/// бывает случайным.
+fn peak(mut deltas: Vec<f64>) -> Option<f64> {
+    deltas.sort_by(f64::total_cmp);
+    let centre = |from: usize, to: usize| (deltas[from] + deltas[to - 1]) / 2.0;
+    let mut best: Option<(usize, usize)> = None;
+    let mut to = 0;
+    for from in 0..deltas.len() {
+        while to < deltas.len() && deltas[to] <= deltas[from] + 2.0 * PEAK_SECS {
+            to += 1;
+        }
+        let wins = match best {
+            None => true,
+            Some((a, b)) => to - from > b - a || (to - from == b - a && centre(from, to).abs() < centre(a, b).abs()),
+        };
+        if wins {
+            best = Some((from, to));
+        }
+    }
+    let (from, to) = best.filter(|(from, to)| to - from >= 2)?;
+    Some(deltas[(from + to) / 2])
+}
+
+/// Местный сдвиг каждой реплики: пик голосов из окрестности ±LOCAL_SECS её начала. Реплике без пика —
+/// сдвиг ближайшей по времени реплики с пиком; пиков нет вовсе — 0 (окно на таймингах файла).
+fn local_offsets(starts: &[f64], votes: &[(f64, f64)]) -> Vec<f64> {
+    let peaks: Vec<Option<f64>> = starts
+        .iter()
+        .map(|&t| {
+            let from = votes.partition_point(|v| v.0 < t - LOCAL_SECS);
+            let to = votes.partition_point(|v| v.0 <= t + LOCAL_SECS);
+            peak(votes[from..to].iter().map(|v| v.1).collect())
+        })
+        .collect();
+    let mut known: Vec<(f64, f64)> = starts.iter().zip(&peaks).filter_map(|(&t, p)| p.map(|p| (t, p))).collect();
+    known.sort_by(|a, b| a.0.total_cmp(&b.0));
+    starts
+        .iter()
+        .zip(peaks)
+        .map(|(&t, p)| {
+            p.or_else(|| {
+                let k = known.partition_point(|q| q.0 < t);
+                [k.checked_sub(1), (k < known.len()).then_some(k)]
+                    .into_iter()
+                    .flatten()
+                    .min_by(|&a, &b| (known[a].0 - t).abs().total_cmp(&(known[b].0 - t).abs()))
+                    .map(|k| known[k].1)
+            })
+            .unwrap_or(0.0)
+        })
+        .collect()
+}
+
+/// Реплика в работе: начало в файле, число слов, текст без пробелов и знаков, кандидаты (первое слово ->
+/// (Dice, длина окна), только прошедшие порог) и уже оценённые диапазоны слов.
+struct Line {
+    start: f64,
+    span: usize,
+    written: Vec<char>,
+    scores: HashMap<usize, (f64, usize)>,
+    scanned: Vec<Range<usize>>,
+}
+
+impl Line {
+    /// Оценить кандидатов — слова, начинающиеся в ±WINDOW_SECS от начала реплики со сдвигом `shift`;
+    /// оценённые прошлым проходом не пересчитываются.
+    fn scan(&mut self, heard: &[(String, f64, f64)], shift: f64) {
+        if self.span == 0 {
+            return;
+        }
+        let centre = self.start + shift;
+        let first = heard.partition_point(|(_, s, _)| *s < centre - WINDOW_SECS);
+        let end = heard.partition_point(|(_, s, _)| *s <= centre + WINDOW_SECS);
+        for j in first..end {
+            if self.scanned.iter().any(|done| done.contains(&j)) {
+                continue;
+            }
+            let (score, len) = best_window(&self.written, heard, j, self.span);
+            if score >= 0.45 {
+                self.scores.insert(j, (score, len));
+            }
+        }
+        self.scanned.push(first..end);
+    }
+}
+
+/// Все реплики разом по оценённым кандидатам: индекс первого слова каждой реплики, None — не встала.
+fn solve(lines: &[Line], count: usize) -> Vec<Option<usize>> {
+    // DP студии: best[p] — лучшее (сумма зачётов, сумма стартов) при следующей реплике не раньше слова
+    // p; реплика либо ставится на старт ≥ p, либо пропускается. Префиксный максимум вместо перебора всех p.
+    let credit = |score: f64| if score >= FULL_CREDIT { 1.0 } else { score };
+    let better = |left: (f64, usize), right: (f64, usize)| left.0 > right.0 + 1e-9 || ((left.0 - right.0).abs() <= 1e-9 && left.1 < right.1);
+    let mut best: Vec<Option<(f64, usize)>> = vec![None; count + 1];
+    best[0] = Some((0.0, 0));
+    // Разреженные обратные ссылки: позиция -> (откуда, старт). Нет записи — реплика пропущена.
+    let mut back: Vec<HashMap<usize, (usize, usize)>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let mut prefix: Vec<Option<((f64, usize), usize)>> = vec![None; count + 1];
+        let mut run: Option<((f64, usize), usize)> = None;
+        for p in 0..=count {
+            if let Some(v) = best[p] {
+                if run.is_none_or(|(kept, _)| better(v, kept)) {
+                    run = Some((v, p));
+                }
+            }
+            prefix[p] = run;
+        }
+        let mut next = best.clone();
+        let mut choice: HashMap<usize, (usize, usize)> = HashMap::new();
+        let mut starts: Vec<(&usize, &(f64, usize))> = line.scores.iter().collect();
+        starts.sort_by_key(|(j, _)| **j);
+        for (&start, &(score, _)) in starts {
+            let Some((so_far, from)) = prefix[start] else { continue };
+            let after = (start + line.span).min(count);
+            let total = (so_far.0 + credit(score), so_far.1 + start);
+            if next[after].is_none_or(|kept| better(total, kept)) {
+                next[after] = Some(total);
+                choice.insert(after, (from, start));
+            }
+        }
+        best = next;
+        back.push(choice);
+    }
+    let mut position = (0..=count).fold(0, |kept, candidate| match (best[candidate], best[kept]) {
+        (Some(offered), Some(held)) if better(offered, held) => candidate,
+        (Some(_), None) => candidate,
+        _ => kept,
+    });
+    let mut starts: Vec<Option<usize>> = vec![None; lines.len()];
+    for index in (0..lines.len()).rev() {
+        if let Some(&(from, start)) = back[index].get(&position) {
+            starts[index] = Some(start);
+            position = from;
+        }
+    }
+
+    // A clearly recognised line was credited in full, so its start may sit a
+    // word early; settle it where it matches best, between its neighbours.
+    for index in 0..lines.len() {
+        let Some(start) = starts[index] else { continue };
+        let floor = starts[..index].iter().rev().flatten().next().map(|previous| previous + 1).unwrap_or(0);
+        let ceiling = starts[index + 1..].iter().flatten().next().copied().unwrap_or(count);
+        let low = start.saturating_sub(2).max(floor);
+        let high = (start + 2).min(ceiling.saturating_sub(1)).min(count.saturating_sub(1));
+        let score_at = |j: usize| lines[index].scores.get(&j).map(|v| v.0).unwrap_or(0.0);
+        let settled = (low..=high).fold(start, |kept, candidate| if score_at(candidate) > score_at(kept) { candidate } else { kept });
+        starts[index] = Some(settled);
+    }
+    starts
+}
+
+/// (начало в файле, сдвиг) реплик, совпавших с полным зачётом. Слабое совпадение там, где настоящее
+/// место реплики за окном, — чужая реплика, а цепочка таких согласована между собой и увела бы кривую.
+fn anchors(starts: &[Option<usize>], lines: &[Line], heard: &[(String, f64, f64)]) -> Vec<(f64, f64)> {
+    starts
+        .iter()
+        .zip(lines)
+        .filter_map(|(start, line)| {
+            let j = (*start)?;
+            (line.scores.get(&j)?.0 >= FULL_CREDIT).then(|| (line.start, heard[j].1 - line.start))
+        })
+        .collect()
+}
+
+/// Сдвиг (речь минус файл) как функция времени в файле по совпавшим репликам: ломаная через них, за
+/// краями — продолжение с наклоном крайнего непрерывного куска (дрейф частоты кадров). Совпадение, не
+/// сходящееся ни с соседями слева, ни с соседями справа, в кривую не входит; сверки с одной стороной
+/// достаточно, поэтому настоящий скачок сдвига на вырезанном куске сохраняется.
+struct Curve {
+    points: Vec<(f64, f64)>,
+    head: f64,
+    tail: f64,
+}
+
+impl Curve {
+    fn fit(mut anchors: Vec<(f64, f64)>) -> Option<Curve> {
+        anchors.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let agrees = |k: usize, side: &[(f64, f64)]| {
+            if side.is_empty() {
+                return false;
+            }
+            let mut deltas: Vec<f64> = side.iter().map(|a| a.1).collect();
+            deltas.sort_by(f64::total_cmp);
+            let reach = side.iter().map(|a| (a.0 - anchors[k].0).abs()).fold(0.0, f64::max);
+            (anchors[k].1 - deltas[deltas.len() / 2]).abs() <= OUTLIER_SECS + MAX_DRIFT * reach
+        };
+        let points: Vec<(f64, f64)> = (0..anchors.len())
+            .filter(|&k| {
+                let left = &anchors[k.saturating_sub(NEIGHBOURS)..k];
+                let right = &anchors[k + 1..(k + 1 + NEIGHBOURS).min(anchors.len())];
+                (left.is_empty() && right.is_empty()) || agrees(k, left) || agrees(k, right)
+            })
+            .map(|k| anchors[k])
+            .collect();
+        if points.is_empty() {
+            return None;
+        }
+        let head = edge_slope(points.iter().copied());
+        let tail = edge_slope(points.iter().rev().copied());
+        Some(Curve { points, head, tail })
+    }
+
+    fn at(&self, t: f64) -> f64 {
+        let p = &self.points;
+        let k = p.partition_point(|q| q.0 <= t);
+        if k == 0 {
+            p[0].1 + self.head * (t - p[0].0)
+        } else if k == p.len() {
+            p[k - 1].1 + self.tail * (t - p[k - 1].0)
+        } else {
+            let (a, b) = (p[k - 1], p[k]);
+            a.1 + (b.1 - a.1) * (t - a.0) / (b.0 - a.0)
+        }
+    }
+}
+
+/// Наклон сдвига у края: точки от края, пока соседние сходятся (нет скачка вырезанного куска) и кусок не
+/// длиннее EDGE_SECS; медиана попарных наклонов (Тейл — Сен), не круче MAX_DRIFT. Кусок короче
+/// MIN_SLOPE_SECS — 0.
+fn edge_slope(from_edge: impl Iterator<Item = (f64, f64)>) -> f64 {
+    let mut piece: Vec<(f64, f64)> = Vec::new();
+    for p in from_edge {
+        if let (Some(first), Some(last)) = (piece.first(), piece.last()) {
+            let jump = (p.1 - last.1).abs() > OUTLIER_SECS + MAX_DRIFT * (p.0 - last.0).abs();
+            if jump || (p.0 - first.0).abs() > EDGE_SECS {
+                break;
+            }
+        }
+        piece.push(p);
+    }
+    let span = match (piece.first(), piece.last()) {
+        (Some(first), Some(last)) => (last.0 - first.0).abs(),
+        _ => 0.0,
+    };
+    if span < MIN_SLOPE_SECS {
+        return 0.0;
+    }
+    let mut slopes: Vec<f64> = Vec::new();
+    for (k, a) in piece.iter().enumerate() {
+        for b in &piece[k + 1..] {
+            let dt = b.0 - a.0;
+            if dt.abs() >= 1.0 {
+                slopes.push((b.1 - a.1) / dt);
             }
         }
     }
-    votes
-        .into_iter()
-        .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.0.abs().cmp(&a.0.abs())))
-        .map(|(_, (n, sum))| sum / n as f64)
-        .unwrap_or(0.0)
+    slopes.sort_by(f64::total_cmp);
+    slopes.get(slopes.len() / 2).map_or(0.0, |s| s.clamp(-MAX_DRIFT, MAX_DRIFT))
 }
 
 /// Выровнять реплики (start, end, text) по услышанным словам. Возвращает None, если слов нет.
@@ -149,100 +415,35 @@ pub fn align(cues: &[(f64, f64, &str)], words: &[Heard]) -> Option<Alignment> {
         .iter()
         .map(|(s, e, t)| (*s, *e, t.split_whitespace().map(normalise).filter(|w| !w.is_empty()).collect()))
         .collect();
-    let window_offset = estimate_offset(&tokens, &heard);
+    let votes = votes(&tokens, &heard);
+    let mut lines: Vec<Line> = tokens
+        .iter()
+        .map(|(start, _, toks)| Line { start: *start, span: toks.len(), written: toks.concat().chars().collect(), scores: HashMap::new(), scanned: Vec::new() })
+        .collect();
 
-    // Оценки кандидатов: только слова в окне вокруг ожидаемого начала реплики.
-    let mut scores: Vec<HashMap<usize, (f64, usize)>> = Vec::with_capacity(cues.len());
-    for (start, _, toks) in &tokens {
-        let span = toks.len();
-        let mut row: HashMap<usize, (f64, usize)> = HashMap::new();
-        if span > 0 {
-            let written: Vec<char> = toks.concat().chars().collect();
-            let lo = start + window_offset - WINDOW_SECS;
-            let hi = start + window_offset + WINDOW_SECS;
-            let first = heard.partition_point(|(_, s, _)| *s < lo);
-            for j in first..count {
-                if heard[j].1 > hi {
-                    break;
-                }
-                let (score, len) = best_window(&written, &heard, j, span);
-                if score >= 0.45 {
-                    row.insert(j, (score, len));
-                }
-            }
-        }
-        scores.push(row);
+    // Проход 1: окно вокруг местного сдвига по голосам редких слов.
+    let starts_in_file: Vec<f64> = lines.iter().map(|line| line.start).collect();
+    for (line, shift) in lines.iter_mut().zip(local_offsets(&starts_in_file, &votes)) {
+        line.scan(&heard, shift);
     }
-
-    // DP студии: best[p] — лучшее (сумма зачётов, сумма стартов) при следующей реплике не раньше слова
-    // p; реплика либо ставится на старт ≥ p, либо пропускается. Префиксный максимум вместо перебора всех p.
-    let credit = |score: f64| if score >= 0.7 { 1.0 } else { score };
-    let better = |left: (f64, usize), right: (f64, usize)| left.0 > right.0 + 1e-9 || ((left.0 - right.0).abs() <= 1e-9 && left.1 < right.1);
-    let mut best: Vec<Option<(f64, usize)>> = vec![None; count + 1];
-    best[0] = Some((0.0, 0));
-    // Разреженные обратные ссылки: позиция -> (откуда, старт). Нет записи — реплика пропущена.
-    let mut back: Vec<HashMap<usize, (usize, usize)>> = Vec::with_capacity(cues.len());
-    for (index, (_, _, toks)) in tokens.iter().enumerate() {
-        let span = toks.len();
-        let mut prefix: Vec<Option<((f64, usize), usize)>> = vec![None; count + 1];
-        let mut run: Option<((f64, usize), usize)> = None;
-        for p in 0..=count {
-            if let Some(v) = best[p] {
-                if run.is_none_or(|(kept, _)| better(v, kept)) {
-                    run = Some((v, p));
-                }
-            }
-            prefix[p] = run;
+    let mut starts = solve(&lines, count);
+    // Проход 2: окно вокруг кривой сдвига по уверенно совпавшим в первом проходе. Где голоса разошлись
+    // с кривой (граница вырезки, участок без редких слов), добавляются новые кандидаты; прочее оценено.
+    if let Some(curve) = Curve::fit(anchors(&starts, &lines, &heard)) {
+        for line in &mut lines {
+            let shift = curve.at(line.start);
+            line.scan(&heard, shift);
         }
-        let mut next = best.clone();
-        let mut choice: HashMap<usize, (usize, usize)> = HashMap::new();
-        let mut starts: Vec<(&usize, &(f64, usize))> = scores[index].iter().collect();
-        starts.sort_by_key(|(j, _)| **j);
-        for (&start, &(score, _)) in starts {
-            let Some((so_far, from)) = prefix[start] else { continue };
-            let after = (start + span).min(count);
-            let total = (so_far.0 + credit(score), so_far.1 + start);
-            if next[after].is_none_or(|kept| better(total, kept)) {
-                next[after] = Some(total);
-                choice.insert(after, (from, start));
-            }
-        }
-        best = next;
-        back.push(choice);
-    }
-    let mut position = (0..=count).fold(0, |kept, candidate| match (best[candidate], best[kept]) {
-        (Some(offered), Some(held)) if better(offered, held) => candidate,
-        (Some(_), None) => candidate,
-        _ => kept,
-    });
-    let mut starts: Vec<Option<usize>> = vec![None; cues.len()];
-    for index in (0..cues.len()).rev() {
-        if let Some(&(from, start)) = back[index].get(&position) {
-            starts[index] = Some(start);
-            position = from;
-        }
-    }
-
-    // A clearly recognised line was credited in full, so its start may sit a
-    // word early; settle it where it matches best, between its neighbours.
-    for index in 0..cues.len() {
-        let Some(start) = starts[index] else { continue };
-        let floor = starts[..index].iter().rev().flatten().next().map(|previous| previous + 1).unwrap_or(0);
-        let ceiling = starts[index + 1..].iter().flatten().next().copied().unwrap_or(count);
-        let low = start.saturating_sub(2).max(floor);
-        let high = (start + 2).min(ceiling.saturating_sub(1)).min(count.saturating_sub(1));
-        let score_at = |j: usize| scores[index].get(&j).map(|v| v.0).unwrap_or(0.0);
-        let settled = (low..=high).fold(start, |kept, candidate| if score_at(candidate) > score_at(kept) { candidate } else { kept });
-        starts[index] = Some(settled);
+        starts = solve(&lines, count);
     }
 
     // Тайминги: совпавшие — по словам; конец не дальше начала следующей совпавшей реплики.
     let mut placed: Vec<Option<Placed>> = starts
         .iter()
-        .enumerate()
-        .map(|(index, start)| {
+        .zip(&lines)
+        .map(|(start, line)| {
             start.map(|j| {
-                let len = scores[index].get(&j).map(|v| v.1).unwrap_or(1).max(1);
+                let len = line.scores.get(&j).map(|v| v.1).unwrap_or(1).max(1);
                 let last = (j + len - 1).min(count - 1);
                 Placed { start: heard[j].1, end: heard[last].2, how: How::Aligned }
             })
@@ -250,34 +451,20 @@ pub fn align(cues: &[(f64, f64, &str)], words: &[Heard]) -> Option<Alignment> {
         .collect();
     let matched = placed.iter().filter(|p| p.is_some()).count();
     // Сдвиг файла — медиана (новое начало − начало в файле) по совпавшим репликам.
-    let mut aligned_deltas: Vec<f64> = placed
-        .iter()
-        .zip(cues)
-        .filter_map(|(p, (s, _, _))| p.as_ref().map(|p| p.start - s))
-        .collect();
-    aligned_deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let offset = aligned_deltas.get(aligned_deltas.len() / 2).copied().unwrap_or(window_offset);
+    let mut deltas: Vec<f64> = placed.iter().zip(cues).filter_map(|(p, (s, _, _))| p.as_ref().map(|p| p.start - s)).collect();
+    deltas.sort_by(f64::total_cmp);
+    let offset = match deltas.get(deltas.len() / 2) {
+        Some(&median) => median,
+        None => peak(votes.iter().map(|v| v.1).collect()).unwrap_or(0.0),
+    };
 
-    // Несопоставленные: смещение (новое начало − начало в файле) ближайших совпавших соседей,
-    // интерполяция по времени; длительность реплики из файла сохраняется.
-    let deltas: Vec<Option<f64>> = placed
-        .iter()
-        .zip(cues)
-        .map(|(p, (s, _, _))| p.as_ref().map(|p| p.start - s))
-        .collect();
-    for index in 0..cues.len() {
-        if placed[index].is_some() {
-            continue;
+    // Несопоставленные: сдвиг по кривой совпавших; длительность реплики из файла сохраняется.
+    let curve = Curve::fit(anchors(&starts, &lines, &heard));
+    for (slot, &(cs, ce, _)) in placed.iter_mut().zip(cues) {
+        if slot.is_none() {
+            let delta = curve.as_ref().map_or(offset, |c| c.at(cs));
+            *slot = Some(Placed { start: cs + delta, end: ce + delta, how: How::Shifted });
         }
-        let (cs, ce, _) = cues[index];
-        let prev = (0..index).rev().find_map(|k| deltas[k].map(|d| (cues[k].0, d)));
-        let next = (index + 1..cues.len()).find_map(|k| deltas[k].map(|d| (cues[k].0, d)));
-        let delta = match (prev, next) {
-            (Some((pt, pd)), Some((nt, nd))) if nt > pt => pd + (nd - pd) * ((cs - pt) / (nt - pt)).clamp(0.0, 1.0),
-            (Some((_, d)), _) | (None, Some((_, d))) => d,
-            (None, None) => offset,
-        };
-        placed[index] = Some(Placed { start: cs + delta, end: ce + delta, how: How::Shifted });
     }
 
     // Порядок и неперекрытие: реплика кончается не позже начала следующей, не короче MIN_DUR.
@@ -455,5 +642,121 @@ mod tests {
         assert!(a.share > 0.9, "{}", a.share);
         assert!((a.cues[399].start - (399.0 * 5.0 + 2.0 + 1.5 * 399.0 / 400.0)).abs() < 0.05, "{:?}", a.cues[399]);
         assert!(started.elapsed().as_secs() < 60, "{:?}", started.elapsed());
+    }
+
+    fn next(state: &mut u64) -> usize {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (*state >> 33) as usize
+    }
+
+    fn random_word(state: &mut u64) -> String {
+        let len = 5 + next(state) % 4;
+        (0..len).map(|_| (b'a' + (next(state) % 26) as u8) as char).collect()
+    }
+
+    /// Эпизод: реплика каждые 5 с (4 с на экране) из 8 слов — 3 частых и 5 прочих (5–8 случайных букв):
+    /// у первых `own` реплик прочие слова свои, у остальных из общего набора в 40 слов, так что редких
+    /// слов для голосов там нет. `speech(t)` — где в речи звучит реплика с началом t в файле, None — её
+    /// речи в видео нет.
+    fn episode(lines: usize, own: usize, speech: impl Fn(f64) -> Option<f64>) -> (Vec<(f64, f64, String)>, Vec<Heard>) {
+        let common = ["that", "with", "have", "you", "the", "what", "this", "and"];
+        let mut state = 7u64;
+        let pool: Vec<String> = (0..40).map(|_| random_word(&mut state)).collect();
+        let mut cues = Vec::new();
+        let mut words = Vec::new();
+        for i in 0..lines {
+            let text: Vec<String> = (0..8)
+                .map(|k| {
+                    if k % 3 == 1 {
+                        common[next(&mut state) % common.len()].to_string()
+                    } else if i < own {
+                        random_word(&mut state)
+                    } else {
+                        pool[next(&mut state) % pool.len()].clone()
+                    }
+                })
+                .collect();
+            let text = text.join(" ");
+            let t = i as f64 * 5.0;
+            if let Some(at) = speech(t) {
+                words.extend(speak(at, &text));
+            }
+            cues.push((t, t + 4.0, text));
+        }
+        (cues, words)
+    }
+
+    #[test]
+    fn framerate_drift_over_a_45_minute_episode_is_followed() {
+        // 25 против 23.976 (4.3 %) в обе стороны: к концу 45 минут сдвиг уходит почти на две минуты.
+        // Заставка и титры без речи — их реплики продолжают дрейф с наклоном.
+        for ratio in [25.0 / 23.976, 23.976 / 25.0] {
+            let truth = |t: f64| 2.0 + t * ratio;
+            let speech = |t: f64| (15.0..2670.0).contains(&t).then(|| truth(t));
+            let (owned, words) = episode(540, 540, speech);
+            let cues: Vec<(f64, f64, &str)> = owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+            let a = align(&cues, &words).unwrap();
+            assert!((a.share - 531.0 / 540.0).abs() < 1e-9, "{ratio}: {}", a.share);
+            for (placed, (t, _, _)) in a.cues.iter().zip(&cues) {
+                let how = if speech(*t).is_some() { How::Aligned } else { How::Shifted };
+                assert_eq!(placed.how, how, "{ratio} @{t}");
+                assert!((placed.start - truth(*t)).abs() < 0.05, "{ratio} @{t}: {placed:?} vs {}", truth(*t));
+            }
+        }
+    }
+
+    #[test]
+    fn a_drifting_stretch_without_rare_words_is_found_through_the_curve() {
+        // Первые 10 минут с редкими словами, дальше 35 минут без них: местный сдвиг там один — от края
+        // голосов, а дрейф 4.3 % уводит речь за окно; ловит второй проход по наклону кривой.
+        let truth = |t: f64| 2.0 + t * 25.0 / 23.976;
+        let (owned, words) = episode(540, 120, |t| Some(truth(t)));
+        let cues: Vec<(f64, f64, &str)> = owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+        let a = align(&cues, &words).unwrap();
+        let exact = a.cues.iter().zip(&cues).filter(|(placed, (t, _, _))| placed.how == How::Aligned && (placed.start - truth(*t)).abs() < 1e-9).count();
+        assert!(exact as f64 / cues.len() as f64 > 0.95, "{exact} of {}", cues.len());
+        assert!((a.cues[539].start - truth(539.0 * 5.0)).abs() < 0.5, "{:?}", a.cues[539]);
+    }
+
+    #[test]
+    fn a_cut_in_the_middle_moves_the_rest_of_the_episode() {
+        // 22 минуты. -40: в релизе субтитров 40-секундный рекап, из видео вырезанный; +40: в видео 40 с,
+        // которых нет в субтитрах.
+        for jump in [-40.0, 40.0] {
+            let speech = |t: f64| {
+                if jump < 0.0 && (660.0..700.0).contains(&t) {
+                    None
+                } else if t >= 660.0 {
+                    Some(t + jump)
+                } else {
+                    Some(t)
+                }
+            };
+            let (owned, words) = episode(264, 264, speech);
+            let cues: Vec<(f64, f64, &str)> = owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+            let a = align(&cues, &words).unwrap();
+            for (placed, (t, _, _)) in a.cues.iter().zip(&cues) {
+                match speech(*t) {
+                    Some(at) => {
+                        assert_eq!(placed.how, How::Aligned, "{jump} @{t}");
+                        assert!((placed.start - at).abs() < 1e-9, "{jump} @{t}: {placed:?} vs {at}");
+                    }
+                    None => assert_eq!(placed.how, How::Shifted, "{jump} @{t}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_curve_drops_a_false_match_keeps_a_cut_and_extends_the_drift() {
+        // Дрейф 0.04 с/с, на 300..340 с вырезано 40 с, на 102 с — ложное совпадение.
+        let line = |t: f64| 1.0 + 0.04 * t - if t >= 340.0 { 40.0 } else { 0.0 };
+        let mut anchors: Vec<(f64, f64)> = (0..60).chain(68..128).map(|i| i as f64 * 5.0).map(|t| (t, line(t))).collect();
+        anchors.push((102.0, 30.0));
+        let curve = Curve::fit(anchors).unwrap();
+        for t in [-50.0, 0.0, 102.0, 295.0, 340.0, 345.0, 635.0, 1000.0] {
+            assert!((curve.at(t) - line(t)).abs() < 1e-9, "@{t}: {} vs {}", curve.at(t), line(t));
+        }
+        assert_eq!(Curve::fit(vec![(10.0, 2.0)]).unwrap().at(500.0), 2.0);
     }
 }
