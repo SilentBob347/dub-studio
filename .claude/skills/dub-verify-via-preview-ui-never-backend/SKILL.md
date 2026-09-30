@@ -16,4 +16,4 @@ The user's hardest, most-repeated rule for dub-studio: **prove the app works by 
 - Before any browser re-test: rebuild the frontend bundle + hard-reset cache first (stale bundle = false result).
 
 Related: [[feedback_testing_like_user]], [[feedback_rebuild_frontend_clear_cache_before_browser_test]], [[feedback_no_sleep_playwright]].
-<!-- satori: staged 2026-07-21, lesson 'correction:и-я-блядь-опять-говорю-тестирукеншь-через-превью-бюез-курла-все-как-юзер-мудак-т', pinned 'D:\Projects\TEMP\dub-studio' -->
+<!-- satori: staged 2026-07-21, lesson 'correction:и-я-блядь-опять-говорю-тестирукеншь-через-превью-бюез-курла-все-как-юзер-мудак-т', pinned 'D:\Projects\TEMP\music-studios\dub-studio' -->

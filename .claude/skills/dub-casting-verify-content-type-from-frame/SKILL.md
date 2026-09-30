@@ -15,4 +15,4 @@ dub-studio casting has two paths: `content_type="real"` (SCRFD `det_10g.onnx` + 
 - SCRFD/LVFace are NOT in the download manifest (see setup.rs) — they're placed manually; if absent, casting falls back to voice-only (no avatars).
 
 Related: [[feedback_never_guess_verify_only]], [[handoff_casting_115_2026_07_18]].
-<!-- satori: staged 2026-07-21, lesson 'correction:модели-аниме-пути-причем-тут-аниме-это-сериалд-с-людьми-блядь-актерами', pinned 'D:\Projects\TEMP\dub-studio' -->
+<!-- satori: staged 2026-07-21, lesson 'correction:модели-аниме-пути-причем-тут-аниме-это-сериалд-с-людьми-блядь-актерами', pinned 'D:\Projects\TEMP\music-studios\dub-studio' -->

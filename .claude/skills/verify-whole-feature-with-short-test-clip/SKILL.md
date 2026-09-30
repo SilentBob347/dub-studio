@@ -18,4 +18,4 @@ When the user says "доделай / проверь что всё доделал
 Copy a workspace project (or make a fresh one from a clip) to a throwaway pid; never run an in-place mutating endpoint (retranslate, patch, render) against the user's real `workspace/<pid>` during a test.
 
 Related: [[verify-through-app-ui-not-scripts]], [[pre-release-check]], [[verify-from-clean-state-not-dev-machine]].
-<!-- satori: staged 2026-07-22, lesson 'correction:и-остальное-блядь-првоерь-что-ты-все-доделал-и-не-бросил-на-пол-пути-и-сделай-по', pinned 'D:\Projects\TEMP\dub-studio' -->
+<!-- satori: staged 2026-07-22, lesson 'correction:и-остальное-блядь-првоерь-что-ты-все-доделал-и-не-бросил-на-пол-пути-и-сделай-по', pinned 'D:\Projects\TEMP\music-studios\dub-studio' -->

@@ -32,4 +32,4 @@ description: Use when building or releasing dub-studio — tauri build, setup.ex
 20+ releases pushed to master clean because `test_media/` was NEVER tracked. If `git push` is rejected with `File … exceeds GitHub's 100MB limit`, you committed test assets — you did it, not the repo. Cause: a `git add -A` / `git add .` that swept `test_media/*.mp4` (60–180 MB each) into feature commits.
 - Prevention: `git add <specific paths>` only; keep `test_media/` in `.gitignore`.
 - Fix (unpushed commits): `git filter-branch --force --index-filter 'git rm -r --cached --ignore-unmatch test_media' origin/master..HEAD` — strips the files from history; the on-disk files stay. Then normal (non-force) fast-forward push. Do NOT force-push master.
-<!-- satori: staged 2026-07-22, lesson 'correction:так-нахуй-ты-начал-писать-нвоый-урлд-ебучуий1-7-третья-версия-увже-назху-яты-нач', pinned 'D:\Projects\TEMP\dub-studio' -->
+<!-- satori: staged 2026-07-22, lesson 'correction:так-нахуй-ты-начал-писать-нвоый-урлд-ебучуий1-7-третья-версия-увже-назху-яты-нач', pinned 'D:\Projects\TEMP\music-studios\dub-studio' -->

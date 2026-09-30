@@ -20,4 +20,4 @@ When a project already provides a facility, USE IT. Do not roll your own, and do
 - "I'll just add a quick timer here" → there's already a bench; use it.
 - "PNG is fine" when the project standardized on JPG → match the convention.
 - "I'll measure just the casting stage" → measure the whole dub or the % is a lie.
-<!-- satori: staged 2026-07-21, lesson 'correction:а-почему-блядь-аватары-у-тебя-в-пнг-стали-еблан-если-мы-решили-что-все-в-нативно', pinned 'D:\Projects\TEMP\dub-studio' -->
+<!-- satori: staged 2026-07-21, lesson 'correction:а-почему-блядь-аватары-у-тебя-в-пнг-стали-еблан-если-мы-решили-что-все-в-нативно', pinned 'D:\Projects\TEMP\music-studios\dub-studio' -->

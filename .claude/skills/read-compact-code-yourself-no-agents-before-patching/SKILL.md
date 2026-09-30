@@ -18,4 +18,4 @@ Investigating why auto-casting over-merged (`v1` = 84/95 lines), I grepped a lit
 
 ## Release gate (same session, separate correction)
 Never `gh release create` / publish / deploy until the user **explicitly** says go — even inside an autonomous "finish the marathon" instruction. The marathon's "ship a release" step still waits for the user's explicit green light, especially while the core feature isn't yet user-approved. *"релиз ты публикуешь тогда, когда я тебе разрежу"*. See [[feedback_no_deploy_without_command]].
-<!-- satori: staged 2026-07-21, lesson 'correction:так-разберись-сначала-в-коде-долбоеоб-ты-рефактор-лупы-делал', pinned 'D:\Projects\TEMP\dub-studio' -->
+<!-- satori: staged 2026-07-21, lesson 'correction:так-разберись-сначала-в-коде-долбоеоб-ты-рефактор-лупы-делал', pinned 'D:\Projects\TEMP\music-studios\dub-studio' -->

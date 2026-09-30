@@ -12,4 +12,4 @@ No matter how the face↔speaker assignment changes, the avatar shown for a char
 3. **Fully in frame** — reject faces whose bbox touches the frame border (`x1<=1 || y1<=1 || x2>=w-1 || y2>=h-1`); an edge-cut half-face is a bad avatar.
 
 The face↔speaker LINK (who the avatar is) and the avatar QUALITY (is it a clean crop) are separate concerns — fixing the link (e.g. co-occurrence with the diarization timeline) must NOT regress the quality gate. When you rewrite the casting face stage, re-verify all three gates survive, then confirm visually in the preview UI (open the project, look at the rendered avatars) per [[dub-verify-via-preview-ui-never-backend]] — do not judge avatars from casting.json alone.
-<!-- satori: staged 2026-07-21, lesson 'correction:и-лица-блядльв-се-ещ-елоолждны-быть-четкие-и-в-кадре-нахуй-не-дай-бог-не-так-буд', pinned 'D:\Projects\TEMP\dub-studio' -->
+<!-- satori: staged 2026-07-21, lesson 'correction:и-лица-блядльв-се-ещ-елоолждны-быть-четкие-и-в-кадре-нахуй-не-дай-бог-не-так-буд', pinned 'D:\Projects\TEMP\music-studios\dub-studio' -->
