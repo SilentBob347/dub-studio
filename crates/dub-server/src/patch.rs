@@ -723,8 +723,39 @@ pub fn apply(p: &mut Project, edit: &Value) -> PatchResult {
         "sub_blur" => op_sub_blur(p, edit),
         "keep_original" => op_keep_original(p, edit),
         "reorder_segments" => op_reorder_segments(p, edit),
+        "take_select" => op_take_select(p, edit),
+        "take_pin" => op_take_pin(p, edit),
         other => Err((400, format!("unknown op {other:?}"))),
     }
+}
+
+/// take_select — сделать дубль из истории фразы активным (takes.rs кладёт его файл в сегмент). Правка
+/// приходит дополненной обработчиком PATCH: take_text/take_nonce/take_key выбранного дубля. Другой текст
+/// дубля возвращает и текст реплики; нонс и ключ — те, с которыми дубль озвучен, чтобы рендер взял его
+/// без нового синтеза.
+fn op_take_select(p: &mut Project, edit: &Value) -> PatchResult {
+    let text = s(edit, "take_text").ok_or((400, "take_select is resolved by PATCH /projects/{pid}: no take_text".to_string()))?;
+    let key = s(edit, "take_key").ok_or((400, "take_select is resolved by PATCH /projects/{pid}: no take_key".to_string()))?;
+    let nonce = edit.get("take_nonce").cloned().unwrap_or(Value::Null);
+    let seg = seg_by_id(p, edit)?;
+    if seg.tgt_text.trim() != text {
+        seg.tgt_text = text;
+    }
+    if nonce.is_null() {
+        seg.extra.remove(crate::render::REGEN_NONCE);
+    } else {
+        seg.extra.insert(crate::render::REGEN_NONCE.into(), nonce);
+    }
+    seg.ckpt = Some(key);
+    seg.dirty = true;
+    Ok(())
+}
+
+/// take_pin — закрепить активный дубль фразы или снять закрепление (история на диске, takes.rs).
+fn op_take_pin(p: &mut Project, edit: &Value) -> PatchResult {
+    b(edit, "pinned").ok_or((400, "take_pin needs pinned (true or false)".to_string()))?;
+    seg_by_id(p, edit)?;
+    Ok(())
 }
 
 /// reorder_segments — изменить порядок сегментов согласно списку id в edit["ids"].
@@ -969,6 +1000,24 @@ mod tests {
         // невалидный container -> 400.
         let e = apply(&mut p, &json!({"op":"keep_original","keep":true,"container":"avi"})).unwrap_err();
         assert_eq!(e.0, 400);
+    }
+
+    #[test]
+    fn take_select_restores_the_take_text_nonce_and_key() {
+        let mut p = proj_with_seg();
+        p.segments[0].tgt_text = "Новый".into();
+        p.segments[0].extra.insert(crate::render::REGEN_NONCE.into(), json!("n2"));
+        let e = apply(&mut p, &json!({"op":"take_select","id":"s0","take":0})).unwrap_err();
+        assert_eq!(e.0, 400, "an unresolved take_select is refused");
+        apply(&mut p, &json!({"op":"take_select","id":"s0","take":0,"take_text":"Старый","take_nonce":null,"take_key":"k0"})).unwrap();
+        let s = &p.segments[0];
+        assert_eq!(s.tgt_text, "Старый");
+        assert!(s.extra.get(crate::render::REGEN_NONCE).is_none());
+        assert_eq!(s.ckpt.as_deref(), Some("k0"));
+        assert!(s.dirty);
+        assert_eq!(apply(&mut p, &json!({"op":"take_pin","id":"s0"})).unwrap_err().0, 400);
+        assert_eq!(apply(&mut p, &json!({"op":"take_pin","id":"nope","pinned":true})).unwrap_err().0, 404);
+        apply(&mut p, &json!({"op":"take_pin","id":"s0","pinned":true})).unwrap();
     }
 
     #[test]

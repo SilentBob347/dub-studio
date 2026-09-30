@@ -6,6 +6,7 @@ license.workspace = true
 description = "Перевод + vision (Gemma через dub-llm): порт dubengine/translate.py + ctx_translate.py"
 
 [dependencies]
+dub-core = { path = "../dub-core" }
 dub-llm = { path = "../dub-llm" }
 serde = { workspace = true }
 serde_json = { workspace = true }

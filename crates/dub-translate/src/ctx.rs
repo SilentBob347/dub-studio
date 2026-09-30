@@ -121,9 +121,9 @@ pub fn run(
     let mut line_texts: Vec<String> = segs.iter().map(|s| s.text.trim().to_string()).collect();
     line_texts.extend(title_texts.iter().cloned());
 
-    // Бюджет символов на строку (#107): 14 симв/сек × длительность сегмента — мягкий лимит для укладки
+    // Бюджет символов на строку (#107): темп голоса × длительность сегмента — мягкий лимит для укладки
     // перевода в тайминг слота. У тайтлов длительности нет (None -> без лимита в промпте).
-    let mut budgets: Vec<Option<usize>> = segs.iter().map(|s| char_budget(s.end - s.start)).collect();
+    let mut budgets: Vec<Option<usize>> = segs.iter().map(|s| s.budget(&cfg.tgt_lang)).collect();
     budgets.extend(std::iter::repeat(None).take(title_texts.len()));
 
     let mut ctx = String::new();
@@ -195,18 +195,6 @@ fn chunk_bounds(line_texts: &[String]) -> Vec<(usize, usize)> {
         start = end;
     }
     bounds
-}
-
-/// Плотность речи для бюджета длины (#107): ~14 символов/сек комфортной дикции. Бюджет строки =
-/// round(14 × длительность_сек); длительность ≤0 (нет таймингов) -> None (без лимита).
-const CHARS_PER_SEC: f64 = 14.0;
-const MIN_BUDGET: usize = 12; // пол бюджета (#116): «(≤3)» на междометиях искажает перевод
-pub(crate) fn char_budget(dur: f64) -> Option<usize> {
-    if dur > 0.0 {
-        Some(((dur * CHARS_PER_SEC).round() as usize).max(MIN_BUDGET))
-    } else {
-        None
-    }
 }
 
 /// Вычистить ведущий маркер лимита «(≤NN)» из перевода. Устойчиво (#116): пробелы после «(» и перед
@@ -582,9 +570,14 @@ mod tests {
     }
 
     #[test]
-    fn char_budget_and_marker_strip() {
-        assert_eq!(char_budget(2.0), Some(28)); // 14 симв/сек × 2с
-        assert_eq!(char_budget(0.0), None);
+    fn budget_by_voice_rate_and_marker_strip() {
+        let mut s = Seg::new("x", 0);
+        s.end = 2.0;
+        assert_eq!(s.budget("en"), Some(30));
+        s.cps = Some(14.0);
+        assert_eq!(s.budget("en"), Some(28));
+        s.end = 0.0;
+        assert_eq!(s.budget("en"), None);
         assert_eq!(strip_budget_marker("(≤45) перевод"), "перевод");
         assert_eq!(strip_budget_marker("(<=12)  x"), "x");
         assert_eq!(strip_budget_marker("без маркера"), "без маркера");

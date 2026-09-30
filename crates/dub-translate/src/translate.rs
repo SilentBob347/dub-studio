@@ -166,30 +166,18 @@ fn nonempty_idxs_and_nspk(segs: &[Seg]) -> (Vec<usize>, usize) {
 }
 
 /// Нумерованный блок "1. текст\n2. текст…" для чанка индексов (общий для run/rewrite). С мягким лимитом
-/// длины (#107): после номера «(≤NN)» из бюджета символов сегмента (14 симв/сек × длит.), у сегментов без
-/// таймингов лимита нет. Лимит вычищается из ответа защитно (strip_budget_marker в parse_numbered).
-fn numbered_block(segs: &[Seg], chunk: &[usize]) -> String {
+/// длины (#107): после номера «(≤NN)» из бюджета символов сегмента (темп голоса × длит., Seg::budget), у
+/// сегментов без таймингов лимита нет. Лимит вычищается из ответа защитно (strip_budget_marker в parse_numbered).
+fn numbered_block(segs: &[Seg], chunk: &[usize], tgt: &str) -> String {
     chunk
         .iter()
         .enumerate()
-        .map(|(j, &gi)| match char_budget(segs[gi].end - segs[gi].start) {
+        .map(|(j, &gi)| match segs[gi].budget(tgt) {
             Some(lim) => format!("{}. (\u{2264}{lim}) {}", j + 1, segs[gi].text.trim()),
             None => format!("{}. {}", j + 1, segs[gi].text.trim()),
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Плотность речи для бюджета длины (#107): ~14 символов/сек. Бюджет = round(14 × длит.сек), но не ниже
-/// 12 (#116, находка [13]: «(≤3)» на междометиях провоцирует искажение); ≤0 -> None.
-const CHARS_PER_SEC: f64 = 14.0;
-const MIN_BUDGET: usize = 12;
-fn char_budget(dur: f64) -> Option<usize> {
-    if dur > 0.0 {
-        Some(((dur * CHARS_PER_SEC).round() as usize).max(MIN_BUDGET))
-    } else {
-        None
-    }
 }
 
 /// Вычистить ведущий маркер лимита «(≤NN)» из перевода (если модель его протащила). Устойчиво (#116,
@@ -237,7 +225,7 @@ pub fn run(
     let mut c0 = 0;
     while c0 < idxs.len() {
         let chunk = &idxs[c0..(c0 + CHUNK).min(idxs.len())];
-        let numbered = numbered_block(segs, chunk);
+        let numbered = numbered_block(segs, chunk, tgt);
         let dlg = if nspk > 1 {
             format!(
                 " This is a DIALOGUE between {nspk} speakers taking turns — render it as one coherent \
@@ -270,7 +258,7 @@ pub fn run(
             // нумерация уплыла -> надёжный per-line режим для этого чанка.
             for &gi in chunk {
                 let txt = segs[gi].text.trim().to_string();
-                let budget = char_budget(segs[gi].end - segs[gi].start);
+                let budget = segs[gi].budget(tgt);
                 segs[gi].tgt = translate_one(llm, &txt, &tgt_name, extra, &gloss_str, budget, &style_c)?;
             }
         }
@@ -314,7 +302,7 @@ pub fn rewrite(
     let mut c0 = 0;
     while c0 < idxs.len() {
         let chunk = &idxs[c0..(c0 + CHUNK).min(idxs.len())];
-        let numbered = numbered_block(segs, chunk);
+        let numbered = numbered_block(segs, chunk, tgt);
         let dlg = if nspk > 1 {
             format!(" It is a dialogue between {nspk} speakers taking turns — keep the back-and-forth.")
         } else {
@@ -342,7 +330,7 @@ pub fn rewrite(
                 Some(p) => crate::fix_translation(p, tgt),
                 None => {
                     // пропущенная/сбитая строка -> перевести её (не озвучивать сырой исходник).
-                    let budget = char_budget(segs[gi].end - segs[gi].start);
+                    let budget = segs[gi].budget(tgt);
                     let one = translate_one(llm, &src_line, &tgt_name, extra, "", budget, &style_c)?;
                     if one.is_empty() { src_line } else { crate::fix_translation(&one, tgt) }
                 }
@@ -389,11 +377,17 @@ mod tests {
     }
 
     #[test]
-    fn char_budget_from_duration() {
-        assert_eq!(char_budget(3.0), Some(42)); // 14 симв/сек × 3с
-        assert_eq!(char_budget(0.0), None); // нет таймингов -> без лимита
-        assert_eq!(char_budget(-1.0), None);
-        assert_eq!(char_budget(0.01), Some(12)); // пол бюджета 12 (#116) — междометие не в «(≤1)»
+    fn budget_from_duration_and_the_language_rate() {
+        let timed = |end: f64| {
+            let mut s = Seg::new("x", 0);
+            s.end = end;
+            s
+        };
+        assert_eq!(timed(3.0).budget("ru"), Some(39));
+        assert_eq!(timed(3.0).budget("zh"), Some(17));
+        assert_eq!(timed(0.0).budget("ru"), None);
+        assert_eq!(timed(-1.0).budget("ru"), None);
+        assert_eq!(timed(0.01).budget("ru"), Some(12)); // пол бюджета 12 (#116) — междометие не в «(≤1)»
     }
 
     #[test]
@@ -412,13 +406,13 @@ mod tests {
     fn numbered_block_has_budget_when_timed() {
         let mut s = Seg::new("hello world", 0);
         s.start = 0.0;
-        s.end = 3.0; // -> (≤42)
+        s.end = 3.0; // en 15 симв/с -> (≤45)
         let segs = vec![s];
-        let block = numbered_block(&segs, &[0]);
-        assert!(block.starts_with("1. (≤42) hello world"), "{block}");
+        let block = numbered_block(&segs, &[0], "en");
+        assert!(block.starts_with("1. (≤45) hello world"), "{block}");
         // без таймингов -> без лимита
         let s0 = Seg::new("no timing", 0);
-        let b0 = numbered_block(&[s0], &[0]);
+        let b0 = numbered_block(&[s0], &[0], "en");
         assert_eq!(b0, "1. no timing");
     }
 

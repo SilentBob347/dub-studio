@@ -136,15 +136,19 @@ pub fn stage(
         proj.audio.content_type = ct;
     }
 
-    // Seg-вью для dub-translate (text/speaker). speaker -> i64 (питон speaker=0 по умолчанию).
+    // Seg-вью для dub-translate (text/speaker). speaker -> i64 (питон speaker=0 по умолчанию). Темп голоса
+    // спикера для бюджета длины — калибровка прошлого рендера этого проекта, иначе таблица языка.
+    let cps = crate::fitplan::cps_by_segment(&paths.work_dir, proj)?;
     let mut segs: Vec<Seg> = proj
         .segments
         .iter()
-        .map(|s| {
+        .zip(cps)
+        .map(|(s, cps)| {
             let spk = crate::analyze::speaker_to_i64(s.speaker.as_deref());
             let mut seg = Seg::new(s.src_text.clone(), spk);
             seg.start = s.start;
             seg.end = s.end;
+            seg.cps = Some(cps);
             seg
         })
         .collect();
@@ -250,7 +254,7 @@ fn apply_extra(proj: &mut Project, extra: &Value) {
 
 
 /// Целевой язык пишется НЕлатиницей (кириллица/CJK/RTL/индийские/…)? — для детекции «английский пролез».
-fn tgt_expects_non_latin(lang: &str) -> bool {
+pub(crate) fn tgt_expects_non_latin(lang: &str) -> bool {
     let l = lang.split(['-', '_']).next().unwrap_or(lang).to_ascii_lowercase();
     matches!(
         l.as_str(),
@@ -310,6 +314,7 @@ fn ensure_translation_coverage(
                 let mut g = Seg::new(segs[i].text.clone(), segs[i].speaker);
                 g.start = segs[i].start;
                 g.end = segs[i].end;
+                g.cps = segs[i].cps;
                 g
             })
             .collect();
