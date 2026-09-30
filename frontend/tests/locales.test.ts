@@ -69,7 +69,7 @@ describe("locales", () => {
     });
   }
 
-  for (const lang of others.filter((l) => l !== "ru")) {
+  for (const lang of LANGS.filter((l) => l !== "ru")) {
     it(`${lang} contains no Cyrillic`, () => {
       expect(Object.entries(BUNDLES[lang]).filter(([, v]) => CYRILLIC.test(v)).map(([k]) => k)).toEqual([]);
     });
@@ -78,6 +78,11 @@ describe("locales", () => {
   it("ru is written in Cyrillic", () => {
     const missing = Object.entries(BUNDLES.ru).filter(([k, v]) => !CYRILLIC.test(v) && !(SAME_AS_EN["*"].includes(k) || SAME_AS_EN.ru.includes(k)));
     expect(missing.map(([k]) => k)).toEqual([]);
+  });
+
+  it("the allowlist of identical-to-en values for all languages has no stale entries", () => {
+    const stale = SAME_AS_EN["*"].filter((k) => !others.some((lang) => BUNDLES[lang][k] === (isPlural(k) ? en[k] ?? en[`${pluralBase(k)}_other`] : en[k])));
+    expect(stale).toEqual([]);
   });
 
   for (const lang of others) {
