@@ -964,7 +964,9 @@
       "export_lang": "Exportação para outro idioma",
       "align": "Alinhar com a fala",
       "download": "Download de modelos",
-      "voices_pack": "Download de vozes"
+      "voices_pack": "Download de vozes",
+      "separate": "Separação de voz e fundo",
+      "detect_text": "Leitura do texto na tela"
     },
     "error": {
       "failed": "A tarefa terminou com erro",

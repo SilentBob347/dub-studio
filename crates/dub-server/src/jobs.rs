@@ -69,10 +69,12 @@ pub enum JobKind {
     VoicesPack,
     Frame,
     Align,
+    Separate,
+    DetectText,
 }
 
 impl JobKind {
-    const ALL: [JobKind; 10] = [
+    const ALL: [JobKind; 12] = [
         JobKind::Analyze,
         JobKind::Retranslate,
         JobKind::Remix,
@@ -83,6 +85,8 @@ impl JobKind {
         JobKind::VoicesPack,
         JobKind::Frame,
         JobKind::Align,
+        JobKind::Separate,
+        JobKind::DetectText,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -97,6 +101,8 @@ impl JobKind {
             JobKind::VoicesPack => "voices_pack",
             JobKind::Frame => "frame",
             JobKind::Align => "align",
+            JobKind::Separate => "separate",
+            JobKind::DetectText => "detect_text",
         }
     }
 
@@ -105,11 +111,14 @@ impl JobKind {
     }
 
     /// Класс защиты от дублей: две незавершённые джобы одного класса над одним проектом не ставятся.
-    /// text — переписывают проект (перевод/ремикс/анализ), audio — пишут озвучку и выход.
+    /// text — переписывают проект (перевод/ремикс/анализ), audio — пишут озвучку и выход; сепарация и
+    /// чтение вшитого текста проект не меняют и дублируют только сами себя.
     fn class(self) -> Option<&'static str> {
         match self {
             JobKind::Analyze | JobKind::Retranslate | JobKind::Remix | JobKind::Align => Some("text"),
             JobKind::DubAudio | JobKind::Render | JobKind::ExportLang => Some("audio"),
+            JobKind::Separate => Some("separate"),
+            JobKind::DetectText => Some("detect_text"),
             JobKind::Download | JobKind::VoicesPack | JobKind::Frame => None,
         }
     }

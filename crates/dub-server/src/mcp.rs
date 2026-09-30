@@ -454,7 +454,7 @@ async fn wait_for(args: &Value) -> Result<Value, String> {
             Some(job) => {
                 let state = fetch(&format!("/jobs/{}", segment(job)))
                     .await
-                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume or voices_download_pack returned (a models download is waited for with until download). Wait for other work with until."))?;
+                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool answering done false returned (a models download is waited for with until download). Wait for other work with until."))?;
                 if state.get("status").and_then(Value::as_str).is_none() {
                     return Err(format!("The job {job} has no status: {state}"));
                 }
@@ -762,8 +762,8 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "studio_wait",
-                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume or voices_download_pack returned it), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, download, voices_pack - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
-                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "download", "voices_pack"] }, "seconds": { "type": "integer" } }), &[]),
+                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool still at work returned it), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, download, voices_pack, separate, detect_text - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
+                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "download", "voices_pack", "separate", "detect_text"] }, "seconds": { "type": "integer" } }), &[]),
                 call: |_| composite("wait"),
             },
             Tool {
@@ -1201,7 +1201,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_export_text",
-                description: "Write the project's lines as a text file, as the window's export buttons do: format srt (numbered subtitles with timing), vtt (WebVTT, each cue naming its speaker), ass (styled as the render burns them), txt (one line per phrase with its speaker) or json (each line with its timing, speaker, text, the original under a translation and the word timings of the transcript); text tgt (the translation, the recognised text where a line has none) or src (the recognised original: the transcript). Without dir the file goes into the project's own folder under the fixed name of its kind (subtitles.srt, transcript.srt, subtitles.vtt, subtitles.ass, translation.txt, transcript.json and so on), replacing the earlier one; a name of your own needs dir, a folder on this computer, where a name already there gets (2), (3). Answers the path.",
+                description: "Write the project's lines as a text file, as the window's export buttons do: format srt (numbered subtitles with timing), vtt (WebVTT, each cue naming its speaker), ass (styled as the render burns them), txt (one line per phrase with its speaker) or json (each line with its timing, speaker, text, the original under a translation and the word timings of the transcript); text tgt (the translation, the recognised text where a line has none) or src (the recognised original: the transcript). Without dir the file goes into the project's own folder under the fixed name of its kind (subtitles.srt, transcript.srt, subtitles.vtt, subtitles.ass, translation.txt, transcript.lines.json and so on), replacing the earlier one; a name of your own needs dir, a folder on this computer, where a name already there gets (2), (3). Answers the path.",
                 schema: || {
                     object(
                         json!({

@@ -440,6 +440,8 @@ const TRANSCRIPT_FILE: &str = "transcript.json";
 const TRANSLATED_FILE: &str = "translated.json";
 const OCR_FILE: &str = "ocr.json";
 const CASTING_FILE: &str = "casting.json";
+#[cfg(test)]
+pub(crate) const STAGE_FILES: [&str; 5] = [DIAR_FILE, TRANSCRIPT_FILE, TRANSLATED_FILE, OCR_FILE, CASTING_FILE];
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DiarOut {

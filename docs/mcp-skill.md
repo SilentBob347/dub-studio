@@ -46,8 +46,9 @@ connected and the address to paste.
   `project_export_lang`, `project_retranslate`, `project_remix`, `project_resume`,
   `voices_download_pack`. Each answers a `job_id`; then `studio_wait`
   with it (or `until: analyze | dub_audio | render | export_lang | retranslate | remix |
-  download | voices_pack | idle`) instead of polling. It returns within a minute (30 s by
-  default, 55 at most) with how far the work got; call it again. `job_get` and `jobs_list`
+  align | download | voices_pack | separate | detect_text | idle`) instead of polling.
+  It returns within a minute (30 s by default, 55 at most) with how far the work got;
+  call it again. `job_get` and `jobs_list`
   read jobs (`jobs_list` with a `pid` also shows the project's last stored job),
   `job_cancel` stops one, `project_resume` starts a project's interrupted or failed job
   again where it stopped.

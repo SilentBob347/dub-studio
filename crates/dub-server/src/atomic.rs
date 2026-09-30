@@ -19,7 +19,7 @@ use crate::{jobs, media, models, AppState};
 /// The record that marks a project as an agent's.
 pub(crate) const AGENT_FILE: &str = "agent.json";
 /// The text detect-text read off the picture.
-const REGIONS_FILE: &str = "text_regions.json";
+pub(crate) const REGIONS_FILE: &str = "text_regions.json";
 
 /// The files the studio takes, as the window's file picker lists them.
 const VIDEO_EXT: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "m4v", "flv", "wmv", "ts", "mpg", "mpeg", "3gp", "ogv", "mts", "m2ts", "vob", "f4v"];
@@ -108,9 +108,7 @@ fn find(workspace: &Path, file: &Source, key: &str) -> Option<String> {
 
 /// JSON written whole or not at all.
 fn write_json(path: &Path, value: &Value) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, format!("{value:#}")).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("write {}: {e}", path.display()))
+    dub_core::atomic::write(path, format!("{value:#}").as_bytes())
 }
 
 /// POST /projects/from-path {path, key?, tool?} — a project of a video or audio file on this
@@ -177,28 +175,14 @@ fn source_file(dir: &Path) -> Result<PathBuf, (StatusCode, String)> {
     Ok(input)
 }
 
-/// A job of this module, by the kind the studio's job list names it.
-#[derive(Clone, Copy)]
-enum Stage {
-    Separate,
-    DetectText,
-}
-
-impl Stage {
-    fn kind(self) -> &'static str {
-        match self {
-            Stage::Separate => "separate",
-            Stage::DetectText => "detect_text",
-        }
+/// Queues a job of the project and answers {job_id}; the same kind already queued or at work on
+/// the project is 409 job_conflict with its job_id. The one-call tools (mcp/atomic.rs) look for a
+/// separation or a reading at work by its kind and the project in GET /jobs?pid=.
+async fn enqueue(st: &AppState, kind: jobs::JobKind, pid: &str, job: jobs::JobFn) -> Response {
+    match st.jobs.enqueue(jobs::JobMeta::new(kind, Some(pid)), job).await {
+        Ok(id) => Json(json!({ "job_id": id })).into_response(),
+        Err(e) => crate::enqueue_error(e),
     }
-}
-
-/// Queues a job of the project and answers {job_id}. The one-call tools (mcp/atomic.rs) look for a
-/// separation or a reading at work by this kind and the project in GET /jobs?pid=.
-async fn enqueue(st: &AppState, stage: Stage, pid: &str, job: jobs::JobFn) -> Response {
-    let id = st.jobs.enqueue(job).await;
-    eprintln!("[{}] project {pid}: job {id}", stage.kind());
-    Json(json!({ "job_id": id })).into_response()
 }
 
 /// A result found done, marked as such.
@@ -235,19 +219,22 @@ pub async fn separate(State(st): State<AppState>, AxPath(pid): AxPath<String>) -
     }
     let cli = dub_sep::engine_cli(&st.repo_root, models::stage_backend(&st.models_root, "sep_backend"));
     let job = separation(dir, input, cli, model, st.repo_root.clone(), st.models_root.clone());
-    enqueue(&st, Stage::Separate, &pid, job).await
+    enqueue(&st, jobs::JobKind::Separate, &pid, job).await
 }
 
-/// The separation as a job. A second one queued for the project while the first was at work
-/// answers the first one's stems.
+/// The separation as a job. One that finds the stems made by the time it runs answers them
+/// without separating again.
 fn separation(dir: PathBuf, input: PathBuf, cli: PathBuf, model: PathBuf, repo_root: PathBuf, models_root: PathBuf) -> jobs::JobFn {
     Box::new(move |progress: jobs::ProgressFn| {
+        crate::clean_partials(&dir);
+        jobs::check_cancelled()?;
         let stems = dir.join("stems");
         if let Some(found) = stems_of(&stems) {
             return Ok(found);
         }
         let cb = |ev: Value| progress(ev);
         crate::ensure_job_components(&repo_root, &models_root, false, false, &cb)?;
+        jobs::check_cancelled()?;
         if !cli.is_file() {
             return Err(format!("the voice separator's engine is not installed ({}): models_status names it, models_download fetches it", cli.display()));
         }
@@ -255,6 +242,7 @@ fn separation(dir: PathBuf, input: PathBuf, cli: PathBuf, model: PathBuf, repo_r
         if !audio_hq.is_file() {
             cb(json!({ "stage": "separate", "msg": "извлечение аудио 44.1k для сепарации" }));
             media::extract_audio(&input, &audio_hq, 44100, 2)?;
+            jobs::check_cancelled()?;
         }
         cb(json!({ "stage": "separate", "msg": "сепарация (Mel-Band Roformer voc_fv6-Q8_0)" }));
         let split = dub_sep::separate(&audio_hq, &stems, &cli, &model).map_err(|e| format!("сепарация: {e}"))?;
@@ -303,7 +291,7 @@ pub async fn detect_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
         return (StatusCode::CONFLICT, format!("the on-screen text reader is not installed ({}): models_status names it, models_download fetches it", ocr.det.display())).into_response();
     }
     let job = reading(input, dir, ocr, st.opts.caption_fps.max(1), (width, height));
-    enqueue(&st, Stage::DetectText, &pid, job).await
+    enqueue(&st, jobs::JobKind::DetectText, &pid, job).await
 }
 
 /// The text read before, as text_regions.json holds it.
@@ -312,16 +300,19 @@ fn read_regions(file: &Path) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("read {}: {e}", file.display()))
 }
 
-/// The reading as a job. A second one queued for the project while the first was at work
-/// answers what the first one read.
+/// The reading as a job. One that finds the text read by the time it runs answers it without
+/// reading again.
 fn reading(input: PathBuf, dir: PathBuf, ocr: dub_ocr::OcrPaths, fps: i32, (width, height): (i64, i64)) -> jobs::JobFn {
     Box::new(move |progress: jobs::ProgressFn| {
+        crate::clean_partials(&dir);
+        jobs::check_cancelled()?;
         let file = dir.join(REGIONS_FILE);
         if file.is_file() {
             return read_regions(&file);
         }
         progress(json!({ "stage": "ocr_detect", "msg": "детекция вшитого текста (PP-OCR DBNet+CRNN)" }));
         let (regions, _) = dub_ocr::detect_regions(&input, &dir, &ocr, fps, OCR_MIN_DUR, OCR_IOU, OCR_PAD, OCR_JITTER, OCR_SCORE)?;
+        jobs::check_cancelled()?;
         let found = json!({
             "file": file.to_string_lossy(),
             "width": width,
@@ -457,6 +448,35 @@ mod tests {
         write_json(&dir.path().join(REGIONS_FILE), &read).unwrap();
         let job = reading(nowhere.clone(), dir.path().into(), dub_ocr::OcrPaths::under(&nowhere), 4, (1280, 720));
         assert_eq!(job(quiet).expect("the text was read: no reader is needed"), read);
+    }
+
+    #[tokio::test]
+    async fn the_jobs_are_listed_by_kind_and_project_and_not_queued_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let st = AppState::new(root.path());
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let hold: jobs::JobFn = Box::new(move |_| {
+            let _ = held.recv();
+            Ok(json!({}))
+        });
+        let answer = |response: Response| async move {
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        };
+        let (status, first) = answer(enqueue(&st, jobs::JobKind::Separate, "p1", hold).await).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let (status, again) = answer(enqueue(&st, jobs::JobKind::Separate, "p1", Box::new(|_| Ok(json!({})))).await).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(again, json!({ "error": "job_conflict", "job_id": first["job_id"], "kind": "separate" }));
+        let (status, reading) = answer(enqueue(&st, jobs::JobKind::DetectText, "p1", Box::new(|_| Ok(json!({})))).await).await;
+        assert_eq!(status, StatusCode::OK, "a reading is not a separation: {reading}");
+        let (status, _) = answer(enqueue(&st, jobs::JobKind::Separate, "p2", Box::new(|_| Ok(json!({})))).await).await;
+        assert_eq!(status, StatusCode::OK, "another project separates on its own");
+        let listed: Vec<(Value, Value)> = st.jobs.list(Some("p1")).await.iter().map(|job| (job["kind"].clone(), job["pid"].clone())).collect();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(listed.contains(&(json!("separate"), json!("p1"))) && listed.contains(&(json!("detect_text"), json!("p1"))), "{listed:?}");
+        release.send(()).unwrap();
     }
 
     #[tokio::test]

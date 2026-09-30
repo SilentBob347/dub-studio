@@ -33,7 +33,7 @@ pub async fn files(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> R
                     let file = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
                     (matches!(ext.as_str(), "srt" | "vtt" | "txt" | "ass") && file != "source.txt" && file != "name.txt")
-                        || matches!(file, "transcript.json" | "translation.json")
+                        || FIXED_NAMES.iter().any(|(format, _, fixed)| *format == "json" && *fixed == file)
                 })
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect()
@@ -102,7 +102,7 @@ pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
     let written = if format == "ass" {
         let fonts = st.fonts_dir.clone();
         let target = target.clone();
-        tokio::task::spawn_blocking(move || write_ass(&proj, source, &target, &fonts))
+        tokio::task::spawn_blocking(move || write_ass(&proj, source, &target, &fonts, &dir))
             .await
             .unwrap_or_else(|e| Err(format!("ass: {e}")))
     } else {
@@ -132,40 +132,54 @@ pub(crate) fn render_text(rows: &[Row], format: &str, label: &str) -> String {
 
 /// The subtitles as ASS, styled as the render burns them (titles, per-line
 /// text, hidden lines left out), even while they are switched off for the
-/// render; the transcript gets the recognised words in the same style, without
-/// the titles, which are the picture's translation.
-fn write_ass(proj: &Project, source: bool, target: &Path, fonts: &Path) -> Result<String, String> {
+/// render, and timed as it times them: in a dub each line where the dubbed
+/// phrase sounds (the project's dub_timing.json). The transcript gets the
+/// recognised words in the same style at the original speech's timing,
+/// without the titles, which are the picture's translation.
+fn write_ass(proj: &Project, source: bool, target: &Path, fonts: &Path, project_dir: &Path) -> Result<String, String> {
     let mut proj = proj.clone();
     proj.subs.mode = if source { "transcribe" } else { "translate" }.to_string();
     if source {
         for seg in &mut proj.segments {
             seg.tgt_text = seg.src_text.clone();
         }
+        proj.mode = "nodub".to_string();
         proj.captions.overrides.clear();
         proj.captions.titles.clear();
     }
     dub_captions::set_fonts_dir(fonts);
-    crate::render::build_ass(&proj, target, proj.meta.width, proj.meta.height, proj.meta.duration)?;
+    let timing = (!source).then_some(project_dir);
+    crate::render::build_ass(&proj, target, timing, proj.meta.width, proj.meta.height, proj.meta.duration)?;
     std::fs::read_to_string(target).map_err(|e| format!("read {}: {e}", target.display()))
 }
 
+/// The name each format's lines take in the project's folder, by whether they
+/// are the transcript. None is a name the studio keeps there for itself: the
+/// JSON lines are not transcript.json, analyze's saved speech recognition.
+const FIXED_NAMES: &[(&str, bool, &str)] = &[
+    ("srt", false, "subtitles.srt"),
+    ("srt", true, "transcript.srt"),
+    ("vtt", false, "subtitles.vtt"),
+    ("vtt", true, "transcript.vtt"),
+    ("ass", false, "subtitles.ass"),
+    ("ass", true, "transcript.ass"),
+    ("json", false, "translation.lines.json"),
+    ("json", true, "transcript.lines.json"),
+    ("txt", false, "translation.txt"),
+    ("txt", true, "transcript.txt"),
+];
+
 /// Where the lines go. In the project's folder only the fixed name of their
-/// kind is written: that folder also holds the studio's own text files
-/// (source.txt names the video, name.txt the project, import_subs.* are the
-/// imported subtitles), which a name of the caller's could replace.
+/// kind is written: that folder also holds the studio's own files (source.txt
+/// names the video, name.txt the project, import_subs.* are the imported
+/// subtitles, analyze's stages are saved as JSON), which a name of the
+/// caller's could replace.
 fn destination(project_dir: &Path, dir: Option<&str>, name: Option<&str>, format: &str, source: bool) -> Result<PathBuf, String> {
-    let fixed = match (format, source) {
-        ("srt", false) => "subtitles.srt",
-        ("srt", true) => "transcript.srt",
-        ("vtt", false) => "subtitles.vtt",
-        ("vtt", true) => "transcript.vtt",
-        ("ass", false) => "subtitles.ass",
-        ("ass", true) => "transcript.ass",
-        ("json", false) => "translation.json",
-        ("json", true) => "transcript.json",
-        (_, false) => "translation.txt",
-        (_, true) => "transcript.txt",
-    };
+    let fixed = FIXED_NAMES
+        .iter()
+        .find(|(kind, transcript, _)| *kind == format && *transcript == source)
+        .map(|(_, _, fixed)| *fixed)
+        .ok_or_else(|| format!("format is one of {}, not {format:?}", FORMATS.join(", ")))?;
     let asked = name.map(str::trim).filter(|n| !n.is_empty());
     match dir.map(str::trim).filter(|d| !d.is_empty()) {
         Some(folder) => {
@@ -177,7 +191,7 @@ fn destination(project_dir: &Path, dir: Option<&str>, name: Option<&str>, format
         }
         None => match asked {
             Some(asked) if !file_name(asked, format, fixed).eq_ignore_ascii_case(fixed) => Err(format!(
-                "name {asked:?} needs dir: in the project's folder this file is always {fixed}, so that it cannot replace the project's own files (source.txt, name.txt, the imported subtitles)"
+                "name {asked:?} needs dir: in the project's folder this file is always {fixed}, so that it cannot replace the project's own files (source.txt, name.txt, the imported subtitles, the saved stages of the analysis)"
             )),
             _ => Ok(project_dir.join(fixed)),
         },
@@ -384,9 +398,9 @@ mod tests {
         let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fonts");
         let mut p = spoken();
         p.captions.titles.push(serde_json::from_value(json!({ "text": "SIGN", "tgt": "ВЫВЕСКА", "bbox": [100, 80, 300, 60], "start": 0.0, "end": 8.0 })).unwrap());
-        let subtitles = write_ass(&p, false, &folder.path().join("subtitles.ass"), &fonts).unwrap();
+        let subtitles = write_ass(&p, false, &folder.path().join("subtitles.ass"), &fonts, folder.path()).unwrap();
         assert!(subtitles.contains("[Events]") && subtitles.contains("Том и Джерри") && subtitles.contains("ВЫВЕСКА"), "{subtitles}");
-        let transcript = write_ass(&p, true, &folder.path().join("transcript.ass"), &fonts).unwrap();
+        let transcript = write_ass(&p, true, &folder.path().join("transcript.ass"), &fonts, folder.path()).unwrap();
         assert!(transcript.contains("Tom & <Jerry>") && !transcript.contains("Том и Джерри"), "{transcript}");
         assert!(!transcript.contains("ВЫВЕСКА"), "the titles are the picture's translation");
     }
@@ -397,8 +411,48 @@ mod tests {
         let named = |format: &str, source: bool| destination(folder.path(), None, None, format, source).unwrap().file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!((named("vtt", false), named("vtt", true)), ("subtitles.vtt".into(), "transcript.vtt".into()));
         assert_eq!((named("ass", false), named("ass", true)), ("subtitles.ass".into(), "transcript.ass".into()));
-        assert_eq!((named("json", false), named("json", true)), ("translation.json".into(), "transcript.json".into()));
+        assert_eq!((named("json", false), named("json", true)), ("translation.lines.json".into(), "transcript.lines.json".into()));
         assert!(destination(folder.path(), None, Some("project"), "json", true).is_err(), "project.json is the studio's own");
+        assert!(destination(folder.path(), None, Some("transcript"), "json", true).is_err(), "transcript.json is analyze's own");
+        assert_eq!(destination(folder.path(), None, Some("transcript.lines"), "json", true).unwrap(), folder.path().join("transcript.lines.json"));
+        for format in FORMATS {
+            assert!(destination(folder.path(), None, None, format, false).is_ok() && destination(folder.path(), None, None, format, true).is_ok(), "{format}");
+        }
+    }
+
+    #[test]
+    fn no_fixed_name_is_a_file_the_studio_keeps_in_the_project_folder() {
+        let own = crate::analyze::STAGE_FILES.iter().copied().chain([
+            "project.json",
+            "source.txt",
+            "name.txt",
+            "caps.ass",
+            "_preview.ass",
+            crate::job_store::FILE,
+            crate::render::SEG_CKPT_FILE,
+            crate::dub_timing::FILE,
+            crate::atomic::AGENT_FILE,
+            crate::atomic::REGIONS_FILE,
+        ]);
+        for file in own {
+            assert!(!FIXED_NAMES.iter().any(|(_, _, fixed)| fixed.eq_ignore_ascii_case(file)), "an export would replace {file}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_texts_are_the_exports_not_the_analysis_stages() {
+        let root = tempfile::tempdir().unwrap();
+        let st = AppState::new(root.path());
+        let dir = st.workspace.join("p1");
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in crate::analyze::STAGE_FILES.iter().copied().chain(["project.json", "transcript.lines.json", "translation.lines.json", "subtitles.srt"]) {
+            std::fs::write(dir.join(file), "{}").unwrap();
+        }
+        let response = files(State(st.clone()), AxPath("p1".into())).await;
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let listed: Value = serde_json::from_slice(&bytes).unwrap();
+        let names: Vec<String> = listed["texts"].as_array().unwrap().iter().map(|path| Path::new(path.as_str().unwrap()).file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["subtitles.srt", "transcript.lines.json", "translation.lines.json"]);
     }
 
     #[test]
