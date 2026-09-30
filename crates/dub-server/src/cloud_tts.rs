@@ -53,15 +53,13 @@ pub fn synth_audio(models_root: &Path, text: &str, voice: &str) -> Result<Vec<u8
     // helper всегда отдаёт УНИВЕРСАЛЬНЫЙ pcm (сырой 24кГц s16le mono). Оборачиваем в wav ОДИН раз
     // (пайплайн читает seg как WAV; локальный Higgs так же пишет seg через encode_wav).
     let wav_tmp = tmp.with_extension("wav");
-    let out = Command::new(FFMPEG)
-        .args([
-            "-v", "error",
-            "-f", "s16le", "-ar", "24000", "-ac", "1",
-            "-i", &tmp.to_string_lossy(),
-            "-c:a", "pcm_s16le",
-            "-y", &wav_tmp.to_string_lossy(),
-        ])
-        .output();
+    let out = dub_core::proc::output(Command::new(FFMPEG).args([
+        "-v", "error",
+        "-f", "s16le", "-ar", "24000", "-ac", "1",
+        "-i", &tmp.to_string_lossy(),
+        "-c:a", "pcm_s16le",
+        "-y", &wav_tmp.to_string_lossy(),
+    ]));
     let _ = std::fs::remove_file(&tmp);
     let out = out.map_err(|e| format!("ffmpeg mp3->wav: {e}"))?;
     if !out.status.success() {
@@ -78,38 +76,42 @@ pub fn synth_audio(models_root: &Path, text: &str, voice: &str) -> Result<Vec<u8
 }
 
 /// Параллельный пре-синтез: гонит `jobs` (out-путь, текст, голос) в `concurrency` потоков (OpenRouter
-/// держит десятки конкурентных запросов). Каждый успешный сегмент пишется в свой out-файл; провал ->
-/// файл не создаётся (основной цикл ретраит/фолбэкнет на оригинал). Возвращает число успешных.
-pub fn synth_batch(models_root: &Path, jobs: Vec<(PathBuf, String, String)>, concurrency: usize) -> usize {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+/// держит десятки конкурентных запросов). Каждый успешный сегмент пишется в свой out-файл атомарно;
+/// провал -> false (основной цикл ретраит/фолбэкнет на оригинал). Возвращает успех по каждой джобе.
+/// Потоки привязаны к джобе вызывающего: её отмена прекращает раздачу новых сегментов, а процессы
+/// сайдкара попадают в учёт джобы.
+pub fn synth_batch(models_root: &Path, jobs: Vec<(PathBuf, String, String)>, concurrency: usize) -> Vec<bool> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let n = jobs.len();
+    let ok: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(false)).collect();
     if n == 0 {
-        return 0;
+        return Vec::new();
     }
     let workers = concurrency.max(1).min(n);
-    let next = Arc::new(AtomicUsize::new(0));
-    let done = Arc::new(AtomicUsize::new(0));
-    let jobs = Arc::new(jobs);
+    let next = AtomicUsize::new(0);
+    let ctl = crate::jobs::current();
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            let next = next.clone();
-            let done = done.clone();
-            let jobs = jobs.clone();
-            let mroot = models_root.to_path_buf();
-            scope.spawn(move || loop {
-                let i = next.fetch_add(1, Ordering::SeqCst);
-                if i >= jobs.len() {
-                    break;
-                }
-                let (out, text, voice) = &jobs[i];
-                if let Ok(bytes) = synth_audio(&mroot, text, voice) {
-                    if std::fs::write(out, &bytes).is_ok() {
-                        done.fetch_add(1, Ordering::Relaxed);
+            let (next, ok, jobs, ctl) = (&next, &ok, &jobs, ctl.clone());
+            scope.spawn(move || {
+                let _entered = ctl.clone().map(crate::jobs::enter);
+                loop {
+                    if ctl.as_ref().is_some_and(|c| c.is_cancelled()) {
+                        break;
+                    }
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    if i >= jobs.len() {
+                        break;
+                    }
+                    let (out, text, voice) = &jobs[i];
+                    if let Ok(bytes) = synth_audio(models_root, text, voice) {
+                        if dub_core::atomic::write(out, &bytes).is_ok() {
+                            ok[i].store(true, Ordering::Relaxed);
+                        }
                     }
                 }
             });
         }
     });
-    done.load(Ordering::Relaxed)
+    ok.iter().map(|b| b.load(Ordering::Relaxed)).collect()
 }

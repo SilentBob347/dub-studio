@@ -118,36 +118,32 @@ pub fn probe(input: &Path) -> Result<MediaMeta, String> {
 /// (объединённо: сразу 16k/mono, т.к. дальше в порту нет separation-стадии). Если у видео нет аудио —
 /// ffmpeg вернёт ошибку, которую пробрасываем.
 pub fn extract_wav_16k_mono(input: &Path, out_wav: &Path) -> Result<(), String> {
-    let status = Command::new(FFMPEG)
-        .arg("-y")
-        .arg("-i")
-        .arg(input)
-        .args([
-            "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav",
-        ])
-        .arg(out_wav)
-        .output()
-        .map_err(|e| format!("ffmpeg запуск не удался: {e}"))?;
-    if !status.status.success() {
-        return Err(format!(
-            "ffmpeg extract_audio код {:?}: {}",
-            status.status.code(),
-            String::from_utf8_lossy(&status.stderr)
-        ));
-    }
-    if !out_wav.is_file() {
-        return Err("ffmpeg не создал wav".into());
-    }
-    Ok(())
+    dub_core::atomic::write_with(out_wav, |tmp| {
+        let mut cmd = Command::new(FFMPEG);
+        cmd.arg("-y")
+            .arg("-i")
+            .arg(input)
+            .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav"])
+            .arg(tmp);
+        let status = dub_core::proc::output(&mut cmd).map_err(|e| format!("ffmpeg запуск не удался: {e}"))?;
+        if !status.status.success() {
+            return Err(format!(
+                "ffmpeg extract_audio код {:?}: {}",
+                status.status.code(),
+                String::from_utf8_lossy(&status.stderr)
+            ));
+        }
+        if !tmp.is_file() {
+            return Err("ffmpeg не создал wav".into());
+        }
+        Ok(())
+    })
 }
 
 // ─── Рендер-хелперы (порт media.py: extract_audio/duration/time_stretch/mix/mux/trim) ─────────
 
 fn run_ff(args: &[&std::ffi::OsStr]) -> Result<(), String> {
-    let out = Command::new(FFMPEG)
-        .args(args)
-        .output()
-        .map_err(|e| format!("ffmpeg запуск: {e}"))?;
+    let out = dub_core::proc::output(Command::new(FFMPEG).args(args)).map_err(|e| format!("ffmpeg запуск: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let tail: String = err.chars().rev().take(1500).collect::<String>().chars().rev().collect();
@@ -169,6 +165,7 @@ fn run_ff_timeout(args: &[&std::ffi::OsStr], secs: u64) -> Result<(), String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("ffmpeg запуск: {e}"))?;
+    let _tracked = dub_core::proc::track(child.id());
     let mut se = child.stderr.take().expect("piped stderr");
     let th_err = std::thread::spawn(move || {
         let mut b = Vec::new();
@@ -200,23 +197,28 @@ fn run_ff_timeout(args: &[&std::ffi::OsStr], secs: u64) -> Result<(), String> {
 use std::ffi::OsStr;
 
 /// Извлечь аудио в WAV sr/ac (порт media.extract_audio). Для сепарации: sr=44100, ac=2.
+/// Пишет атомарно: недописанный файл не появится под целевым именем.
 pub fn extract_audio(video: &Path, out_wav: &Path, sr: u32, ac: u32) -> Result<(), String> {
     let sr = sr.to_string();
     let ac = ac.to_string();
-    run_ff(&[
-        OsStr::new("-y"), OsStr::new("-i"), video.as_os_str(),
-        OsStr::new("-vn"), OsStr::new("-ac"), OsStr::new(&ac),
-        OsStr::new("-ar"), OsStr::new(&sr), out_wav.as_os_str(),
-    ])
+    dub_core::atomic::write_with(out_wav, |tmp| {
+        run_ff(&[
+            OsStr::new("-y"), OsStr::new("-i"), video.as_os_str(),
+            OsStr::new("-vn"), OsStr::new("-ac"), OsStr::new(&ac),
+            OsStr::new("-ar"), OsStr::new(&sr), tmp.as_os_str(),
+        ])
+    })
 }
 
-/// WAV/медиа -> 16k mono (порт media.to_16k_mono).
+/// WAV/медиа -> 16k mono (порт media.to_16k_mono). Пишет атомарно.
 pub fn to_16k_mono(src: &Path, dst: &Path) -> Result<(), String> {
-    run_ff(&[
-        OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
-        OsStr::new("-vn"), OsStr::new("-ac"), OsStr::new("1"),
-        OsStr::new("-ar"), OsStr::new("16000"), dst.as_os_str(),
-    ])
+    dub_core::atomic::write_with(dst, |tmp| {
+        run_ff(&[
+            OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
+            OsStr::new("-vn"), OsStr::new("-ac"), OsStr::new("1"),
+            OsStr::new("-ar"), OsStr::new("16000"), tmp.as_os_str(),
+        ])
+    })
 }
 
 /// Длительность файла в секундах (ffprobe format.duration). Порт media.duration.
@@ -564,15 +566,18 @@ pub fn to_wav(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 /// Вырезать [start,end] в mono @ sr Гц. Порт media.trim(..., sr=16000): реф-клипы 16к, keep-сплайс 24к.
+/// Пишет атомарно (seg-файлы и рефы — кэш по существованию).
 pub fn trim(src: &Path, dst: &Path, start: f64, end: f64, sr: u32) -> Result<(), String> {
     let ss = format!("{:.3}", start);
     let to = format!("{:.3}", end);
     let ar = sr.to_string();
-    run_ff(&[
-        OsStr::new("-y"), OsStr::new("-ss"), OsStr::new(&ss), OsStr::new("-to"), OsStr::new(&to),
-        OsStr::new("-i"), src.as_os_str(), OsStr::new("-ac"), OsStr::new("1"),
-        OsStr::new("-ar"), OsStr::new(&ar), dst.as_os_str(),
-    ])
+    dub_core::atomic::write_with(dst, |tmp| {
+        run_ff(&[
+            OsStr::new("-y"), OsStr::new("-ss"), OsStr::new(&ss), OsStr::new("-to"), OsStr::new(&to),
+            OsStr::new("-i"), src.as_os_str(), OsStr::new("-ac"), OsStr::new("1"),
+            OsStr::new("-ar"), OsStr::new(&ar), tmp.as_os_str(),
+        ])
+    })
 }
 
 // ─── Оконная нарезка для полнометражного пайплайна (#79) ──────────────────────────────────────────

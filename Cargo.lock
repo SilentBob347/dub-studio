@@ -593,6 +593,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 name = "dub-asr"
 version = "2.0.0"
 dependencies = [
+ "dub-core",
  "hound",
  "ort",
  "parakeet-rs",
@@ -606,6 +607,7 @@ name = "dub-captions"
 version = "2.0.0"
 dependencies = [
  "ab_glyph",
+ "dub-core",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -624,6 +626,7 @@ name = "dub-faces"
 version = "2.0.0"
 dependencies = [
  "dub-asr",
+ "dub-core",
  "hound",
  "image",
  "ndarray",
@@ -638,6 +641,7 @@ name = "dub-llm"
 version = "2.0.0"
 dependencies = [
  "base64 0.23.1",
+ "dub-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -660,6 +664,7 @@ dependencies = [
 name = "dub-sep"
 version = "2.0.0"
 dependencies = [
+ "dub-core",
  "hound",
  "thiserror 2.0.21",
 ]

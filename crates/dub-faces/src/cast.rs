@@ -82,13 +82,10 @@ impl Default for Casting {
 /// Записать casting.json атомарно (tmp + rename).
 pub fn save_casting(path: &Path, casting: &Casting) -> Result<(), String> {
     let json = serde_json::to_string_pretty(casting).map_err(|e| format!("сериализация: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
-    std::fs::write(&tmp, json.as_bytes()).map_err(|e| format!("запись tmp: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))?;
-    Ok(())
+    dub_core::atomic::write(path, json.as_bytes())
 }
 
 /// Прочитать casting.json. Отсутствует/битый -> None (не ошибка: базы просто ещё нет).

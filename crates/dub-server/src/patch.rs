@@ -278,13 +278,21 @@ fn op_recast(p: &mut Project, edit: &Value) -> PatchResult {
     Ok(())
 }
 
+/// Новый нонс «перегенерировать»: входит в ключ синтеза сегмента, поэтому рендер синтезирует
+/// сегмент заново, даже если текст и голос не менялись (новый дубль вместо кэша).
+fn mark_regen(seg: &mut dub_core::Segment) {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    seg.extra.insert(crate::render::REGEN_NONCE.into(), Value::String(nonce));
+    seg.dirty = true;
+}
+
 /// regen — пометить ОДИН сегмент dirty, а ВСЕ ДРУГИЕ сегменты — NOT dirty (ре-TTS только его на /render).
 fn op_regen(p: &mut Project, edit: &Value) -> PatchResult {
     let target_id = s(edit, "id").ok_or((400, "missing segment id".into()))?;
     let mut found = false;
     for s in &mut p.segments {
         if s.id == target_id {
-            s.dirty = true;
+            mark_regen(s);
             found = true;
         } else {
             s.dirty = false;
@@ -296,9 +304,11 @@ fn op_regen(p: &mut Project, edit: &Value) -> PatchResult {
     Ok(())
 }
 
-/// regen_all — пометить ВСЕ сегменты dirty (ре-TTS всего дубляжа). Порт app.py op=="regen_all".
+/// regen_all — ре-TTS всего дубляжа (новый нонс у каждого сегмента). Порт app.py op=="regen_all".
 fn op_regen_all(p: &mut Project, _edit: &Value) -> PatchResult {
-    mark_all_dirty(p);
+    for seg in &mut p.segments {
+        mark_regen(seg);
+    }
     Ok(())
 }
 

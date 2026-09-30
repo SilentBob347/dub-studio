@@ -114,6 +114,7 @@ pub struct LlamaServer {
     port: u16,
     base_url: String,
     log_tail: LogTail,
+    _tracked: dub_core::proc::ChildGuard,
 }
 
 /// Подобрать свободный TCP-порт на 127.0.0.1 (bind :0 -> ОС выдаёт порт, тут же освобождаем).
@@ -237,11 +238,13 @@ impl LlamaServer {
             drain_to_tail(err, log_tail.clone(), log_file.clone());
         }
 
+        let tracked = dub_core::proc::track(child.id());
         let mut srv = LlamaServer {
             child,
             port,
             base_url,
             log_tail,
+            _tracked: tracked,
         };
         srv.wait_ready(opts.ready_timeout_secs)?;
         Ok(srv)

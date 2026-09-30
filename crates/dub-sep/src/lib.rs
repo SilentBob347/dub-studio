@@ -77,6 +77,14 @@ pub fn is_installed(repo_root: &Path) -> bool {
     engine_dir(repo_root).join(ENGINE_CLI_FILE).is_file() && model_path(repo_root).is_file()
 }
 
+/// Каталог недописанной сепарации рядом с `out_dir`: `<out_dir>.part`. Готовый результат появляется
+/// в `out_dir` только целиком (rename каталога), поэтому кэш по существованию стемов не видит обрыв.
+pub fn part_dir(out_dir: &Path) -> PathBuf {
+    let mut name = out_dir.file_name().map(|s| s.to_os_string()).unwrap_or_default();
+    name.push(".part");
+    out_dir.with_file_name(name)
+}
+
 /// Разделить mix (WAV 44.1кГц) на вокал + инструментал. `out_dir` — куда положить `vocals.wav` и
 /// `instrumental.wav` (порт `separate.split` контракта). `cli` — путь к bs_roformer-cli.exe,
 /// `model` — GGUF. Движок пишет вокал; инструментал считается как mix − vocals во времени.
@@ -92,7 +100,36 @@ pub fn separate(
     if !model.is_file() {
         return Err(SepError::ModelMissing(model.to_path_buf()));
     }
-    std::fs::create_dir_all(out_dir).map_err(|e| SepError::Wav(e.to_string()))?;
+    let part = part_dir(out_dir);
+    if part.exists() {
+        std::fs::remove_dir_all(&part)
+            .map_err(|e| SepError::Wav(format!("удаление {}: {e}", part.display())))?;
+    }
+    std::fs::create_dir_all(&part).map_err(|e| SepError::Wav(e.to_string()))?;
+    if let Err(e) = separate_into(mix_wav, &part, cli, model) {
+        let _ = std::fs::remove_dir_all(&part);
+        return Err(e);
+    }
+    if out_dir.exists() {
+        std::fs::remove_dir_all(out_dir)
+            .map_err(|e| SepError::Wav(format!("удаление {}: {e}", out_dir.display())))?;
+    }
+    std::fs::rename(&part, out_dir).map_err(|e| {
+        SepError::Wav(format!("rename {} -> {}: {e}", part.display(), out_dir.display()))
+    })?;
+    Ok(SepResult {
+        vocals: out_dir.join("vocals.wav"),
+        instrumental: out_dir.join("instrumental.wav"),
+    })
+}
+
+/// Сепарация в готовый пустой каталог `out_dir` (без атомарности — её даёт `separate`).
+fn separate_into(
+    mix_wav: &Path,
+    out_dir: &Path,
+    cli: &Path,
+    model: &Path,
+) -> Result<SepResult, SepError> {
     let vocals = out_dir.join("vocals.wav");
     let instrumental = out_dir.join("instrumental.wav");
 
@@ -252,7 +289,7 @@ fn run_cli(cli: &Path, model: &Path, input: &Path, output: &Path) -> Result<(), 
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-    let out = cmd.output().map_err(|e| SepError::Spawn(e.to_string()))?;
+    let out = dub_core::proc::output(&mut cmd).map_err(|e| SepError::Spawn(e.to_string()))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
