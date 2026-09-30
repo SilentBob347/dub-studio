@@ -46,6 +46,19 @@ pub fn listen_port() -> Result<u16, String> {
     }
 }
 
+/// Порт задан явно: `DUB_STUDIO_PORT` непуст (пустое значение — тот же дефолт, что и отсутствие).
+pub fn port_is_explicit() -> bool {
+    match std::env::var(PORT_ENV) {
+        Ok(v) => is_explicit(Some(&v)),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => true,
+    }
+}
+
+fn is_explicit(value: Option<&str>) -> bool {
+    value.is_some_and(|s| !s.trim().is_empty())
+}
+
 fn parse_port(value: Option<&str>) -> Result<u16, String> {
     match value.map(str::trim) {
         None | Some("") => Ok(DEFAULT_PORT),
@@ -256,6 +269,16 @@ mod tests {
             let e = parse_port(Some(bad)).expect_err(bad);
             assert!(e.contains(PORT_ENV) && e.contains(bad), "{e}");
         }
+    }
+
+    #[test]
+    fn only_a_non_empty_variable_is_an_explicit_port() {
+        assert!(!is_explicit(None));
+        assert!(!is_explicit(Some("")));
+        assert!(!is_explicit(Some("  ")));
+        assert!(is_explicit(Some("8793")));
+        assert!(is_explicit(Some(" 18801 ")));
+        assert!(is_explicit(Some("abc")));
     }
 
     /// Сервер на свободном порту, отвечающий на каждое соединение `reply` (None — молчит).

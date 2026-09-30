@@ -3,7 +3,8 @@
 //! открывает окно на этот URL. Сервер сам раздаёт SPA (frontend/dist) и API на одном origin — фронт
 //! работает с относительными путями без правок, а постоянный порт держит origin, и с ним
 //! localStorage окна, одинаковым между запусками. Если на порту уже отвечает Dub Studio, второй
-//! сервис не поднимается; второй запуск приложения отдаёт фокус уже открытому окну.
+//! сервис не поднимается, а окно открывается на неё; второй запуск релизной сборки на порту по
+//! умолчанию отдаёт фокус уже открытому окну.
 //!
 //! Портативность взята из эталона Higgs-Ultimate (desktop/src-tauri/src/lib.rs):
 //! app_root_dir = каталог рядом с exe; WEBVIEW2_USER_DATA_FOLDER и рантайм-модели держим там же.
@@ -82,6 +83,14 @@ fn fatal(message: &str) {
         .set_description(message)
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
+}
+
+/// tauri-plugin-single-instance называет мьютекс и окно только по identifier, общему у установленной,
+/// портативной и дев-сборок: с ним дев-копия рядом с открытой установленной молча выходила бы, подняв
+/// старое окно. Замок нужен только релизной сборке на порту по умолчанию; дев-сборка и копия с явным
+/// `DUB_STUDIO_PORT` живут на своём порту, а на том же — открывают окно на уже работающий сервис.
+fn single_instance_wanted() -> bool {
+    !cfg!(debug_assertions) && !service::port_is_explicit()
 }
 
 /// Поднять встроенный сервис на порту или найти уже работающий. Err — текст для пользователя.
@@ -280,18 +289,21 @@ pub fn run() {
     let context = tauri::generate_context!();
     service::set_app_version(context.package_info().version.to_string());
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    if single_instance_wanted() {
         // Первым: второй запуск должен уйти до остальной настройки, отдав фокус открытому окну.
         // Сервис поднимается только в .setup(), который Tauri зовёт после setup плагинов: второй
         // запуск выходит здесь, не тронув порт, и сервер живёт в процессе, чьё окно останется.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(win) = app.get_webview_window("main") {
                 let shown = win.unminimize().and_then(|_| win.show()).and_then(|_| win.set_focus());
                 if let Err(e) = shown {
                     eprintln!("[ERROR] повторный запуск: окно Dub Studio не вышло на передний план: {e}");
                 }
             }
-        }))
+        }));
+    }
+    builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
