@@ -1,6 +1,6 @@
 ---
 name: dub-studio
-description: Drive Dub Studio on this computer through its MCP server - dub a video into another language with the speakers' own cloned voices, make a voice-over, translated or original-language subtitles, or a transcript; fix the translation, the timing and the speakers line by line; restyle the subtitles, add titles and blur boxes; cast the characters of a series and give them library voices; export the same video in several languages; export SRT or TXT; save the result to a folder. Use whenever the user asks for anything the studio does.
+description: Drive Dub Studio on this computer through its MCP server - dub a video into another language with the speakers' own cloned voices, make a voice-over, translated or original-language subtitles, or a transcript; get a file's transcript, translated subtitles, dubbed video, voice and background apart or on-screen text in one call; fix the translation, the timing and the speakers line by line; restyle the subtitles, add titles and blur boxes; cast the characters of a series and give them library voices; export the same video in several languages; export SRT or TXT; save the result to a folder. Use whenever the user asks for anything the studio does.
 ---
 
 # Dub Studio through MCP
@@ -46,8 +46,9 @@ connected and the address to paste.
   `project_export_lang`, `project_retranslate`, `project_remix`, `project_resume`,
   `voices_download_pack`. Each answers a `job_id`; then `studio_wait`
   with it (or `until: analyze | dub_audio | render | export_lang | retranslate | remix |
-  download | voices_pack | idle`) instead of polling. It returns within a minute (30 s by
-  default, 55 at most) with how far the work got; call it again. `job_get` and `jobs_list`
+  align | download | voices_pack | separate | detect_text | idle`) instead of polling.
+  It returns within a minute (30 s by default, 55 at most) with how far the work got;
+  call it again. `job_get` and `jobs_list`
   read jobs (`jobs_list` with a `pid` also shows the project's last stored job),
   `job_cancel` stops one, `project_resume` starts a project's interrupted or failed job
   again where it stopped.
@@ -67,13 +68,55 @@ connected and the address to paste.
   blur box idx), `voices_list`, `casting_get`, `casting_library_list`, `models_status`,
   `engine_presets_get`.
 - **Files on this computer are passed by path**: `project_create` (a video, and subtitles
-  to import), `models_import`, `project_save_output` and `project_export_text` (a folder).
-  `project_files` names the project's own files.
+  to import), the one-call tools (below), `models_import`, `project_save_output`,
+  `project_export_text` and `export_subtitles` (a folder). `project_files` names the
+  project's own files.
 - **Destructive tools say so**: deleting, cancelling, replacing a project, analyzing again
   (it replaces the lines), retranslating, remixing, and edits that overwrite text are marked
   destructive, so your client asks the user first.
 - **The OpenRouter key never comes back**: `settings_get` and `studio_capabilities` show
   only `or_key_set`, `openrouter_status` where the key comes from.
+
+## One call on a file, or work in the studio
+
+The same results come two ways.
+
+- **One call on a file** - when the user wants a result of a file and nothing more: "the
+  transcript of this", "Spanish subtitles for it", "dub it into Russian", "take the voice
+  off the music", "what does the sign say". `transcribe_file` (text, SRT, VTT or JSON with
+  speakers and word timings), `translate_file` (SRT, VTT or JSON), `dub_file` (the finished
+  video, copied into `out_dir` when given), `separate_file` (the voice and the background as
+  WAV) and `detect_text_file` (the text in the picture, with its boxes and times) take the
+  file's `path` and answer the result itself. The file is read where it lies, never copied.
+  `export_subtitles` writes a project's subtitles as SRT, VTT, ASS or TXT, in its target
+  language or the original.
+- Each makes a project of the file, listed by `projects_list` with `source: agent`. The
+  same tool called again with the same file and arguments finds that project and answers
+  from the finished work at once; a changed file or other arguments make another project.
+  `project_delete` removes it; nothing else does.
+- A call waits for the studio up to `seconds` (45 by default, 55 at most). When the work
+  takes longer it answers `done: false` with the `job` at work: `studio_wait` with its
+  `job_id`, then call the tool again with the same arguments - the finished stages are
+  kept, and `dub_file` goes on from the analysis to the render.
+- `dub_file` tells what fell back in `degradations`, read off the finished dub:
+  `background_not_separated` (no voice separator: no music or effects under the dub),
+  `ocr_skipped` (no on-screen text reader: the text in the picture stays as it is),
+  `single_speaker` (every line voiced as one speaker; its detail says whether the diarizer
+  is missing), `voices_not_cast` (autocast left these `speakers` on their own cloned voice),
+  `voices_not_as_asked`, `no_speech`. Tell the user; `models_status` and `models_download`
+  bring a missing model. Its copy in `out_dir` is `<file>.<tgt_lang>`, or with (2), (3)
+  when that name is another file's; called again, it answers the copy already there.
+- **Work in the studio** - when the result needs looking at and fixing: the translation
+  line by line, the speakers, the voices and the characters, the look of the subtitles,
+  titles, blur, several languages: `project_create`, `project_analyze`, the edits and
+  `project_render`, as the recipes below go.
+- A one-call project is an ordinary project: its `project_id` goes to `project_get`, the
+  edits and `project_render` like any other. Called again after its settings were changed
+  in the studio (mode, languages, subtitles), a one-call tool analyzes it anew as it asks.
+
+Take one call when the user asks for a result; take the studio when they want to see,
+choose or correct. They combine: `transcribe_file`, then `project_get` with its
+`project_id`, `segment_update` where a line is wrong, and `export_subtitles`.
 
 ## Recipes
 
@@ -172,8 +215,10 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
   `project_align`, `project_dub_audio`, `project_render`, `project_export_lang`,
   `project_put`, `project_patch` (any edit by its op), `project_delete`,
   `project_waveform`, `project_frame`.
-- **files**: `project_files`, `project_export_text` (SRT, TXT), `project_save_output`,
-  `project_open_output`, `project_reveal`.
+- **one call on a file**: `transcribe_file`, `translate_file`, `dub_file`, `separate_file`,
+  `detect_text_file`, and `export_subtitles` for a project's subtitles.
+- **files**: `project_files`, `project_export_text` (SRT, VTT, ASS, TXT, JSON),
+  `project_save_output`, `project_open_output`, `project_reveal`.
 - **lines**: `segment_update`, `segment_add`, `segments_delete`, `segments_hide`,
   `segments_keep_original`, `segments_reorder`, `segment_regen`, `segments_regen_all`.
 - **what the project makes**: `project_mode_set`, `audio_output_set`,

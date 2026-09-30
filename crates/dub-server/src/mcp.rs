@@ -20,6 +20,8 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod atomic;
+
 /// The studio's API router, set once the service has built it.
 static API: OnceLock<Router> = OnceLock::new();
 
@@ -452,7 +454,7 @@ async fn wait_for(args: &Value) -> Result<Value, String> {
             Some(job) => {
                 let state = fetch(&format!("/jobs/{}", segment(job)))
                     .await
-                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume or voices_download_pack returned (a models download is waited for with until download). Wait for other work with until."))?;
+                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool answering done false returned (a models download is waited for with until download). Wait for other work with until."))?;
                 if state.get("status").and_then(Value::as_str).is_none() {
                     return Err(format!("The job {job} has no status: {state}"));
                 }
@@ -513,7 +515,9 @@ fn annotations(name: &str) -> Value {
     let open_world = name.starts_with("openrouter_") && !matches!(name, "openrouter_status" | "openrouter_delete_key")
         || matches!(name, "models_download" | "voice_download" | "voices_download_pack" | "voices_catalog" | "proxy_test");
     let title = name.replace('_', " ");
-    json!({ "title": title, "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": read_only || name.ends_with("_set") || name.contains("_select"), "openWorldHint": open_world })
+    // a one-call tool on a file finds its project again and answers from the finished work
+    let idempotent = read_only || name.ends_with("_set") || name.contains("_select") || name.ends_with("_file");
+    json!({ "title": title, "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": open_world })
 }
 
 // ---------------------------------------------------------------- origin and agent
@@ -748,7 +752,7 @@ fn resource(uri: &str) -> Option<(&'static str, String)> {
 fn tools() -> &'static [Tool] {
     static TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
     TOOLS.get_or_init(|| {
-        vec![
+        let mut all = vec![
             // ---------------------------------------------------------------- the studio
             Tool {
                 name: "studio_status",
@@ -758,8 +762,8 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "studio_wait",
-                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume or voices_download_pack returned it), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, download, voices_pack - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
-                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "download", "voices_pack"] }, "seconds": { "type": "integer" } }), &[]),
+                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool still at work returned it), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, download, voices_pack, separate, detect_text - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
+                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "download", "voices_pack", "separate", "detect_text"] }, "seconds": { "type": "integer" } }), &[]),
                 call: |_| composite("wait"),
             },
             Tool {
@@ -1014,7 +1018,7 @@ fn tools() -> &'static [Tool] {
             // ---------------------------------------------------------------- projects
             Tool {
                 name: "projects_list",
-                description: "The projects, the last edited first: pid, the video's name, target language, mode, size, length, number of lines, whether it is rendered (done). query matches the video's name; since and until (today, yesterday, 2026-09-26, 2026-09-26T18:00) bound when it was last edited.",
+                description: "The projects, the last edited first: pid, the video's name, target language, mode, size, length, number of lines, whether it is rendered (done), and source (agent: made of a file by a tool, window: by the studio's window). query matches the video's name; since and until (today, yesterday, 2026-09-26, 2026-09-26T18:00) bound when it was last edited.",
                 schema: || object(json!({ "query": { "type": "string" }, "since": { "type": "string" }, "until": { "type": "string" } }), &[]),
                 call: |_| get("/projects".into()),
             },
@@ -1191,18 +1195,18 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_files",
-                description: "Where the project's files are on this computer: the folder, the video it was made from, the finished output and its playable copy, the dubbed audio, project.json, casting.json and the subtitle and text files written.",
+                description: "Where the project's files are on this computer: the folder, the video it was made from, the finished output and its playable copy, the dubbed audio, project.json, casting.json, the separated voice and background (vocals, background) and the subtitle and text files written.",
                 schema: project_only,
                 call: |args| get(project_path(args, "/files")?),
             },
             Tool {
                 name: "project_export_text",
-                description: "Write the project's lines as a text file, as the window's export buttons do: format srt (numbered subtitles with timing) or txt (one line per phrase with its speaker); text tgt (the translation, the recognised text where a line has none) or src (the recognised original: the transcript). Without dir the file goes into the project's own folder under the fixed name of its kind (subtitles.srt, transcript.srt, translation.txt, transcript.txt), replacing the earlier one; a name of your own needs dir, a folder on this computer, where a name already there gets (2), (3). Answers the path.",
+                description: "Write the project's lines as a text file, as the window's export buttons do: format srt (numbered subtitles with timing), vtt (WebVTT, each cue naming its speaker), ass (styled as the render burns them), txt (one line per phrase with its speaker) or json (each line with its timing, speaker, text, the original under a translation and the word timings of the transcript); text tgt (the translation, the recognised text where a line has none) or src (the recognised original: the transcript). Without dir the file goes into the project's own folder under the fixed name of its kind (subtitles.srt, transcript.srt, subtitles.vtt, subtitles.ass, translation.txt, transcript.lines.json and so on), replacing the earlier one; a name of your own needs dir, a folder on this computer, where a name already there gets (2), (3). Answers the path.",
                 schema: || {
                     object(
                         json!({
                             "pid": pid(),
-                            "format": { "type": "string", "enum": ["srt", "txt"] },
+                            "format": { "type": "string", "enum": ["srt", "vtt", "ass", "txt", "json"] },
                             "text": { "type": "string", "enum": ["tgt", "src"] },
                             "dir": { "type": "string", "description": "folder on this computer" },
                             "name": { "type": "string", "description": "the file's name, only together with dir" },
@@ -1589,7 +1593,9 @@ fn tools() -> &'static [Tool] {
                     post(project_path(args, "/voice-slots")?, json!({ "male": list("male"), "female": list("female") }))
                 },
             },
-        ]
+        ];
+        all.extend(atomic::tools());
+        all
     })
 }
 
@@ -1959,6 +1965,10 @@ pub async fn handle(headers: HeaderMap, body: axum::body::Bytes) -> Response {
                     Ok(state) => tool_json(id, state),
                     Err(problem) => answer(problem, true),
                 },
+                Ok(call) if call.path.starts_with(atomic::PREFIX) => match atomic::run(name, &args).await {
+                    Ok(result) => tool_json(id, result),
+                    Err(problem) => answer(problem, true),
+                },
                 Ok(call) => {
                     if QUEUED_BEHIND_JOBS.contains(&name) {
                         if let Err(problem) = graphics_card_free().await {
@@ -2005,7 +2015,7 @@ fn moment(text: &str, end: bool) -> Result<i64, String> {
 }
 
 /// What an agent is told when it connects.
-const INSTRUCTIONS: &str = "You drive Dub Studio on this computer: it dubs, voices over, subtitles and transcribes videos. Every tool runs the same code as a button of the studio, through the routes its window calls. Start with studio_status. Long work - project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, downloads - is a job: start it, then studio_wait with its job_id instead of polling. The graphics card runs one job at a time and a preview frame (project_frame) waits behind it, so look at frames while the studio is idle. Edits (segment_update, caption_style_set and the rest) are instant and saved; a line whose words, timing, speaker or voice changed is dirty, and project_dub_audio and project_render voice only the dirty lines again. Look ids up instead of guessing them: projects_list, project_get, voices_list, casting_get, casting_library_list, models_status. Files on this computer are passed by path. The whole guide is the resource studio://skill (prompt 'studio').";
+const INSTRUCTIONS: &str = "You drive Dub Studio on this computer: it dubs, voices over, subtitles and transcribes videos. Every tool runs the same code as a button of the studio, through the routes its window calls. Start with studio_status. For one result from a file, without working in the studio, one call does it: transcribe_file (the transcript), translate_file (translated subtitles), dub_file (the dubbed video), separate_file (voice and background apart), detect_text_file (the text in the picture); export_subtitles writes a project's subtitles. Long work - project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, downloads - is a job: start it, then studio_wait with its job_id instead of polling. The graphics card runs one job at a time and a preview frame (project_frame) waits behind it, so look at frames while the studio is idle. Edits (segment_update, caption_style_set and the rest) are instant and saved; a line whose words, timing, speaker or voice changed is dirty, and project_dub_audio and project_render voice only the dirty lines again. Look ids up instead of guessing them: projects_list, project_get, voices_list, casting_get, casting_library_list, models_status. Files on this computer are passed by path. The whole guide is the resource studio://skill (prompt 'studio').";
 
 #[cfg(test)]
 mod tests {
@@ -2032,9 +2042,10 @@ mod tests {
     }
 
     /// A studio in miniature: a render running, an analysis done, a picture,
-    /// a project, the settings with a key, and a page for what is not there.
-    fn stub() {
-        use axum::extract::{Multipart, Path as Segment};
+    /// a project, the settings with a key, and a page for what is not there;
+    /// the projects and jobs of the one-call tools' tests are atomic::stub's.
+    pub(super) fn stub() {
+        use axum::extract::{Multipart, Path as Segment, Query};
         use axum::routing::{get, post};
         let jobs = || {
             json!({ "jobs": [
@@ -2043,8 +2054,13 @@ mod tests {
             ] })
         };
         let router = Router::new()
-            .route("/jobs", get(move || async move { Json(jobs()) }))
+            .route("/jobs", get(move |Query(asked): Query<std::collections::HashMap<String, String>>| async move {
+                Json(asked.get("pid").and_then(|pid| atomic::stub::jobs(pid)).unwrap_or_else(jobs))
+            }))
             .route("/jobs/{id}", get(move |Segment(id): Segment<String>| async move {
+                if let Some(job) = atomic::stub::job(&id) {
+                    return Json(job).into_response();
+                }
                 match jobs()["jobs"].as_array().unwrap().iter().find(|job| job["id"] == id.as_str()) {
                     Some(job) => Json(job.clone()).into_response(),
                     None => (StatusCode::NOT_FOUND, "job not found").into_response(),
@@ -2055,7 +2071,11 @@ mod tests {
                 { "id": "ocr", "name": "OCR", "requirement": "recommended", "installed": true, "size": 1, "bytesOnDisk": 1, "vram": 0, "missing": [] },
             ] })) }))
             .route("/engine/capabilities", get(|| async { Json(json!({ "selection": { "or_key": "sk-or-secret", "proxy_url": "http://user:pass@host:8080", "bench": "1" }, "asr_engines": ["parakeet", "whisper"] })) }))
-            .route("/projects/{pid}", get(|| async { Json(a_project()) }).patch(|| async { Json(a_project()) }))
+            .route(
+                "/projects/{pid}",
+                get(|Segment(pid): Segment<String>| async move { atomic::stub::project(&pid).unwrap_or_else(|| Json(a_project()).into_response()) })
+                    .patch(|Segment(pid): Segment<String>, Json(edit): Json<Value>| async move { atomic::stub::patch(&pid, &edit).unwrap_or_else(|| Json(a_project()).into_response()) }),
+            )
             .route("/projects/{pid}/preview", get(|| async { ([(header::CONTENT_TYPE, "image/jpeg")], vec![0xFFu8, 0xD8, 0xFF, 0xD9]).into_response() }))
             .route("/host", get(|headers: HeaderMap| async move { Json(json!({ "host": headers.get(header::HOST).and_then(|value| value.to_str().ok()) })) }))
             .route("/projects", post(|mut form: Multipart| async move {
@@ -2068,19 +2088,20 @@ mod tests {
                 }
                 Json(json!({ "project_id": "p2", "parts": parts }))
             }))
+            .merge(atomic::stub::routes())
             .fallback(|| async { axum::response::Html("<!doctype html><title>Dub Studio</title>") })
             .layer(axum::extract::DefaultBodyLimit::disable());
         let _ = STUB.set(router);
     }
 
-    async fn call_tool(name: &str, arguments: Value) -> Value {
+    pub(super) async fn call_tool(name: &str, arguments: Value) -> Value {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
         let response = handle(HeaderMap::new(), axum::body::Bytes::from(body.to_string())).await;
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 24).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    fn answer_text(reply: &Value) -> String {
+    pub(super) fn answer_text(reply: &Value) -> String {
         reply["result"]["content"].as_array().unwrap().iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n")
     }
 
@@ -2197,7 +2218,7 @@ mod tests {
         let mut reached = Vec::new();
         for args in samples(tool, video, subtitles) {
             let call = (tool.call)(&args).unwrap_or_else(|problem| panic!("{} refused {args}: {problem}", tool.name));
-            match COMPOSITE_ROUTES.iter().find(|(path, _)| *path == call.path) {
+            match COMPOSITE_ROUTES.iter().chain(atomic::ROUTES).find(|(path, _)| *path == call.path) {
                 Some((_, reads)) => reached.extend(reads.iter().map(|(method, path)| (method.to_string(), path.to_string()))),
                 None => {
                     assert!(!call.path.starts_with("composite:"), "{} is a composite this test does not know", tool.name);

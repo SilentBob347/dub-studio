@@ -952,7 +952,9 @@
       "export_lang": "Export to another language",
       "align": "Align to speech",
       "download": "Model download",
-      "voices_pack": "Voice download"
+      "voices_pack": "Voice download",
+      "separate": "Voice and background separation",
+      "detect_text": "On-screen text reading"
     },
     "error": {
       "failed": "The task failed",

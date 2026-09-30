@@ -2449,7 +2449,12 @@ function Editor() {
         const ms = Math.max(0, Math.round(s * 1000)), z = (n: number, w = 2) => String(n).padStart(w, "0");
         return `${z(Math.floor(ms / 3600000))}:${z(Math.floor((ms % 3600000) / 60000))}:${z(Math.floor((ms % 60000) / 1000))},${z(ms % 1000, 3)}`;
       };
-      const content = p.segments.map((s, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${(s.tgt_text || s.src_text || "").trim()}\n`).join("\n");
+      const own = new Map(p.captions.overrides.flatMap((o) => (o.text != null ? [[o.seg_id, o.text] as const] : [])));
+      const content = p.segments
+        .filter((s) => !s.hidden && !s.keep_original)
+        .map((s) => ({ s, text: (own.get(s.id) ?? (s.tgt_text || s.src_text) ?? "").trim() }))
+        .filter(({ text }) => text)
+        .map(({ s, text }, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${text}\n`).join("\n");
       await api.putProject(pid, p);
 
       if ("showSaveFilePicker" in window) {

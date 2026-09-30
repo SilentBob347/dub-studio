@@ -940,7 +940,9 @@
       "export_lang": "导出为其他语言",
       "align": "按语音对齐",
       "download": "下载模型",
-      "voices_pack": "下载声音"
+      "voices_pack": "下载声音",
+      "separate": "分离人声与背景",
+      "detect_text": "识别画面文字"
     },
     "error": {
       "failed": "任务执行出错",

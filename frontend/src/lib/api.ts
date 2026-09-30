@@ -28,7 +28,7 @@ export type Project = {
   segments: Segment[];
   subs: { mode: string; burn?: boolean };
   captions: {
-    sub_style?: SubStyle | null; sub_y?: number | null; overrides: unknown[];
+    sub_style?: SubStyle | null; sub_y?: number | null; overrides: { seg_id: string; text?: string | null }[];
     titles: Title[]; brands: unknown[]; blur_boxes: BlurBox[]; preset: Record<string, unknown>;
   };
   render: { burn_cq: number; blur_sigma: number; blur: boolean; codec: string };

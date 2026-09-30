@@ -964,7 +964,9 @@
       "export_lang": "Exportación a otro idioma",
       "align": "Alinear con el habla",
       "download": "Descarga de modelos",
-      "voices_pack": "Descarga de voces"
+      "voices_pack": "Descarga de voces",
+      "separate": "Separación de voz y fondo",
+      "detect_text": "Lectura del texto en pantalla"
     },
     "error": {
       "failed": "La tarea terminó con un error",

@@ -8,6 +8,7 @@
 
 mod analyze;
 mod asr_filter;
+mod atomic;
 mod bench;
 mod casting;
 mod casting_library;
@@ -454,6 +455,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/voices", get(voices_list))
         .route("/presets", get(endpoints::presets))
         .route("/projects", post(create_project).get(list_projects))
+        .route("/projects/from-path", post(atomic::from_path))
         .route(
             "/projects/{pid}",
             get(get_project).patch(patch_project).put(endpoints::put_project).delete(delete_project),
@@ -475,6 +477,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{pid}/files", get(project_files::files))
         .route("/projects/{pid}/export-text", post(project_files::export_text))
         .route("/projects/{pid}/dub-audio", post(dub_audio_project))
+        .route("/projects/{pid}/separate", post(atomic::separate))
+        .route("/projects/{pid}/detect-text", post(atomic::detect_text))
         // /original?t= отдаёт ОДИН PNG-кадр оригинала (порт app.py.original -> source_frame),
         // фронт (ComparePane) вставляет его как <img src>. Range-раздача сырого видео — /dub.
         .route("/projects/{pid}/original", get(endpoints::original_frame))
@@ -1462,47 +1466,50 @@ async fn create_project(
             },
         };
 
-        // Загрузить реплики из import_subs если они были переданы при создании
-        let mut segments = Vec::new();
-        for ext in ["srt", "ass", "ssa"] {
-            let sub_file = d.join(format!("import_subs.{ext}"));
-            if sub_file.is_file() {
-                if let Ok(txt) = std::fs::read_to_string(&sub_file) {
-                    let cues = subimport::parse(&txt, ext);
-                    for (i, c) in cues.into_iter().enumerate() {
-                        segments.push(dub_core::Segment {
-                            id: format!("seg_{}", i + 1),
-                            start: c.start,
-                            end: c.end,
-                            speaker: Some("0".to_string()),
-                            src_text: c.text.clone(),
-                            tgt_text: c.text,
-                            voice: None,
-                            dirty: true,
-                            ckpt: None,
-                            extra: serde_json::Map::new(),
-                        });
-                    }
-                }
-                break;
-            }
-        }
-
-        let initial_proj = dub_core::Project {
-            meta,
-            mode: "nodub".to_string(),
-            tgt_lang: "ru".to_string(),
-            segments,
-            audio: dub_core::Audio::default(),
-            subs: dub_core::Subs::default(),
-            captions: dub_core::Captions::default(),
-            render: dub_core::Render::default(),
-            ..Default::default()
-        };
-        let _ = save_project_atomic(&d, &initial_proj);
+        let _ = save_project_atomic(&d, &initial_project(&d, meta));
     }
 
     Json(json!({ "project_id": pid, "filename": filename, "imported_subs": imported_subs })).into_response()
+}
+
+/// Начальный project.json нового проекта, чтобы редактор открыл его без analyze: медиа и реплики
+/// из субтитров, загруженных вместе с видео (import_subs.*).
+fn initial_project(d: &Path, meta: dub_core::Meta) -> Project {
+    let mut segments = Vec::new();
+    for ext in ["srt", "ass", "ssa"] {
+        let sub_file = d.join(format!("import_subs.{ext}"));
+        if sub_file.is_file() {
+            if let Ok(txt) = std::fs::read_to_string(&sub_file) {
+                let cues = subimport::parse(&txt, ext);
+                for (i, c) in cues.into_iter().enumerate() {
+                    segments.push(dub_core::Segment {
+                        id: format!("seg_{}", i + 1),
+                        start: c.start,
+                        end: c.end,
+                        speaker: Some("0".to_string()),
+                        src_text: c.text.clone(),
+                        tgt_text: c.text,
+                        voice: None,
+                        dirty: true,
+                        ckpt: None,
+                        extra: serde_json::Map::new(),
+                    });
+                }
+            }
+            break;
+        }
+    }
+    dub_core::Project {
+        meta,
+        mode: "nodub".to_string(),
+        tgt_lang: "ru".to_string(),
+        segments,
+        audio: dub_core::Audio::default(),
+        subs: dub_core::Subs::default(),
+        captions: dub_core::Captions::default(),
+        render: dub_core::Render::default(),
+        ..Default::default()
+    }
 }
 
 // ─── GET /projects ──────────────────────────────────────────────────────────
@@ -1590,6 +1597,7 @@ async fn list_projects(State(st): State<AppState>) -> Response {
                 "audio_only": audio_only,
                 "mtime": mtime,
                 "done": done,
+                "source": atomic::source_of(&dir),
             });
             if let (Some(obj), Value::Object(extra)) = (item.as_object_mut(), job) {
                 obj.extend(extra);
