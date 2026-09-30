@@ -1,5 +1,11 @@
 import { create } from "zustand";
-import type { Project } from "./lib/api";
+import { projectRev, type Project } from "./lib/api";
+
+/**
+ * A state of the open project undo or redo can write back, with the revision the window knew when it was taken:
+ * the studio refuses to write it once anyone but this window saved the project after that revision.
+ */
+export type Snapshot = { project: Project; rev: number | undefined };
 
 type Stage = "boot" | "setup" | "empty" | "analyzing" | "editor" | "batch" | "multilang";
 export type ExportItem = { id: string; name: string; status: "rendering" | "done" | "error"; msg: string; url?: string; pid?: string };
@@ -17,8 +23,8 @@ type State = {
   rendering: boolean;                // current project's export in flight (button state; does NOT block the screen)
   exports: ExportItem[];            // non-blocking export queue shown in the bottom-right Files panel
   activities: Activity[];           // журнал «что делает приложение» — статус-строка в шапке + разворот в лог
-  past: Project[];                  // undo/redo history of Project snapshots
-  future: Project[];
+  past: Snapshot[];                 // undo/redo history of Project snapshots
+  future: Snapshot[];
   rev: number;                       // preview cache-buster: bumped on every backend-confirmed frame change
   selBlur: number | null;            // selected blur-box index — SHARED between the left list and the canvas overlay
   selTitle: number | null;           // selected title index — SHARED between the left titles list and the canvas overlay
@@ -37,8 +43,8 @@ type State = {
   addExport: (e: ExportItem) => void;
   updateExport: (id: string, patch: Partial<ExportItem>) => void;
   pushHistory: (p: Project) => void; // snapshot the project BEFORE a mutation (for undo)
-  undo: () => Project | null;        // returns the project to restore (PUT it) or null
-  redo: () => Project | null;
+  undo: () => Snapshot | null;       // returns the snapshot to restore (PUT it with its rev) or null
+  redo: () => Snapshot | null;
   bump: () => void;                  // invalidate the rendered preview frame -> <img> refetches
   setSelBlur: (i: number | null) => void;
   setSelTitle: (i: number | null) => void;
@@ -48,6 +54,8 @@ type State = {
   askConfirm: (request: ConfirmRequest) => Promise<boolean>;
   answerConfirm: (ok: boolean) => void;
 };
+
+const known = (pid: string | null): number | undefined => (pid === null ? undefined : projectRev(pid));
 
 export const useStore = create<State>((set, get) => ({
   stage: "boot",   // при загрузке SPA сперва проверяем /setup/status; если чего-то обязательного нет -> "setup"
@@ -90,19 +98,19 @@ export const useStore = create<State>((set, get) => ({
     // baseline (e.g. a second keystroke in the same edit burst), and an unconditional
     // future:[] there would silently kill the redo stack.
     const head = s.past[s.past.length - 1];
-    if (head && JSON.stringify(head) === JSON.stringify(p)) return {};
-    return { past: [...s.past, p].slice(-60), future: [] };
+    if (head && JSON.stringify(head.project) === JSON.stringify(p)) return {};
+    return { past: [...s.past, { project: p, rev: known(s.pid) }].slice(-60), future: [] };
   }),
   undo: () => {
     const s = get(); if (!s.past.length || !s.project) return null;
     const prev = s.past[s.past.length - 1];
-    set({ past: s.past.slice(0, -1), future: [s.project, ...s.future], project: prev });
+    set({ past: s.past.slice(0, -1), future: [{ project: s.project, rev: known(s.pid) }, ...s.future], project: prev.project });
     return prev;
   },
   redo: () => {
     const s = get(); if (!s.future.length || !s.project) return null;
     const next = s.future[0];
-    set({ future: s.future.slice(1), past: [...s.past, s.project], project: next });
+    set({ future: s.future.slice(1), past: [...s.past, { project: s.project, rev: known(s.pid) }], project: next.project });
     return next;
   },
   bump: () => set((s) => ({ rev: s.rev + 1 })),

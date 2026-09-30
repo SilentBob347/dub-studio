@@ -524,10 +524,50 @@ function whoChanged(t: TFunction<"t">, by: string | undefined): string {
 }
 
 /**
- * Reads the open project again when someone saves it behind the window: an agent, another window, a job. A change of
- * someone else's ends the undo history - its snapshots would write over that change (the studio refuses such a PUT
- * anyway). What the user is typing stays.
+ * What the window does on a notice that project `pid` was saved: reads it again unless the save is the window's own
+ * and it already shows it. A save of someone else's - or one the window may have missed - ends the undo history
+ * even when the window already shows that save (its own later edit brought it along): the snapshots lack it and
+ * would write over it. What the user is typing stays.
  */
+export function projectSync(pid: string, draft: () => Draft, t: TFunction<"t">): (notice: ChangeNotice) => Promise<void> {
+  let reading = 0;
+  return async (notice) => {
+    if (notice.pid && notice.pid !== pid) return;
+    const own = isMine(notice);
+    if (own) {
+      await editsSettled();
+      const known = projectRev(pid);
+      if (typeof notice.rev === "number" && known !== undefined && notice.rev <= known) return;
+    }
+    const turn = ++reading;
+    let fresh: Project | null = null;
+    let problem: unknown = null;
+    try {
+      fresh = await api.getProject(pid);
+    } catch (error) {
+      problem = error;
+    }
+    const s = useStore.getState();
+    if (s.pid !== pid) return;
+    const hadHistory = s.past.length > 0 || s.future.length > 0;
+    // after the read, not before it: a snapshot taken while it was on its way lacks the save too
+    if (!own) s.resetHistory();
+    if (fresh === null) {
+      s.pushActivity(t("bridge.syncFailed", { error: String(problem) }), "error");
+      return;
+    }
+    if (turn !== reading || !s.project) return;
+    const merged = keepDraft(fresh, s.project, draft());
+    const differs = JSON.stringify(merged) !== JSON.stringify(s.project);
+    if (!own && (differs || hadHistory)) s.pushActivity(whoChanged(t, notice.by), "agent");
+    if (!differs) return;
+    s.setProject(merged);
+    s.setRendered(false);
+    s.bump();
+  };
+}
+
+/** Keeps the open project in step with the saves made behind the window (see projectSync). */
 export function useProjectSync(pid: string, draft: () => Draft): void {
   const { t } = useTranslation();
   const typing = useRef(draft);
@@ -535,37 +575,8 @@ export function useProjectSync(pid: string, draft: () => Draft): void {
     typing.current = draft;
   });
   useEffect(() => {
-    let reading = 0;
-    const onChange = async (e: Event) => {
-      const notice = (e as CustomEvent<ChangeNotice>).detail;
-      if (notice.pid && notice.pid !== pid) return;
-      const own = isMine(notice);
-      if (own) {
-        await editsSettled();
-        const known = projectRev(pid);
-        if (typeof notice.rev === "number" && known !== undefined && notice.rev <= known) return;
-      }
-      const turn = ++reading;
-      let fresh: Project;
-      try {
-        fresh = await api.getProject(pid);
-      } catch (problem) {
-        useStore.getState().pushActivity(t("bridge.syncFailed", { error: String(problem) }), "error");
-        return;
-      }
-      const s = useStore.getState();
-      if (turn !== reading || s.pid !== pid || !s.project) return;
-      const merged = keepDraft(fresh, s.project, typing.current());
-      if (JSON.stringify(merged) === JSON.stringify(s.project)) return;
-      s.setProject(merged);
-      s.setRendered(false);
-      s.bump();
-      if (!own) {
-        s.resetHistory();
-        s.pushActivity(whoChanged(t, notice.by), "agent");
-      }
-    };
-    const listener = (e: Event) => void onChange(e);
+    const sync = projectSync(pid, () => typing.current(), t);
+    const listener = (e: Event) => void sync((e as CustomEvent<ChangeNotice>).detail);
     window.addEventListener(PROJECT_CHANGED, listener);
     return () => window.removeEventListener(PROJECT_CHANGED, listener);
   }, [pid, t]);

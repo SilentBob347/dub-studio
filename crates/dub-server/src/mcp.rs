@@ -1269,7 +1269,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "segment_split",
-                description: "Cut a line in two at a moment (at, seconds, inside the line): the recognised words and the text are divided there, tgt_text and tgt_text_2 give the two halves' translations (the translation is divided in the same share when left out). The second half gets new_id or <id>.2. Both halves are dirty; the answer shows both.",
+                description: "Cut a line in two at a moment (at, seconds, inside the line): the recognised words and the text are divided there, tgt_text and tgt_text_2 give the two halves' translations (the translation is divided in the same share when left out). The second half gets new_id or <id>.2. A subtitle text of the line's own (caption_style_set with seg_id and text) is divided in the same share, and both halves keep its place and style. Both halves are dirty; the answer shows both.",
                 schema: || object(json!({ "pid": pid(), "id": { "type": "string" }, "at": { "type": "number", "description": "seconds" }, "tgt_text": { "type": "string" }, "tgt_text_2": { "type": "string" }, "new_id": { "type": "string" }, "response_format": detail() }), &["pid", "id", "at"]),
                 call: |args| {
                     text(args, "id")?;
@@ -1278,7 +1278,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "segments_merge",
-                description: "Join lines that follow one another in the list into one (ids): the first keeps its id, speaker and voice, it runs from the earliest start to the latest end, the texts follow each other. It is dirty.",
+                description: "Join lines that follow one another in the list into one (ids): the first keeps its id, speaker and voice, it runs from the earliest start to the latest end, the texts follow each other. The lines' own subtitle overrides become one: the place and style of the first that has one, and, when any line has a subtitle text of its own, the parts' texts in order. It is dirty.",
                 schema: || object(json!({ "pid": pid(), "ids": ids("line ids, neighbours in the list"), "response_format": detail() }), &["pid", "ids"]),
                 call: |args| edit(args, "merge_segments"),
             },

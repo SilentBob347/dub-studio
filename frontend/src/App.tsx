@@ -2801,8 +2801,8 @@ function Editor() {
     togglePlay: playFull, previewRef, setHelp: setShowHelp, vol, setVol: setVolK,
     blocked: () => document.querySelector(".glass-scrim") != null,   // открыта палитра/модалка -> не перехватывать
   });
-  async function doUndo() { const prev = undo(); if (prev) { setSelBlur(null); setSelTitle(null); setRendered(false); try { await api.putProject(pid, prev); } catch (err) { await surfaceErr(err); } bump(); } }
-  async function doRedo() { const next = redo(); if (next) { setSelBlur(null); setSelTitle(null); setRendered(false); try { await api.putProject(pid, next); } catch (err) { await surfaceErr(err); } bump(); } }
+  async function doUndo() { const prev = undo(); if (prev) { setSelBlur(null); setSelTitle(null); setRendered(false); try { await api.putProject(pid, prev.project, prev.rev); } catch (err) { await surfaceErr(err); } bump(); } }
+  async function doRedo() { const next = redo(); if (next) { setSelBlur(null); setSelTitle(null); setRendered(false); try { await api.putProject(pid, next.project, next.rev); } catch (err) { await surfaceErr(err); } bump(); } }
   useEffect(() => {                                                  // Cmd/Ctrl+Z / Shift+Z / Y (not while typing in a field)
     const h = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;

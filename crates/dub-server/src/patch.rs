@@ -742,7 +742,9 @@ fn split_text(text: &str, fraction: f64) -> (String, String) {
 /// split_segment — разрезать фразу id в момент at (сек) на две, как ножницы монтажа. Пословные тайминги
 /// ASR делятся по времени; исходный текст — по ним, когда их столько же, сколько слов текста, иначе в той же
 /// доле, что время. Перевод берётся из tgt_text/tgt_text_2, если их прислали, иначе делится в доле исходного
-/// текста. Вторая часть получает new_id или свободный id вида `<id>.2`. Обе части dirty.
+/// текста. Вторая часть получает new_id или свободный id вида `<id>.2`. Обе части dirty. Оверрайд субтитра
+/// фразы (captions.overrides) переходит к обеим частям: место и стиль те же, свой текст делится в доле
+/// исходного текста.
 fn op_split_segment(p: &mut Project, edit: &Value) -> PatchResult {
     let sid = s(edit, "id").ok_or((400, "missing segment id".into()))?;
     let at = f(edit, "at").ok_or((400, "missing split time 'at' (seconds)".into()))?;
@@ -781,6 +783,19 @@ fn op_split_segment(p: &mut Project, edit: &Value) -> PatchResult {
     let (auto_1, auto_2) = divide(&first.tgt_text);
     let tgt_1 = s(edit, "tgt_text").unwrap_or(auto_1);
     let tgt_2 = s(edit, "tgt_text_2").unwrap_or(auto_2);
+    // build_ass рисует override.text вместо tgt_text: целый текст на первой части задвоил бы вторую.
+    // Оверрайд удалённой фразы с тем же id (del_segment их не чистит) к новой части не относится.
+    p.captions.overrides.retain(|o| o.seg_id != new_id);
+    let caption_2 = p.captions.overrides.iter_mut().find(|o| o.seg_id == sid).map(|own| {
+        let mut copy = own.clone();
+        copy.seg_id = new_id.clone();
+        if let Some(text) = own.text.take() {
+            let (head, tail) = divide(&text);
+            own.text = Some(head);
+            copy.text = Some(tail);
+        }
+        copy
+    });
 
     let mut second = p.segments[idx].clone();
     second.id = new_id;
@@ -801,12 +816,15 @@ fn op_split_segment(p: &mut Project, edit: &Value) -> PatchResult {
         }
     }
     p.segments.insert(idx + 1, second);
+    p.captions.overrides.extend(caption_2);
     Ok(())
 }
 
 /// merge_segments — склеить фразы ids в одну. Они должны стоять подряд в списке фраз; остаётся id первой
 /// по списку, её спикер и голос; время — от самого раннего начала до самого позднего конца, тексты и
-/// пословные тайминги — друг за другом. Результат dirty.
+/// пословные тайминги — друг за другом. Результат dirty. Оверрайды субтитров частей сводятся в один на id
+/// склеенной фразы: место и стиль — первого по порядку, а если хоть у одной части свой текст, текст
+/// субтитра — тексты частей подряд (свой текст части или её перевод).
 fn op_merge_segments(p: &mut Project, edit: &Value) -> PatchResult {
     let wanted = ids(edit);
     if wanted.len() < 2 {
@@ -840,6 +858,17 @@ fn op_merge_segments(p: &mut Project, edit: &Value) -> PatchResult {
         merged.extra.remove("words");
     } else {
         merged.extra.insert("words".into(), Value::Array(words));
+    }
+    let captions: Vec<Option<CaptionOverride>> = parts.iter().map(|part| p.captions.overrides.iter().find(|o| o.seg_id == part.id).cloned()).collect();
+    if let Some(first) = captions.iter().flatten().next() {
+        let mut kept = first.clone();
+        kept.seg_id = merged.id.clone();
+        if captions.iter().flatten().any(|o| o.text.is_some()) {
+            let texts = parts.iter().zip(&captions).map(|(part, own)| own.as_ref().and_then(|o| o.text.as_deref()).unwrap_or(&part.tgt_text));
+            kept.text = Some(texts.map(str::trim).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" "));
+        }
+        p.captions.overrides.retain(|o| !parts.iter().any(|part| part.id == o.seg_id));
+        p.captions.overrides.push(kept);
     }
     p.segments.insert(places[0], merged);
     Ok(())
@@ -1165,5 +1194,59 @@ mod tests {
         assert_eq!(merged.speaker.as_deref(), Some("1"));
         assert_eq!(merged.extra["words"].as_array().unwrap().len(), 2);
         assert!(merged.dirty);
+    }
+
+    fn caption_of<'a>(p: &'a Project, id: &str) -> Vec<&'a CaptionOverride> {
+        p.captions.overrides.iter().filter(|o| o.seg_id == id).collect()
+    }
+
+    #[test]
+    fn split_divides_a_line_s_own_subtitle_and_keeps_its_place_and_style() {
+        let mut p = Project::default();
+        p.segments.push(line("s1", 0.0, 4.0, "a b c d", "один два три четыре"));
+        apply(&mut p, &json!({"op":"caption","seg_id":"s1","text":"свой текст этой фразы","y":120,"color":"#00FF00"})).unwrap();
+        p.captions.overrides.push(CaptionOverride { seg_id: "s1.2".into(), text: Some("от удалённой фразы".into()), ..Default::default() });
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
+        let (first, second) = (caption_of(&p, "s1"), caption_of(&p, "s1.2"));
+        assert_eq!((first.len(), second.len()), (1, 1), "one override each, the stale one of a deleted line gone");
+        assert_eq!((first[0].text.as_deref(), second[0].text.as_deref()), (Some("свой текст"), Some("этой фразы")));
+        assert_eq!((second[0].y, second[0].style.as_ref().map(|st| st.color.as_str())), (Some(120), Some("#00FF00")));
+
+        apply(&mut p, &json!({"op":"caption","seg_id":"s1","y":40})).unwrap();
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":1.0})).unwrap();
+        let third = caption_of(&p, "s1.3");
+        assert_eq!((third[0].y, third[0].text.as_deref(), caption_of(&p, "s1")[0].text.as_deref()), (Some(40), Some("текст"), Some("свой")));
+
+        let mut styled = Project::default();
+        styled.segments.push(line("s1", 0.0, 4.0, "a b", "раз два"));
+        apply(&mut styled, &json!({"op":"caption","seg_id":"s1","x":30})).unwrap();
+        apply(&mut styled, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
+        let copy = caption_of(&styled, "s1.2");
+        assert_eq!((copy[0].x, copy[0].text.as_deref()), (Some(30), None), "a style-only override is copied without a text");
+
+        let mut plain = Project::default();
+        plain.segments.push(line("s1", 0.0, 4.0, "a b", "раз два"));
+        apply(&mut plain, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
+        assert!(plain.captions.overrides.is_empty(), "a line without an override gets none");
+    }
+
+    #[test]
+    fn merge_joins_the_parts_own_subtitles_under_the_first_id() {
+        let mut p = Project::default();
+        p.segments.extend([line("s1", 0.0, 1.0, "one", "раз"), line("s2", 1.0, 2.0, "two", "два"), line("s3", 2.0, 3.0, "three", "три")]);
+        apply(&mut p, &json!({"op":"caption","seg_id":"s2","text":"ДВА","x":10})).unwrap();
+        apply(&mut p, &json!({"op":"caption","seg_id":"s3","color":"#FF0000"})).unwrap();
+        apply(&mut p, &json!({"op":"merge_segments","ids":["s1","s2","s3"]})).unwrap();
+        assert_eq!(p.captions.overrides.len(), 1, "the absorbed lines leave no overrides behind");
+        let kept = &p.captions.overrides[0];
+        assert_eq!((kept.seg_id.as_str(), kept.text.as_deref(), kept.x), ("s1", Some("раз ДВА три"), Some(10)));
+
+        let mut styled = Project::default();
+        styled.segments.extend([line("s1", 0.0, 1.0, "one", "раз"), line("s2", 1.0, 2.0, "two", "два")]);
+        apply(&mut styled, &json!({"op":"caption","seg_id":"s1","y":50})).unwrap();
+        apply(&mut styled, &json!({"op":"caption","seg_id":"s2","y":90})).unwrap();
+        apply(&mut styled, &json!({"op":"merge_segments","ids":["s1","s2"]})).unwrap();
+        assert_eq!(styled.captions.overrides.len(), 1);
+        assert_eq!((styled.captions.overrides[0].y, styled.captions.overrides[0].text.as_deref()), (Some(50), None), "without own texts the subtitle keeps the joined translation");
     }
 }

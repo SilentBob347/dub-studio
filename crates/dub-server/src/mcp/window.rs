@@ -6,9 +6,10 @@
 //! saved, the projects, the settings, the voices, a job started - so the page reads it again.
 //!
 //! Every save of a project raises its revision. The page learns the revision of what it shows
-//! from the `x-project-rev` header and sends it with the whole-project PUT of its undo: a PUT made
-//! on an older revision than the stored one is refused, so an undo never erases what an agent or
-//! another window saved meanwhile.
+//! from the `x-project-rev` header and sends, with the whole-project PUT of its undo, the revision
+//! the state it writes back was taken at: the PUT is refused when anyone but its own window saved
+//! the project after that revision, so an undo never erases what an agent or another window saved
+//! meanwhile - even when the window's own later edit already carried that save to it.
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -26,9 +27,10 @@ use super::*;
 const WINDOW_HEADER: &str = "x-dub-window";
 /// The header the MCP tools' own calls carry.
 pub(super) const AGENT_HEADER: &str = "x-dub-agent";
-/// The revision of the project an answer shows, and the one a whole-project PUT was made on.
+/// The revision of the project an answer shows, and the one the state a whole-project PUT writes
+/// was taken at.
 pub(crate) const REV_HEADER: &str = "x-project-rev";
-/// The error code of a PUT made on a project that changed since.
+/// The error code of a PUT whose state someone else's later save would be lost under.
 pub(crate) const PROJECT_CHANGED: &str = "project_changed";
 
 const NO_WINDOW: &str = "The studio's window is not open, so there is nothing on screen to work in. Open Dub Studio (or its address in a browser) and call the tool again; every tool that is not ui_* or editor_* works without the window.";
@@ -193,8 +195,9 @@ pub(super) fn window_reply(id: Value, result: Value) -> Response {
 
 // ---------------------------------------------------------------- revisions and who changed what
 
-/// Who made the request being served, the revision its whole-project PUT was made on, and what
-/// its save of the project did (0: no save), shared with the blocking work it hands on.
+/// Who made the request being served, the revision the state its whole-project PUT writes was
+/// taken at, and what its save of the project did (0: no save), shared with the blocking work it
+/// hands on.
 #[derive(Clone)]
 struct Scope {
     actor: String,
@@ -213,13 +216,43 @@ tokio::task_local! {
     static REQUEST: Scope;
 }
 
-fn revisions() -> std::sync::MutexGuard<'static, HashMap<String, u64>> {
-    static REVISIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+/// A project's revision and who saved it: enough to tell whether everything saved after a given
+/// revision is one author's.
+#[derive(Default)]
+struct Saves {
+    rev: u64,
+    /// The author of the latest save.
+    last: String,
+    /// The latest revision saved by anyone but `last`; 0 when nobody else saved.
+    other: u64,
+}
+
+impl Saves {
+    fn record(&mut self, actor: &str) -> u64 {
+        if self.last != actor {
+            self.other = self.rev;
+            self.last = actor.to_string();
+        }
+        self.rev += 1;
+        self.rev
+    }
+
+    /// Whether `actor` alone saved the project after revision `base`: writing back a state taken at
+    /// `base` then loses nobody else's save. A revision the studio has not reached (one from before
+    /// it restarted) is nobody's.
+    fn only_by_since(&self, actor: &str, base: u64) -> bool {
+        let others = if self.last == actor { self.other } else { self.rev };
+        base <= self.rev && others <= base
+    }
+}
+
+fn revisions() -> std::sync::MutexGuard<'static, HashMap<String, Saves>> {
+    static REVISIONS: OnceLock<Mutex<HashMap<String, Saves>>> = OnceLock::new();
     REVISIONS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn revision(pid: &str) -> u64 {
-    revisions().get(pid).copied().unwrap_or(0)
+    revisions().get(pid).map(|saves| saves.rev).unwrap_or(0)
 }
 
 /// Who started the last job of each project: a job's own saves are theirs.
@@ -241,7 +274,8 @@ pub(crate) fn carry<T>(work: impl FnOnce() -> T + Send + 'static) -> impl FnOnce
 /// Writes a project through `write` as its next revision and tells the windows who saved it: the
 /// window or agent whose request is being served, or - for a job's own save outside any request -
 /// whoever started the project's last job (`studio` when nobody is known), marked `job`. A
-/// whole-project PUT made on an older revision is refused before anything is written.
+/// whole-project PUT whose state was taken before someone else's save is refused before anything
+/// is written.
 pub(crate) fn save_with_revision(dir: &Path, write: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     let pid = dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let (actor, expected, job) = match REQUEST.try_with(|scope| (scope.actor.clone(), scope.expected)) {
@@ -250,14 +284,13 @@ pub(crate) fn save_with_revision(dir: &Path, write: impl FnOnce() -> Result<(), 
     };
     let rev = {
         let mut revisions = revisions();
-        let current = revisions.get(&pid).copied().unwrap_or(0);
-        if expected.is_some_and(|expected| expected != current) {
+        let saves = revisions.entry(pid.clone()).or_default();
+        if expected.is_some_and(|base| !saves.only_by_since(&actor, base)) {
             let _ = REQUEST.try_with(|scope| scope.conflict.store(true, Ordering::Relaxed));
-            return Err(format!("{PROJECT_CHANGED}: project {pid} is at revision {current}"));
+            return Err(format!("{PROJECT_CHANGED}: project {pid} is at revision {}", saves.rev));
         }
         write()?;
-        revisions.insert(pid.clone(), current + 1);
-        current + 1
+        saves.record(&actor)
     };
     let _ = REQUEST.try_with(|scope| scope.saved.store(rev, Ordering::Relaxed));
     tell_windows(json!({ "changed": "project", "pid": pid, "rev": rev, "by": actor, "job": job }));
@@ -285,9 +318,9 @@ fn project_of(path: &str) -> Option<String> {
 }
 
 /// Middleware on the studio's API: serves each request in the scope of its author, answers the
-/// whole project with its revision, refuses a whole-project PUT made on an older one, and tells the
-/// windows what a change made that is not a project's save: the projects, the settings, the
-/// voices, the casting, a job started.
+/// whole project with its revision, refuses a whole-project PUT that would lose someone else's
+/// save, and tells the windows what a change made that is not a project's save: the projects, the
+/// settings, the voices, the casting, a job started.
 pub(crate) async fn track(request: Request<Body>, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
@@ -833,6 +866,46 @@ mod tests {
         let unmarked = send(&router, Method::PUT, "/projects/revtest1", &[]).await;
         assert_eq!(unmarked.status(), StatusCode::OK, "a PUT without a revision is taken as it is");
         assert_eq!(next_about(&mut page, pid).await["by"], "api");
+    }
+
+    #[tokio::test]
+    async fn an_undo_under_the_window_s_own_later_edit_still_keeps_the_agent_s_save() {
+        let folder = tempfile::tempdir().unwrap();
+        let router = tracked(folder.path().to_path_buf());
+        let status = |response: Response| (response.status(), response.headers().get(REV_HEADER).map(|rev| rev.to_str().unwrap().to_string()));
+        let tab = [(WINDOW_HEADER, "tab-1")];
+        let with = |rev: &'static str| [(WINDOW_HEADER, "tab-1"), (REV_HEADER, rev)];
+
+        assert_eq!(status(send(&router, Method::PATCH, "/projects/revtest2", &tab).await), (StatusCode::OK, Some("1".into())));
+        assert_eq!(status(send(&router, Method::PUT, "/projects/revtest2", &with("0")).await), (StatusCode::OK, Some("2".into())), "the window undoes its own edit");
+
+        send(&router, Method::PATCH, "/projects/revtest2", &[(AGENT_HEADER, "1")]).await;
+        // the window's next edit is saved on top of the agent's, and its answer brings the window revision 4
+        assert_eq!(status(send(&router, Method::PATCH, "/projects/revtest2", &tab).await), (StatusCode::OK, Some("4".into())));
+        assert_eq!(send(&router, Method::PUT, "/projects/revtest2", &with("2")).await.status(), StatusCode::CONFLICT, "the snapshot taken before that edit lacks the agent's save");
+        assert_eq!(revision("revtest2"), 4, "nothing was written");
+        assert_eq!(status(send(&router, Method::PUT, "/projects/revtest2", &with("3")).await), (StatusCode::OK, Some("5".into())), "a snapshot that has the agent's save undoes the window's edit");
+
+        send(&router, Method::PATCH, "/projects/revtest2", &[(WINDOW_HEADER, "tab-2")]).await;
+        assert_eq!(send(&router, Method::PUT, "/projects/revtest2", &with("5")).await.status(), StatusCode::CONFLICT, "another window saved after it");
+        assert_eq!(send(&router, Method::PUT, "/projects/revtest2", &with("99")).await.status(), StatusCode::CONFLICT, "a revision the studio never reached");
+        let other = send(&router, Method::PUT, "/projects/revtest2", &[(WINDOW_HEADER, "tab-2"), (REV_HEADER, "5")]).await;
+        assert_eq!(status(other), (StatusCode::OK, Some("7".into())), "the other window undoes its own edit");
+    }
+
+    #[test]
+    fn saves_tell_whether_one_author_alone_saved_after_a_revision() {
+        let mut saves = Saves::default();
+        assert!(saves.only_by_since("window:a", 0), "a project nobody saved");
+        saves.record("window:a");
+        saves.record("window:a");
+        assert!(saves.only_by_since("window:a", 0) && !saves.only_by_since("agent", 0) && saves.only_by_since("agent", 2));
+        saves.record("agent");
+        saves.record("window:a");
+        assert_eq!(saves.rev, 4);
+        assert!(!saves.only_by_since("window:a", 2) && saves.only_by_since("window:a", 3));
+        assert!(!saves.only_by_since("agent", 3) && saves.only_by_since("agent", 4));
+        assert!(!saves.only_by_since("window:a", 5));
     }
 
     #[tokio::test]
