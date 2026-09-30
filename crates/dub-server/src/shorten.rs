@@ -174,15 +174,22 @@ fn letters_only(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-/// Написано ли письмом целевого языка: у нелатинского языка латиница — не больше половины букв, у
-/// латинского — не меньше половины.
-fn script_ok(text: &str, lang: &str) -> bool {
+/// Доля латиницы среди букв текста (None — букв нет).
+fn latin_share(text: &str) -> Option<f64> {
     let letters: Vec<char> = text.chars().filter(|c| c.is_alphabetic()).collect();
     if letters.is_empty() {
-        return true;
+        return None;
     }
-    let latin = letters.iter().filter(|c| (**c as u32) < 0x250).count() as f64 / letters.len() as f64;
-    if crate::translate::tgt_expects_non_latin(lang) {
+    let latin = letters.iter().filter(|c| matches!(**c as u32, 0..=0x24F | 0x1E00..=0x1EFF)).count();
+    Some(latin as f64 / letters.len() as f64)
+}
+
+/// Написано ли письмом целевого языка: у языка с нелатинским письмом (по коду языка или по самому
+/// текущему переводу) латиница — не больше половины букв, у латинского — не меньше половины.
+fn script_ok(text: &str, cur: &str, lang: &str) -> bool {
+    let Some(latin) = latin_share(text) else { return true };
+    let non_latin = crate::translate::tgt_expects_non_latin(lang) || latin_share(cur).is_some_and(|l| l < 0.5);
+    if non_latin {
         latin <= 0.5
     } else {
         latin >= 0.5
@@ -199,7 +206,7 @@ pub fn check(src: &str, cur: &str, answer: &str, lang: &str) -> Result<String, R
     if !src_n.is_empty() && letters_only(&cand) == src_n && letters_only(cur) != src_n {
         return Err(Reject::Echo);
     }
-    if !script_ok(&cand, lang) {
+    if !script_ok(&cand, cur, lang) {
         return Err(Reject::Alphabet);
     }
     if fit::text_units(&cand) >= fit::text_units(cur) {
@@ -457,6 +464,9 @@ mod tests {
         assert_eq!(check("x", "Time to leave now", "Пора идти", "en"), Err(Reject::Alphabet));
         assert_eq!(check("x", "Пора", "Нам пора", "ru"), Err(Reject::NotShorter));
         assert_eq!(check("x", "Hello there, my friend", "Hi, friend", "en"), Ok("Hi, friend".to_string()));
+        assert_eq!(check("x", "Chúng ta phải về nhà ngay bây giờ", "Về nhà thôi", "vi"), Ok("Về nhà thôi".to_string()));
+        assert_eq!(check("x", "आपण आता घरी जायला हवे", "घरी चला", "mr"), Ok("घरी चला".to_string()), "a script the language table does not list");
+        assert_eq!(check("x", "आपण आता घरी जायला हवे", "Go home", "mr"), Err(Reject::Alphabet));
     }
 
     #[test]
