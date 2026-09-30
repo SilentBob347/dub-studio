@@ -6,6 +6,58 @@ release notes on GitHub are taken from the release's section.
 
 ## Unreleased — 4.0.0
 
+### Added
+
+- **An MCP server inside the studio.** An AI agent (Claude Code, Cursor, Codex and others) connects to
+  `http://127.0.0.1:8793/mcp` and drives the whole studio: makes projects of your videos, analyzes them,
+  edits the transcript and the translation line by line, casts the voices, renders, exports more
+  languages and saves the result. The Settings section **Agent (MCP)** shows whether an agent is
+  connected and gives the command for Claude Code and the config for other clients.
+- **Jobs you can stop and continue.** Every long task shows its step and has **Cancel**; a task stopped
+  by an error, a crash or closing the app is continued with **Continue** from where it stopped: the
+  finished stages and the already voiced lines are taken from the project, not made again (issue #2).
+- **Parakeet Ultra**, a fine-tuned speech recogniser with fewer errors (a download in the model
+  settings), and **Nemotron 3 Diarization**, which tells apart up to 8 speakers.
+- **A model manager.** Downloads run beside the jobs and continue after a restart; every file is checked
+  against its pinned SHA-256; the disk space is checked first; downloaded models can be removed; the
+  settings show whether the NVIDIA driver can run CUDA 13.
+- **Translation and reading the frames each by its own provider**: the studio's Gemma, a local
+  OpenAI-compatible server (Ollama, LM Studio, vLLM, llama-server) or OpenRouter with the price and the
+  context of every model. The OpenRouter key and the proxy password are kept out of the settings files.
+- **Proxy in three modes** (as in Windows, your own, none) for model downloads, the cloud and updates;
+  HTTP, HTTPS, SOCKS5 and SOCKS4, a seller's `host:port:login:password` works as it is.
+- **Settings in sections** with **About**, a screen of **all projects** with search, sorting and
+  filters, and the start form's choices kept by the studio for every window.
+- **Align imported subtitles to the speech**: a switch for SRT/ASS in the video's language; it holds a
+  frame rate drift and cut pieces.
+- **What's new** window with the release notes, and a README on six languages with every download,
+  what runs where, troubleshooting and the models' licenses.
+
+### Changed
+
+- The studio answers on the fixed port **8793**, and a second launch brings the open window forward
+  instead of starting another studio.
+- Nothing the studio starts outlives it: separation, recognition, translation and ffmpeg end with the
+  app, however it is closed.
+- Subtitle words light up by the dub's own speech in the word-by-word presets, and the dub's phrases are
+  placed where they really sound.
+- Peaks of a phrase are lowered by a look-ahead limiter instead of being clipped, and the mix is kept
+  uncompressed until the one final encoding.
+- Phrases that speech recognition invents over music and silence ("Thanks for watching", subtitle
+  credits) are hidden from the dub and the subtitles and can be brought back in the editor.
+- Punctuation stays with its word in the transcript and the subtitles ("uniform?", not "uniform ?").
+- The OpenRouter helper program is gone: the studio talks to OpenRouter itself.
+
+### Fixed
+
+- A translation that did not happen (no model, the local server down, most lines left as they were)
+  now stops the analysis with the reason instead of dubbing the video in its own language.
+- Translation on the new llama.cpp: a whole frame fits the micro-batch, and the server's log is kept in
+  `logs/llama-server.log`.
+- A short clip with two people is no longer merged into one speaker, and casting no longer splits two or
+  three people into five characters.
+- The header no longer stays on "Downloading models…" after the download finished.
+
 ## 2026-08-06 — 3.1.1
 
 ### Fixed
