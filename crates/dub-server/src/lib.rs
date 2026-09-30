@@ -500,7 +500,7 @@ async fn setup_download(State(st): State<AppState>, Json(body): Json<Value>) -> 
         let cb = |ev: Value| progress(ev);
         setup::download_components(&root, &ids, &cancel, &cb)
     });
-    let job_id = st.jobs.enqueue(job).await;
+    let job_id = st.jobs.enqueue(mcp::carry_job(job)).await;
     Json(json!({ "job_id": job_id })).into_response()
 }
 
@@ -1226,7 +1226,7 @@ async fn voices_download_pack(State(st): State<AppState>) -> Response {
         let cb = |ev: Value| progress(ev);
         record::download_pack(&dir, &cb)
     });
-    let job_id = st.jobs.enqueue(job).await;
+    let job_id = st.jobs.enqueue(mcp::carry_job(job)).await;
     Json(json!({ "job_id": job_id })).into_response()
 }
 
@@ -1575,7 +1575,7 @@ async fn analyze_project(
         save_project_atomic(&dir_for_save, &proj)?;
         Ok(json!({ "project_id": pid_for_result, "output": dir_for_save.join("project.json").to_string_lossy() }))
     });
-    let job_id = st.jobs.enqueue(job).await;
+    let job_id = st.jobs.enqueue(mcp::carry_job(job)).await;
     Json(json!({ "job_id": job_id })).into_response()
 }
 
@@ -1697,7 +1697,7 @@ async fn render_project(State(st): State<AppState>, AxPath(pid): AxPath<String>)
         }
         Ok(json!({ "output": out_for_result.to_string_lossy() }))
     });
-    let job_id = st.jobs.enqueue(job).await;
+    let job_id = st.jobs.enqueue(mcp::carry_job(job)).await;
     Json(json!({ "job_id": job_id })).into_response()
 }
 
@@ -1851,7 +1851,7 @@ async fn export_lang(
         render::run(&p, &paths, true, &cb)?;
         Ok(json!({ "output": out_res.to_string_lossy(), "project_id": new_pid_res }))
     });
-    let job_id = st.jobs.enqueue(job).await;
+    let job_id = st.jobs.enqueue(mcp::carry_job(job)).await;
     Json(json!({ "job_id": job_id, "project_id": new_pid })).into_response()
 }
 
@@ -1962,7 +1962,7 @@ async fn retranslate_project(
         save_project_atomic(&dir_for_job, &p)?;
         Ok(json!({ "project_id": pid_res, "ok": true }))
     });
-    let job_id = st.jobs.enqueue(job).await;
+    let job_id = st.jobs.enqueue(mcp::carry_job(job)).await;
     Json(json!({ "job_id": job_id, "project_id": pid })).into_response()
 }
 
@@ -2018,7 +2018,7 @@ async fn dub_audio_project(State(st): State<AppState>, AxPath(pid): AxPath<Strin
         }
         Ok(json!({ "audio": out.to_string_lossy() }))
     });
-    let job_id = st.jobs.enqueue(job).await;
+    let job_id = st.jobs.enqueue(mcp::carry_job(job)).await;
     Json(json!({ "job_id": job_id })).into_response()
 }
 

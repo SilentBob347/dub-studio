@@ -187,9 +187,26 @@ function openDialog(): Element | null {
   return dialogs.length ? dialogs[dialogs.length - 1] : null;
 }
 
+/** The mark of a field whose value the agent never reads, even while its show button reveals it to the user. */
+export const SECRET = "data-mcp-secret";
+
+/**
+ * A key or a password: the agent's answers go to its model's provider, so of such a field it learns only
+ * whether it is filled.
+ */
+function secret(element: Element): boolean {
+  return (element instanceof HTMLInputElement && element.type === "password") || element.hasAttribute(SECRET);
+}
+
+/** Draws a secret field of a copy of the page masked, as a password field is. */
+export function maskSecret(cloned: Node): void {
+  if (cloned instanceof HTMLInputElement && cloned.hasAttribute(SECRET)) cloned.setAttribute("type", "password");
+}
+
 /** A field's value, as a line of the page shows it. */
 function valueOf(element: Element): string | null {
   if (element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")) return element.checked ? "checked" : "unchecked";
+  if ((element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) && secret(element)) return element.value ? "filled" : "empty";
   if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) return JSON.stringify(element.value.slice(0, 160));
   return null;
 }
@@ -234,7 +251,7 @@ export function readPage(): string {
       } else if (element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")) {
         parts.push(element.checked ? "checked" : "unchecked");
       } else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-        if (element.value) parts.push(`value=${JSON.stringify(element.value.slice(0, 160))}`);
+        if (element.value) parts.push(secret(element) ? "filled" : `value=${JSON.stringify(element.value.slice(0, 160))}`);
         else parts.push("empty", ...(element.placeholder ? [`placeholder=${JSON.stringify(element.placeholder.slice(0, 80))}`] : []));
       }
       if (element instanceof HTMLSelectElement) {
@@ -328,7 +345,7 @@ const builtIn: Record<string, Handler> = {
     // a window that is minimised or covered draws no frames, and the copy waits for one
     if (document.visibilityState === "hidden") throw bridgeError("hidden");
     const scale = Math.min(1, (numberArg("ui_screenshot", args, "max_width") ?? 1600) / window.innerWidth);
-    const data = await domToJpeg(document.documentElement, { scale, quality: 0.9, width: window.innerWidth, height: window.innerHeight, backgroundColor: getComputedStyle(document.body).backgroundColor });
+    const data = await domToJpeg(document.documentElement, { scale, quality: 0.9, width: window.innerWidth, height: window.innerHeight, backgroundColor: getComputedStyle(document.body).backgroundColor, onCloneEachNode: maskSecret });
     return { image: data.replace(/^data:image\/jpeg;base64,/, ""), mime: "image/jpeg", text: `${window.innerWidth}x${window.innerHeight} window` };
   },
   read_page: (args) => {

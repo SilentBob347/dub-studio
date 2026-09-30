@@ -47,7 +47,7 @@ export default function OpenRouterKey({ onSaved }: { onSaved?: () => void }) {
         <span className="mono text-[10px] text-[var(--color-muted)]">{t("secrets.orHint")}</span>
       </div>
       <div className="flex gap-2">
-        <input type={show ? "text" : "password"} value={key} onChange={(e) => setKey(e.target.value)} placeholder={placeholder}
+        <input type={show ? "text" : "password"} data-mcp-secret value={key} onChange={(e) => setKey(e.target.value)} placeholder={placeholder}
           disabled={fromEnv || !settings} aria-label={t("secrets.orTitle")} autoComplete="off" spellCheck={false}
           className="flex-1 min-w-0 px-2 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] mono focus:border-[var(--color-accent)] outline-none disabled:opacity-60" />
         <button onClick={() => setShow((s) => !s)} aria-label={show ? t("secrets.hide") : t("secrets.show")} title={show ? t("secrets.hide") : t("secrets.show")}

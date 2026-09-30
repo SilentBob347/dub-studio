@@ -81,8 +81,9 @@ connected and the address to paste.
   tools for batches and for work nobody watches.
 - **The window keeps up with you.** Whatever you change with any tool, the open window reads
   again at once: the lines, the lists, the settings, a job you started (its progress shows in
-  the window, a render in its Files panel). The window's undo never erases your edits: after
-  your change its history starts again, and an undo made on an older state is refused.
+  the window, a render in its Files panel). The window's undo never erases your edits or what
+  your jobs saved, even when the user started a job of their own meanwhile: after your change
+  its history starts again, and an undo made on an older state is refused.
 
 ## Recipes
 
@@ -185,7 +186,8 @@ without it they answer that the window is not open, and everything else still wo
   its status; `studio_wait until: render` waits for it.
 - **Anything else on screen**: `ui_read_page` lists the visible controls with refs (a line
   of the transcript, a blur box, a title and a recent project each read as one line with its
-  controls and fields), `ui_click`, `ui_type`, `ui_select`, `ui_press_key` (Space plays,
+  controls and fields; a key or password field reads only as filled or empty, and is masked
+  in `ui_screenshot` too), `ui_click`, `ui_type`, `ui_select`, `ui_press_key` (Space plays,
   Ctrl+Z undoes, Ctrl+K opens the command palette), `ui_scroll`; `ui_screenshot` is a picture
   of the whole window; `ui_navigate`, `ui_open_settings`, `ui_open_help`; `ui_notify` tells
   the user something; `ui_console` shows the page's errors. The control you click is

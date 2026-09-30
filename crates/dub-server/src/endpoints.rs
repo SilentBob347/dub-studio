@@ -351,7 +351,7 @@ pub async fn remix_project(
         save_project_atomic(&dir_for_job, &p)?;
         serde_json::to_value(&p).map_err(|e| e.to_string())
     });
-    let job_id = st.jobs.enqueue(job).await;
+    let job_id = st.jobs.enqueue(crate::mcp::carry_job(job)).await;
     Json(json!({ "job_id": job_id })).into_response()
 }
 
@@ -422,7 +422,7 @@ where
         // канал: сериализуем как массив байт в Value (voркер отдаёт oneshot Result<Value>). Читаем ниже.
         Ok(Value::Array(png.into_iter().map(|b| Value::from(b as u64)).collect()))
     });
-    let (job_id, rx) = st.jobs.enqueue_awaitable(job).await;
+    let (job_id, rx) = st.jobs.enqueue_awaitable(crate::mcp::carry_job(job)).await;
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_s), rx).await {
         Ok(Ok(Ok(v))) => {
             st.jobs.remove(&job_id).await;

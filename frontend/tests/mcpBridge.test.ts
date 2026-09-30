@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { WINDOW_ID } from "../src/lib/api";
-import { PROJECT_CHANGED, SETTINGS_CHANGED, readPage, startBridge, takeArgs } from "../src/lib/mcpBridge";
+import { PROJECT_CHANGED, SETTINGS_CHANGED, maskSecret, readPage, startBridge, takeArgs } from "../src/lib/mcpBridge";
 
 /** The stream the studio opens to the page, driven by the test. */
 class FakeStream {
@@ -96,6 +96,35 @@ describe("what the agent reads of the page", () => {
     expect(lines[1]).toMatch(/button "Cancel"$/);
     const row = lines.find((line) => line.startsWith("segment s1"))!;
     expect(row).toMatch(/: e\d+ open, e\d+ Play, e\d+ textarea="Привет"$/);
+  });
+
+  it("never reads out a key or a password the user typed, even one its show button reveals", () => {
+    document.body.innerHTML = `
+      <input type="password" aria-label="OpenRouter key">
+      <input type="text" data-mcp-secret aria-label="Proxy password">
+      <input type="password" aria-label="Empty key" placeholder="sk-or-...">
+      <input type="text" aria-label="Proxy address">
+      <div data-mcp-context="row r1"><input type="password" aria-label="Row key"></div>`;
+    const [key, shown, , address] = Array.from(document.querySelectorAll("input"));
+    key.value = "sk-or-v1-secret-key";
+    shown.value = "proxy-pass-123";
+    address.value = "http://127.0.0.1:8080";
+    document.querySelector<HTMLInputElement>("[data-mcp-context] input")!.value = "sk-or-row-secret";
+    const page = readPage();
+    for (const typed of ["sk-or-v1-secret-key", "proxy-pass-123", "sk-or-row-secret"]) expect(page).not.toContain(typed);
+    expect(page).toMatch(/input password "OpenRouter key" filled/);
+    expect(page).toMatch(/input text "Proxy password" filled/);
+    expect(page).toMatch(/input password "Empty key" empty placeholder="sk-or-..."/);
+    expect(page).toContain('value="http://127.0.0.1:8080"');
+    expect(page).toMatch(/row r1: e\d+ open, e\d+ Row key=filled$/m);
+  });
+
+  it("masks a revealed secret field in the window's picture", () => {
+    document.body.innerHTML = `<input type="text" data-mcp-secret value="proxy-pass-123"><input type="text" value="visible">`;
+    const [secretField, plain] = Array.from(document.querySelectorAll("input")).map((input) => input.cloneNode() as HTMLInputElement);
+    maskSecret(secretField);
+    maskSecret(plain);
+    expect([secretField.type, plain.type]).toEqual(["password", "text"]);
   });
 
   it("refuses unknown arguments by name", () => {

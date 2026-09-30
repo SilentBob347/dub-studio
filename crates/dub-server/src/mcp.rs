@@ -23,7 +23,7 @@ use tower::ServiceExt;
 mod window;
 
 pub use window::{window_events, window_focus, window_result};
-pub(crate) use window::{carry, save_with_revision, track, REV_HEADER};
+pub(crate) use window::{carry, carry_job, save_with_revision, track, REV_HEADER};
 
 /// The studio's API router, set once the service has built it.
 static API: OnceLock<Router> = OnceLock::new();

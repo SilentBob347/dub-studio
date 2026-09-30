@@ -21,6 +21,8 @@ use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::jobs::JobFn;
+
 use super::*;
 
 /// The header the page marks every request of its window with.
@@ -197,18 +199,23 @@ pub(super) fn window_reply(id: Value, result: Value) -> Response {
 
 /// Who made the request being served, the revision the state its whole-project PUT writes was
 /// taken at, and what its save of the project did (0: no save), shared with the blocking work it
-/// hands on.
+/// hands on. A job runs in a scope of its own: its author's, marked `job`.
 #[derive(Clone)]
 struct Scope {
     actor: String,
     expected: Option<u64>,
+    job: bool,
     saved: Arc<AtomicU64>,
     conflict: Arc<AtomicBool>,
 }
 
 impl Scope {
     fn new(actor: String, expected: Option<u64>) -> Self {
-        Scope { actor, expected, saved: Arc::new(AtomicU64::new(0)), conflict: Arc::new(AtomicBool::new(false)) }
+        Scope { actor, expected, job: false, saved: Arc::new(AtomicU64::new(0)), conflict: Arc::new(AtomicBool::new(false)) }
+    }
+
+    fn of_job(actor: String) -> Self {
+        Scope { job: true, ..Scope::new(actor, None) }
     }
 }
 
@@ -255,12 +262,6 @@ fn revision(pid: &str) -> u64 {
     revisions().get(pid).map(|saves| saves.rev).unwrap_or(0)
 }
 
-/// Who started the last job of each project: a job's own saves are theirs.
-fn job_owners() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
-    static OWNERS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    OWNERS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// Work a request hands to a blocking thread, run in the request's scope there: a save it makes is
 /// the request's author's, not a job's.
 pub(crate) fn carry<T>(work: impl FnOnce() -> T + Send + 'static) -> impl FnOnce() -> T + Send + 'static {
@@ -271,17 +272,21 @@ pub(crate) fn carry<T>(work: impl FnOnce() -> T + Send + 'static) -> impl FnOnce
     }
 }
 
+/// A job, taken when a request queues it and run as that request author's job: its saves are
+/// theirs, marked `job`, whoever queued the project's next job before it ran. Every
+/// `jobs.enqueue` of a route goes through it.
+pub(crate) fn carry_job(job: JobFn) -> JobFn {
+    let actor = REQUEST.try_with(|scope| scope.actor.clone()).unwrap_or_else(|_| "studio".into());
+    Box::new(move |progress| REQUEST.sync_scope(Scope::of_job(actor), move || job(progress)))
+}
+
 /// Writes a project through `write` as its next revision and tells the windows who saved it: the
-/// window or agent whose request is being served, or - for a job's own save outside any request -
-/// whoever started the project's last job (`studio` when nobody is known), marked `job`. A
-/// whole-project PUT whose state was taken before someone else's save is refused before anything
-/// is written.
+/// window or agent whose request or job is being served (`studio` outside both; a job's save marked
+/// `job`). A whole-project PUT whose state was taken before someone else's save is refused before
+/// anything is written.
 pub(crate) fn save_with_revision(dir: &Path, write: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     let pid = dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let (actor, expected, job) = match REQUEST.try_with(|scope| (scope.actor.clone(), scope.expected)) {
-        Ok((actor, expected)) => (actor, expected, false),
-        Err(_) => (job_owners().get(&pid).cloned().unwrap_or_else(|| "studio".into()), None, true),
-    };
+    let (actor, expected, job) = REQUEST.try_with(|scope| (scope.actor.clone(), scope.expected, scope.job)).unwrap_or_else(|_| ("studio".into(), None, false));
     let rev = {
         let mut revisions = revisions();
         let saves = revisions.entry(pid.clone()).or_default();
@@ -384,9 +389,6 @@ async fn announce_route(method: &Method, path: &str, pid: Option<&str>, actor: &
     match answer.as_ref().and_then(|answer| answer.get("job_id")).and_then(Value::as_str) {
         Some(job_id) => {
             let made = answer.as_ref().and_then(|answer| answer.get("project_id")).cloned().unwrap_or(Value::Null);
-            for project in [pid, made.as_str()].into_iter().flatten() {
-                job_owners().insert(project.to_string(), actor.to_string());
-            }
             tell_windows(json!({ "changed": "jobs", "job_id": job_id, "kind": kind, "pid": pid, "project_id": made, "by": actor }));
             if made.is_string() && made.as_str() != pid {
                 tell_windows(json!({ "changed": "projects", "pid": made, "by": actor }));
@@ -425,7 +427,7 @@ pub(super) fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ui_read_page",
-            description: "Every visible control of the window, one per line: its ref (e12), kind, label, value and on/off. A row of a list reads as one line with its controls - `segment s12 0:14.2→0:17.0 SPK 1: ...: e40 open, e41 Play this line, e45 Translation=\"...\"` - and an open dialog (a confirmation, the settings) is listed first. Refs are what ui_click, ui_type and ui_select take; read the page again after it changes.",
+            description: "Every visible control of the window, one per line: its ref (e12), kind, label, value and on/off. A row of a list reads as one line with its controls - `segment s12 0:14.2→0:17.0 SPK 1: ...: e40 open, e41 Play this line, e45 Translation=\"...\"` - and an open dialog (a confirmation, the settings) is listed first. A key or password field reads only as filled or empty. Refs are what ui_click, ui_type and ui_select take; read the page again after it changes.",
             schema: nothing,
             call: |args| window("read_page", args, 15),
         },
@@ -927,15 +929,85 @@ mod tests {
         };
         assert!(voices["pid"].is_null());
 
-        let dir = folder.path().join("jobtest1");
-        std::fs::create_dir_all(&dir).unwrap();
-        save_with_revision(&dir, || Ok(())).unwrap();
-        let saved = next_about(&mut page, "jobtest1").await;
-        assert_eq!((saved["by"].as_str(), saved["job"].as_bool()), (Some("agent"), Some(true)), "the job's save is the agent's who started it");
         let nobody = folder.path().join("jobtest2");
         std::fs::create_dir_all(&nobody).unwrap();
         save_with_revision(&nobody, || Ok(())).unwrap();
-        assert_eq!(next_about(&mut page, "jobtest2").await["by"], "studio");
+        let studio = next_about(&mut page, "jobtest2").await;
+        assert_eq!((studio["by"].as_str(), studio["job"].as_bool()), (Some("studio"), Some(false)), "a save outside any request and any job is the studio's");
+    }
+
+    #[tokio::test]
+    async fn a_job_s_save_is_its_author_s_whoever_queued_the_next_job_of_the_project() {
+        use axum::extract::Path as Segment;
+        use axum::routing::post;
+        let folder = tempfile::tempdir().unwrap();
+        let workspace = folder.path().to_path_buf();
+        let queue = crate::jobs::JobQueue::new();
+        // the first job waits until the test lets it save: the window queues its own job meanwhile
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Arc::new(Mutex::new(Some(gate)));
+        let router = Router::new()
+            .route(
+                "/projects/{pid}/render",
+                post(move |Segment(pid): Segment<String>| {
+                    let (queue, dir, gate) = (queue.clone(), workspace.join(pid), gate.clone());
+                    async move {
+                        std::fs::create_dir_all(&dir).unwrap();
+                        let wait = gate.lock().unwrap().take();
+                        let job: JobFn = Box::new(move |_progress| {
+                            if let Some(gate) = wait {
+                                gate.recv().unwrap();
+                            }
+                            save_with_revision(&dir, || Ok(())).map(|()| Value::Null)
+                        });
+                        Json(json!({ "job_id": queue.enqueue(carry_job(job)).await }))
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn(track));
+        let mut page = bridge().commands.subscribe();
+        send(&router, Method::POST, "/projects/jobtest3/render", &[(AGENT_HEADER, "1")]).await;
+        send(&router, Method::POST, "/projects/jobtest3/render", &[(WINDOW_HEADER, "tab-3")]).await;
+        release.send(()).unwrap();
+        let mut saves = Vec::new();
+        while saves.len() < 2 {
+            let message = next_about(&mut page, "jobtest3").await;
+            if message["changed"] == "project" {
+                saves.push((message["by"].as_str().unwrap().to_string(), message["job"].as_bool(), message["rev"].as_u64()));
+            }
+        }
+        assert_eq!(saves[0], ("agent".to_string(), Some(true), Some(1)), "the agent's job saves as the agent's, though the window queued a job before it ran");
+        assert_eq!(saves[1], ("window:tab-3".to_string(), Some(true), Some(2)));
+    }
+
+    #[test]
+    fn every_job_a_route_queues_carries_its_author() {
+        fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") && path.file_name().is_some_and(|name| name != "jobs.rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        let mut queued = 0;
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for (number, line) in text.lines().enumerate().filter(|(_, line)| !line.trim_start().starts_with("//")) {
+                for call in [concat!(".", "enqueue("), concat!(".", "enqueue_awaitable(")] {
+                    for (at, _) in line.match_indices(call) {
+                        let argument = line[at + call.len()..].trim_start();
+                        assert!(argument.split('(').next().is_some_and(|callee| callee.ends_with("carry_job")), "{}:{} queues a job without carry_job: {}", file.display(), number + 1, line.trim());
+                        queued += 1;
+                    }
+                }
+            }
+        }
+        assert!(queued >= 9, "the routes' jobs were found ({queued})");
     }
 
     #[tokio::test]

@@ -59,7 +59,7 @@ export default function ProxySection() {
         <button onClick={test} disabled={testing || !url.trim()} className="px-3 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] hover:border-[var(--color-accent)] disabled:opacity-40">{testing ? "…" : t("secrets.proxyTest")}</button>
       </div>
       <div className="flex gap-2">
-        <input type={show ? "text" : "password"} value={password} disabled={!loaded} onChange={(e) => setPassword(e.target.value)}
+        <input type={show ? "text" : "password"} data-mcp-secret value={password} disabled={!loaded} onChange={(e) => setPassword(e.target.value)}
           onBlur={() => { if (on && url.trim() && password.trim()) save(true); }}
           placeholder={passwordSet ? t("secrets.proxyPasswordSaved") : t("secrets.proxyPasswordPlaceholder")} aria-label={t("secrets.proxyPassword")}
           autoComplete="new-password" className={fieldCls} />
