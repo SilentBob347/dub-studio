@@ -133,6 +133,19 @@ pub struct ChatClient {
     title: Option<String>,
 }
 
+/// Текст ошибки reqwest вместе с цепочкой причин: верхний уровень («error sending request») не
+/// говорит, что именно сломалось (отказ соединения, сброс, таймаут).
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut src = e.source();
+    while let Some(s) = src {
+        out.push_str(": ");
+        out.push_str(&s.to_string());
+        src = s.source();
+    }
+    out
+}
+
 impl ChatClient {
     pub fn new(base_url: impl Into<String>) -> Result<Self, LlmError> {
         let http = reqwest::blocking::Client::builder()
@@ -237,7 +250,7 @@ impl ChatClient {
                     }
                     last_err = format!("{status}: {text}");
                 }
-                Err(e) => last_err = e.to_string(),
+                Err(e) => last_err = error_chain(&e),
             }
             if attempt < self.retries {
                 std::thread::sleep(Duration::from_millis(500 * (attempt as u64 + 1)));

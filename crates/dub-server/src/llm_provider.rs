@@ -74,11 +74,17 @@ pub fn open(o: &LlmOpen, mode: LlmMode) -> Result<LlmProvider, String> {
         return Err(format!("GGUF Gemma не найден ({})", o.mt_model.display()));
     }
     let mut opts = ServerOpts::new(o.llama_bin, o.mt_model)
-        .with_ubatch(crate::models::sel_num(o.models_root, "llama_ubatch").map(|f| f as u32));
+        .with_ubatch(crate::models::sel_num(o.models_root, "llama_ubatch").map(|f| f as u32))
+        .with_log_file(llama_log_path(o.models_root));
     if mode == LlmMode::Vision && o.mmproj.is_file() {
         opts = opts.with_mmproj(o.mmproj);
     }
     let server = LlamaServer::start(&opts).map_err(|e| format!("llama-server: {e}"))?;
     let client = ChatClient::new(server.base_url()).map_err(|e| format!("клиент чата: {e}"))?;
     Ok(LlmProvider::Local { _server: server, client })
+}
+
+/// Лог llama-server рядом с данными приложения: <корень>/logs/llama-server.log (models_root = <корень>/models).
+pub fn llama_log_path(models_root: &Path) -> std::path::PathBuf {
+    models_root.parent().unwrap_or(models_root).join("logs").join("llama-server.log")
 }
