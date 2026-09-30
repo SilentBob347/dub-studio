@@ -7,6 +7,7 @@
 //! раунды; их карта в docs/PORT-CONTRACT.md.
 
 mod analyze;
+mod asr_filter;
 mod bench;
 mod casting;
 mod casting_library;
@@ -14,6 +15,7 @@ mod cloud_asr;
 mod cloud_tts;
 mod cloud_voices;
 mod compose;
+mod dub_timing;
 mod endpoints;
 mod llm_provider;
 mod openrouter_cli;
@@ -22,6 +24,7 @@ mod frame;
 mod hw;
 mod presets;
 mod jobs;
+mod limiter;
 mod media;
 mod models;
 mod ocr;
@@ -30,6 +33,7 @@ mod record;
 mod render;
 mod setup;
 mod spa;
+mod subalign;
 mod subimport;
 mod translate;
 mod voice_slots;
@@ -93,6 +97,7 @@ pub fn verify_captions_e2e(
         casting_ref: String::new(),
         content_type: String::new(),
         import_translated: false,
+        align_subs: false,
     };
     let sel = models::load_selection(&mroot);
     let (mt_model, mmproj) = models::resolve_mt(&mroot, &sel);
@@ -1485,6 +1490,8 @@ async fn analyze_project(
         content_type: qget("content_type", "auto"),
         // «сабы уже на языке перевода» — эффективно только если сабы реально импортированы.
         import_translated: import_subs.is_some() && qget("import_translated", "0") == "1",
+        // выровнять тайминги импортированных субтитров по речи (полный прогон ASR ради слов).
+        align_subs: import_subs.is_some() && qget("align_subs", "0") == "1",
     };
     // Активный вариант модели резолвится ПРИ КАЖДОЙ джобе (не морозится на старте): скачал/выбрал
     // квант -> применяется без рестарта. См. models::resolve_*.
@@ -1680,10 +1687,13 @@ fn clone_project_for_relang(src: &Path, dst: &Path) -> Result<(), String> {
             || name == "captioned.mp4"
             || name.starts_with("_preview")
             || name == "_original.png"
-            || name == "new_audio.m4a"
-            || name == "final_audio.m4a"
             || name == "dub_audio.m4a"
-            || name == "dub_fit.wav";
+            || name == "dub_fit.wav"
+            || name == "dub_timing.json"
+            || name == "dub_words.json"
+            || ["new_audio", "final_audio", "gained_audio", "orig_ducked"]
+                .iter()
+                .any(|stem| name == format!("{stem}.wav") || name == format!("{stem}.m4a"));
         if !skip {
             std::fs::copy(&p, dst.join(&name)).map_err(|e| format!("copy {name}: {e}"))?;
         }

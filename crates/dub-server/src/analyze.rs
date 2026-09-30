@@ -279,6 +279,8 @@ pub struct AnalyzeArgs {
                               // рисованных лиц + CCIP). Пусто = "real". Аниме-путь ловит мульт/аниме лица.
     pub import_translated: bool, // импортированные субтитры УЖЕ на языке перевода -> MT/vision пропустить,
                                  // tgt = импортированный текст, Даб Студио только озвучивает. Работает лишь с import_subs.
+    pub align_subs: bool, // выровнять тайминги импортированных субтитров по распознанной речи (subalign):
+                          // полный прогон ASR ради слов; только для субтитров на языке речи.
 }
 
 /// Пути к моделям/входу для одной джобы analyze.
@@ -426,7 +428,7 @@ fn win_target_sec() -> f64 {
 
 const EXTRACT_VER: &str = "extract-16kmono-v1";
 const DIAR_VER: &str = "sortformer-4spk-v2 · merge_gap=0.8 · min_spk=2.5";
-const ASR_VER: &str = "asr-v1";
+const ASR_VER: &str = "asr-v2-hallucination-filter";
 const TRANSLATE_VER: &str = "gemma-ctx-v1";
 const OCR_VER: &str = "ppocr-onnx-v1";
 
@@ -461,6 +463,58 @@ impl WindowPlan {
     }
 }
 
+/// Выровнять импортированные реплики по распознанной речи (subalign). None — выравнивание не
+/// применяется (субтитры на языке перевода, речь не распознана или текст не совпал с речью); причина
+/// уходит в журнал, тайминги файла остаются.
+fn align_cues(
+    args: &AnalyzeArgs,
+    paths: &AnalyzePaths,
+    asr_wav: &std::path::Path,
+    cues: &[crate::subimport::Cue],
+    progress: &Progress,
+) -> Result<Option<crate::subalign::Alignment>, String> {
+    if args.import_translated {
+        emit(progress, "asr", "выравнивание по речи пропущено: субтитры на языке перевода, речь — на языке оригинала");
+        return Ok(None);
+    }
+    emit(progress, "asr", "выравнивание субтитров по речи: распознавание слов");
+    std::env::set_var("DUB_ASR_BACKEND", crate::models::stage_backend(&paths.models_root, "asr_backend"));
+    let mut asr = crate::models::build_engine(&paths.asr);
+    let words: Vec<crate::subalign::Heard> = asr
+        .transcribe(asr_wav, &args.src_lang)
+        .map_err(|e| format!("выравнивание субтитров: распознавание речи: {e}"))?
+        .into_iter()
+        .flat_map(|s| s.words)
+        .map(|w| (w.word, w.start, w.end))
+        .collect();
+    let refs: Vec<(f64, f64, &str)> = cues.iter().map(|c| (c.start, c.end, c.text.as_str())).collect();
+    let Some(a) = crate::subalign::align(&refs, &words) else {
+        emit(progress, "asr", "выравнивание по речи: речь не распознана — тайминги файла оставлены");
+        return Ok(None);
+    };
+    let pct = (a.share * 100.0).round();
+    if a.share < crate::subalign::MIN_ALIGNED_SHARE {
+        emit(progress, "asr", &format!(
+            "субтитры не совпали с речью (сопоставлено {pct}% реплик) — тайминги файла оставлены"
+        ));
+        return Ok(None);
+    }
+    emit(progress, "asr", &format!(
+        "субтитры выровнены по речи: {pct}% реплик по словам, остальные сдвинуты вместе с соседями; сдвиг файла {:+.2} с",
+        a.offset
+    ));
+    Ok(Some(a))
+}
+
+/// «a», «b», … — до 5 фраз для журнала.
+fn quote_list(items: &[String]) -> String {
+    let mut parts: Vec<String> = items.iter().take(5).map(|t| format!("«{}»", t.chars().take(60).collect::<String>())).collect();
+    if items.len() > 5 {
+        parts.push(format!("ещё {}", items.len() - 5));
+    }
+    parts.join(", ")
+}
+
 /// Слить короткие огрызки ОДНОГО спикера в одну фразу (#115). Whisper дробит предложение на «If» +
 /// «they find you.» — каждый огрызок озвучивается отдельно и звучит рвано. Клеим сосед в предыдущий,
 /// если: тот же спикер, зазор < 0.35с, хотя бы один из двух короткий (<1.6с), суммарно ≤12с и <200 симв.
@@ -481,6 +535,13 @@ fn merge_short_turns(segs: &mut Vec<Segment>) {
     let mut out: Vec<Segment> = Vec::with_capacity(src.len());
     for s in src {
         if let Some(last) = out.last_mut() {
+            // Помеченные фильтром галлюцинаций реплики не склеиваем: флаг и hidden остаются на своём
+            // интервале, пользователь видит и возвращает ровно её.
+            let flagged = |x: &Segment| x.extra.contains_key("asr_flag");
+            if flagged(last) || flagged(&s) {
+                out.push(s);
+                continue;
+            }
             let same_spk = last.speaker == s.speaker;
             let gap = s.start - last.end;
             let short = (last.end - last.start) < SHORT || (s.end - s.start) < SHORT;
@@ -669,11 +730,31 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         if cues.is_empty() {
             return Err(format!("субтитры не распознаны/пусты: {}", subs_path.display()));
         }
+        let aligned = if args.align_subs {
+            bench.stage("subalign");
+            align_cues(args, paths, &asr_wav, &cues, progress)?
+        } else {
+            None
+        };
         let turns: &[dub_asr::Turn] = diar.as_ref().map(|d| d.turns.as_slice()).unwrap_or(&[]);
         let segs: Vec<Segment> = cues
             .into_iter()
             .enumerate()
             .map(|(i, c)| {
+                let mut extra = serde_json::Map::new();
+                let (start, end) = match aligned.as_ref().map(|a| &a.cues[i]) {
+                    Some(p) => {
+                        let how = match p.how {
+                            crate::subalign::How::Aligned => "asr_aligned",
+                            crate::subalign::How::Shifted => "asr_shifted",
+                        };
+                        extra.insert("timing".into(), Value::String(how.into()));
+                        extra.insert("cue_start".into(), json!(c.start));
+                        extra.insert("cue_end".into(), json!(c.end));
+                        (p.start, p.end)
+                    }
+                    None => (c.start, c.end),
+                };
                 // Сабы УЖЕ на языке перевода -> текст в tgt (озвучка читает tgt), src пустой (оригинал не
                 // транскрибировали). Иначе (сабы на языке оригинала) -> текст в src, перевод заполнит tgt.
                 let (src_text, tgt_text) = if args.import_translated {
@@ -683,15 +764,15 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
                 };
                 Segment {
                     id: format!("s{i}"),
-                    start: c.start,
-                    end: c.end,
-                    speaker: Some(speaker_for(c.start, c.end, turns)),
+                    start,
+                    end,
+                    speaker: Some(speaker_for(start, end, turns)),
                     src_text,
                     tgt_text,
                     voice: None,
                     dirty: false,
                     ckpt: None,
-                    extra: Default::default(),
+                    extra,
                 }
             })
             .collect();
@@ -774,6 +855,35 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         (segs, nsp)
     };
 
+    // Галлюцинации ASR (титры субтитровщиков, «Продолжение следует», звуки в скобках): текстовое правило
+    // находит кандидатов, голос на интервале решает «скрыть» или «только пометить». Импорт субтитров —
+    // текст пользователя, его не трогаем.
+    if paths.import_subs.is_none() {
+        let rules = match (&paths.asr, crate::models::openrouter_asr_on(&paths.models_root)) {
+            (crate::models::AsrChoice::Whisper { .. }, false) => dub_asr::HallucinationRules::Whisper,
+            _ => dub_asr::HallucinationRules::CaseAware,
+        };
+        let clean = (asr_wav != vocals16).then_some(asr_wav.as_path());
+        let turns: &[dub_asr::Turn] = diar.as_ref().map(|d| d.turns.as_slice()).unwrap_or(&[]);
+        let evidence = crate::asr_filter::VoiceEvidence::build(clean, turns)
+            .map_err(|e| format!("фильтр галлюцинаций ASR: {e}"))?;
+        let report = crate::asr_filter::apply(&mut segments, rules, &evidence);
+        if !report.hidden.is_empty() {
+            emit(progress, "asr", &format!(
+                "скрыто фраз-галлюцинаций ASR (голоса нет): {} — {}",
+                report.hidden.len(),
+                quote_list(&report.hidden)
+            ));
+        }
+        if !report.voiced.is_empty() {
+            emit(progress, "asr", &format!(
+                "похожи на галлюцинацию, но голос есть — оставлены с пометкой: {} — {}",
+                report.voiced.len(),
+                quote_list(&report.voiced)
+            ));
+        }
+    }
+
     // Слияние коротких огрызков (#115): whisper режет «If they find you» на «If» + «they find you.» —
     // каждый огрызок TTS-ится отдельно и звучит рвано. Клеим near-continuous короткие реплики ОДНОГО
     // спикера в одну фразу (не для import_subs — там реплики уже цельные из сабов).
@@ -805,7 +915,11 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
 
     // Param-хэш ASR в cache.json. Вход = отпечаток источника + движок ASR + src_lang + режим импорта
     // (import_subs подменяет ASR субтитрами). Durable-выход — segments в project.json (файловых нет).
-    let import_tag = if paths.import_subs.is_some() { "import" } else { "asr" };
+    let import_tag = match (paths.import_subs.is_some(), args.align_subs) {
+        (true, true) => "import-aligned",
+        (true, false) => "import",
+        (false, _) => "asr",
+    };
     let asr_key = cache::hash_stage(&[ASR_VER, &src_hash, paths.asr.describe().as_str(), &args.src_lang, import_tag]);
     cache.write_stage(&paths.work_dir, "asr", &asr_key, &[]);
 
@@ -827,12 +941,13 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     // auto -> nodub гейт (порт pipeline.py:124-129): режим auto дублирует ТОЛЬКО при реальной речи;
     // музыкальный/иноязычный клип (пустой транскрипт ИЛИ галлюцинация-повтор) -> nodub (оставить
     // оригинальную дорожку, локализовать лишь экранный текст). Пустые сегменты -> тоже nodub.
-    if args.mode == "auto" && (segments.is_empty() || !has_speech(&segments, meta.duration)) {
+    let audible: Vec<Segment> = segments.iter().filter(|s| !crate::asr_filter::is_hidden(s)).cloned().collect();
+    if args.mode == "auto" && (audible.is_empty() || !has_speech(&audible, meta.duration)) {
         mode = "nodub".to_string();
         emit(
             progress,
             "asr",
-            if segments.is_empty() {
+            if audible.is_empty() {
                 "нет речевых сегментов; оставляю оригинальную дорожку (nodub)"
             } else {
                 "auto: нет дубляж-годной речи -> NODUB (оригинал + локализация экранного текста)"
