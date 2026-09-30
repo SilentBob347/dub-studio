@@ -110,9 +110,9 @@ Qué cambió y cuándo está en [CHANGELOG.md](CHANGELOG.md), y el botón de des
 
 ## Todo lo que descarga la app
 
-El panel de primer arranque descarga todo esto con un botón. Detrás de un proxy, o donde Hugging Face está bloqueado, configura un proxy (Ajustes, **Proxy** al final de los ajustes de modelos; HTTP, HTTPS o SOCKS5 con su esquema, por ejemplo `socks5://host:port`) o descarga los archivos a mano y colócalos donde indica la última columna, contando desde la carpeta de la app (la que contiene `models\`).
+El panel de primer arranque descarga todo esto con un botón. Detrás de un proxy, o donde Hugging Face está bloqueado, configura un proxy (Ajustes, **Proxy** al final de los ajustes de modelos; HTTP, HTTPS o SOCKS5 con su esquema, por ejemplo `socks5://host:port`) o descarga los archivos a mano y colócalos donde indica la última columna, contando desde la carpeta de la app (la que contiene `models\`). Los archivos comprimidos (`.zip`, `.whl`) se descomprimen allí, de modo que los archivos queden en las rutas indicadas.
 
-Un archivo en el lugar indicado cuyo tamaño difiera menos de un 3 % del indicado cuenta como instalado y no se vuelve a descargar. **Importar desde carpeta** (en el panel de primer arranque y en los ajustes de modelos) copia esos archivos desde cualquier carpeta que elijas. Los tamaños son los del propio manifiesto de la app, `crates/dub-server/src/setup.rs`, y esta tabla se comprueba contra él.
+Un archivo en el lugar indicado cuyo tamaño difiera menos de un 3 % del indicado cuenta como instalado y no se vuelve a descargar. **Importar desde carpeta** (en el panel de primer arranque y en los ajustes de modelos) busca archivos por nombre en la carpeta que elijas y copia solo los que la app comprueba, es decir, los archivos principales de pesos. No trae el resto de los archivos de un componente ni descomprime archivos zip y wheel, así que en una instalación manual coloca tú mismo todos los archivos de la fila. Los tamaños son los del propio manifiesto de la app, `crates/dub-server/src/setup.rs`, y esta tabla se comprueba contra él.
 
 El runtime de Visual C++ y los modelos PP-OCR vienen dentro de la versión y no se descargan; el controlador NVIDIA se instala aparte.
 
@@ -173,7 +173,7 @@ Sin NVIDIA, la voz, la traducción, la visión y el reconocimiento pueden ir a l
 
 **El instalador se detiene en WebView2.** La ventana de la app funciona sobre Microsoft Edge WebView2, y el instalador lo descarga cuando Windows no lo tiene. Con una conexión bloqueada o inestable, o en versiones de Windows 10 que rechazan el pequeño instalador de Microsoft (error 0x80040902), esa descarga falla. Instala WebView2 con el instalador independiente de Microsoft, [Evergreen Standalone x64](https://go.microsoft.com/fwlink/p/?LinkId=2124701), y ejecuta de nuevo el instalador de Dub Studio.
 
-**Las descargas se atascan o fallan.** Los archivos grandes se reanudan donde quedaron, así que pulsa el botón otra vez. Si Hugging Face o GitHub están bloqueados para ti, configura un proxy (véase *Todo lo que descarga la app*) o descarga los archivos a mano desde la tabla y usa **Importar desde carpeta**.
+**Las descargas se atascan o fallan.** Los archivos grandes se reanudan donde quedaron, así que pulsa el botón otra vez. Si Hugging Face o GitHub están bloqueados para ti, configura un proxy (véase *Todo lo que descarga la app*) o descarga los archivos a mano desde la tabla y colócalos donde indica la última columna (descomprime allí los archivos comprimidos).
 
 **La exportación se detiene con `Unrecognized option 'filter_complex_script'`.** Era un fallo con ffmpeg 8 y posteriores, corregido en la 3.1.1: actualiza la app. La app usa el ffmpeg de `tools\ffmpeg` y, si no hay ninguno, acepta el que encuentre en el `PATH`. Al informar de un error de exportación, adjunta la salida completa de ffmpeg del registro.
 

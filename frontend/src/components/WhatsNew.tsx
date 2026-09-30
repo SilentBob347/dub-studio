@@ -14,11 +14,11 @@ const NEWS = newsData as NewsItem[];
 const SEEN_KEY = "dub-seen-news";
 
 function readSeen(): string | null {
-  try { return localStorage.getItem(SEEN_KEY); } catch { return null; }
+  return localStorage.getItem(SEEN_KEY);
 }
 
 function writeSeen(id: string): void {
-  try { localStorage.setItem(SEEN_KEY, id); } catch { return; }
+  localStorage.setItem(SEEN_KEY, id);
 }
 
 function parseChangelog(raw: string): ChangelogRelease[] {

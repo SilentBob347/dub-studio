@@ -110,9 +110,9 @@ O que mudou e quando está em [CHANGELOG.md](CHANGELOG.md), e o botão de brilho
 
 ## Tudo o que o app baixa
 
-O painel de primeiro uso baixa tudo isso com um botão. Atrás de um proxy, ou onde o Hugging Face está bloqueado, configure um proxy (Configurações, **Proxy** no fim das configurações de modelos; HTTP, HTTPS ou SOCKS5 com o esquema, por exemplo `socks5://host:port`) ou baixe os arquivos você mesmo e coloque-os onde diz a última coluna, contando a partir da pasta do app (a que contém `models\`).
+O painel de primeiro uso baixa tudo isso com um botão. Atrás de um proxy, ou onde o Hugging Face está bloqueado, configure um proxy (Configurações, **Proxy** no fim das configurações de modelos; HTTP, HTTPS ou SOCKS5 com o esquema, por exemplo `socks5://host:port`) ou baixe os arquivos você mesmo e coloque-os onde diz a última coluna, contando a partir da pasta do app (a que contém `models\`). Arquivos compactados (`.zip`, `.whl`) são extraídos ali, para que os arquivos fiquem nos caminhos indicados.
 
-Um arquivo no lugar indicado, com tamanho até 3 % diferente do indicado, conta como instalado e não é baixado de novo. **Importar da pasta** (no painel de primeiro uso e nas configurações de modelos) copia esses arquivos de qualquer pasta que você escolher. Os tamanhos são os do próprio manifesto do app, `crates/dub-server/src/setup.rs`, e esta tabela é conferida com ele.
+Um arquivo no lugar indicado, com tamanho até 3 % diferente do indicado, conta como instalado e não é baixado de novo. **Importar da pasta** (no painel de primeiro uso e nas configurações de modelos) procura arquivos pelo nome na pasta escolhida e copia apenas os que o app verifica, ou seja, os arquivos principais de pesos. Ela não traz os demais arquivos de um componente nem extrai arquivos zip e wheel; por isso, numa instalação manual, coloque você mesmo todos os arquivos da linha. Os tamanhos são os do próprio manifesto do app, `crates/dub-server/src/setup.rs`, e esta tabela é conferida com ele.
 
 O runtime do Visual C++ e os modelos PP-OCR vêm dentro da versão e não são baixados; o driver NVIDIA é instalado à parte.
 
@@ -173,7 +173,7 @@ Sem NVIDIA, a voz, a tradução, a visão e o reconhecimento podem ir para a nuv
 
 **O instalador para no WebView2.** A janela do app roda sobre o Microsoft Edge WebView2, e o instalador o baixa quando o Windows não o tem. Com uma conexão bloqueada ou instável, ou em versões do Windows 10 que recusam o pequeno inicializador da Microsoft (erro 0x80040902), esse download falha. Instale o WebView2 com o instalador independente da Microsoft, [Evergreen Standalone x64](https://go.microsoft.com/fwlink/p/?LinkId=2124701), e execute o instalador do Dub Studio de novo.
 
-**Os downloads travam ou falham.** Arquivos grandes retomam de onde pararam, então aperte o botão outra vez. Se o Hugging Face ou o GitHub estiverem bloqueados para você, configure um proxy (veja *Tudo o que o app baixa*) ou baixe os arquivos à mão pela tabela e use **Importar da pasta**.
+**Os downloads travam ou falham.** Arquivos grandes retomam de onde pararam, então aperte o botão outra vez. Se o Hugging Face ou o GitHub estiverem bloqueados para você, configure um proxy (veja *Tudo o que o app baixa*) ou baixe os arquivos à mão pela tabela e coloque-os onde diz a última coluna (extraia ali os arquivos compactados).
 
 **A exportação para com `Unrecognized option 'filter_complex_script'`.** Era uma falha no ffmpeg 8 e mais novos, corrigida na 3.1.1: atualize o app. O app usa o ffmpeg de `tools\ffmpeg` e, se não houver nenhum, aceita o que estiver no `PATH`. Ao relatar um erro de exportação, anexe a saída completa do ffmpeg que está no log.
 

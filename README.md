@@ -110,9 +110,9 @@ What changed and when is in [CHANGELOG.md](CHANGELOG.md), and the sparkles butto
 
 ## Everything the app downloads
 
-The first-run panel fetches all of this with one button. Behind a proxy, or where Hugging Face is blocked, either set a proxy (Settings, **Proxy** at the end of the model settings; HTTP, HTTPS or SOCKS5 with its scheme, for example `socks5://host:port`), or download the files yourself and put them where the last column says, counted from the app folder (the one that holds `models\`).
+The first-run panel fetches all of this with one button. Behind a proxy, or where Hugging Face is blocked, either set a proxy (Settings, **Proxy** at the end of the model settings; HTTP, HTTPS or SOCKS5 with its scheme, for example `socks5://host:port`), or download the files yourself and put them where the last column says, counted from the app folder (the one that holds `models\`). Archives (`.zip`, `.whl`) are unpacked there, so that the files end up at the listed paths.
 
-A file in the listed place whose size is within 3 % of the listed one counts as installed and is not downloaded again. **Import from folder** (in the first-run panel and in the model settings) copies such files from any folder you choose. Sizes are those of the app's own manifest, `crates/dub-server/src/setup.rs`, and this table is checked against it.
+A file in the listed place whose size is within 3 % of the listed one counts as installed and is not downloaded again. **Import from folder** (in the first-run panel and in the model settings) finds files by name in the folder you choose and copies only the files the app checks for, the main weight files. It does not bring over the other files of a component and does not unpack zip and wheel archives, so for a manual install put every file of the row in place yourself. Sizes are those of the app's own manifest, `crates/dub-server/src/setup.rs`, and this table is checked against it.
 
 The Visual C++ runtime and the PP-OCR models come inside the release and are not downloaded; the NVIDIA driver is installed on its own.
 
@@ -173,7 +173,7 @@ With no NVIDIA, voice, translation, vision and recognition can go to the cloud a
 
 **The installer stops on WebView2.** The window of the app runs on Microsoft Edge WebView2, and the installer fetches it when Windows lacks it. On a blocked or unsteady connection, or on Windows 10 builds that refuse Microsoft's small bootstrapper (error 0x80040902), that fetch fails. Install WebView2 from Microsoft's standalone installer, [Evergreen Standalone x64](https://go.microsoft.com/fwlink/p/?LinkId=2124701), then run the installer of Dub Studio again.
 
-**Downloads stall or fail.** Large files resume from where they stopped, so press the button again. If Hugging Face or GitHub is blocked for you, set a proxy (see *Everything the app downloads*) or download the files by hand from the table and use **Import from folder**.
+**Downloads stall or fail.** Large files resume from where they stopped, so press the button again. If Hugging Face or GitHub is blocked for you, set a proxy (see *Everything the app downloads*) or download the files by hand from the table and put them where the last column says (unpack the archives there).
 
 **Export stops with `Unrecognized option 'filter_complex_script'`.** That was a failure on ffmpeg 8 and newer, fixed in 3.1.1: update the app. The app uses the ffmpeg in `tools\ffmpeg`, and when there is none it accepts one that is on the `PATH`. When you report an export error, attach the complete ffmpeg output from the log.
 
