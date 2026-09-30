@@ -1288,7 +1288,7 @@ pub fn setup_status(repo_root: &Path) -> SetupStatus {
     // TTS идёт через облако (флаг + ключ), её локальную модель качать НЕ обязательно — не гейтит ready и не
     // преселектится на первом запуске (юзер выбрал облако -> не тянет ненужные гигабайты Gemma/Higgs).
     let mroot = repo_root.join("models");
-    let cloud_llm = crate::models::openrouter_stage_on(&mroot, "llm");
+    let cloud_llm = !crate::models::local_gemma_needed(&mroot);
     let cloud_tts = crate::models::openrouter_stage_on(&mroot, "tts");
     let cloud_asr = crate::models::openrouter_asr_on(&mroot);
     for c in comps.iter_mut() {
@@ -1711,16 +1711,67 @@ fn send(agent: &ureq::Agent, url: &str, range: Option<(u64, u64)>, stop: &dyn Fn
 
 /// Построить ureq-агента для закачки. Статусы 4xx/5xx читаем сами (429 и заголовки ожидания). Прокси из
 /// active.json — все запросы через него; иначе Config::default берёт HTTP(S)_PROXY из env.
-fn dl_agent(repo_root: &Path) -> Result<ureq::Agent, DlError> {
+fn dl_agent() -> Result<ureq::Agent, DlError> {
     let mut cfg = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(60)));
-    if let Some(url) = crate::models::proxy_url(&repo_root.join("models")) {
-        let proxy = ureq::Proxy::new(&url).map_err(|e| DlError::new("proxy", format!("некорректный URL прокси: {e}")))?;
-        cfg = cfg.proxy(Some(proxy));
+    // Маршрут прокси для Hugging Face, откуда идут модели (свой / как в Windows / напрямую). ureq не спрашивает
+    // прокси на каждый запрос, поэтому агент строится на каждую закачку — смена прокси действует со следующей.
+    if let Some(url) = dub_llm::net::proxy_url_for("https://huggingface.co/") {
+        cfg = cfg.proxy(Some(dl_proxy(&url).map_err(|e| DlError::new("proxy", e))?));
     }
     Ok(cfg.build().into())
+}
+
+/// ureq-прокси из адреса маршрута. ureq шлёт логин и пароль прокси ровно как они записаны в адресе, без
+/// раскодирования %XX, поэтому они передаются раскодированными. Держит он их внутри своего адреса и делит по
+/// последним `@` и `:`: пароль с `/ ? #`, пробелом или не-ASCII (любой прокси) или с `:` (SOCKS5) дошёл бы до
+/// прокси другим — такой прокси для закачки ошибка с причиной, а не неверный пароль.
+fn dl_proxy(url: &reqwest::Url) -> Result<ureq::Proxy, String> {
+    use ureq::ProxyProtocol;
+    let shown = dub_llm::net::masked(url.as_str());
+    let protocol = match url.scheme() {
+        "http" => ProxyProtocol::Http,
+        "https" => ProxyProtocol::Https,
+        "socks4" => ProxyProtocol::Socks4,
+        "socks4a" => ProxyProtocol::Socks4A,
+        "socks5" => ProxyProtocol::Socks5,
+        "socks5h" => ProxyProtocol::Socks5h,
+        other => return Err(format!("прокси {shown}: схема {other} закачке не подходит (http, https, socks4, socks5)")),
+    };
+    let host = url.host_str().filter(|host| !host.is_empty()).ok_or_else(|| format!("прокси {shown}: нет хоста"))?;
+    let port = url.port_or_known_default().ok_or_else(|| format!("прокси {shown}: нет порта"))?;
+    let user = dub_llm::net::decode_userinfo(url.username());
+    let password = url.password().map(dub_llm::net::decode_userinfo);
+    let mut builder = ureq::Proxy::builder(protocol).host(host).port(port);
+    if !user.is_empty() || password.is_some() {
+        builder = builder.username(&user);
+    }
+    if let Some(password) = &password {
+        builder = builder.password(password);
+    }
+    let unfit = || {
+        format!(
+            "прокси {shown}: закачка моделей (ureq) не может передать прокси такой логин или пароль — в нём / ? #, пробел, \
+             не-ASCII или (для SOCKS5) двоеточие в пароле; облачные запросы через этот прокси работают, для закачки \
+             нужен пароль без этих символов"
+        )
+    };
+    let proxy = builder.build().map_err(|e| format!("{} ({e})", unfit()))?;
+    let sent_user = proxy.username().unwrap_or_default();
+    let sent_password = proxy.password();
+    let carried = match protocol {
+        // CONNECT шлёт base64 от «логин:пароль»: прокси делит его по первому двоеточию.
+        ProxyProtocol::Http | ProxyProtocol::Https => {
+            format!("{sent_user}:{}", sent_password.unwrap_or_default()) == format!("{user}:{}", password.as_deref().unwrap_or_default())
+        }
+        _ => sent_user == user && sent_password == password.as_deref(),
+    };
+    if !carried || proxy.host() != host || proxy.port() != port {
+        return Err(unfit());
+    }
+    Ok(proxy)
 }
 
 /// Размер файла + поддержка byte-range: 1-байтовый ranged-пробник. HF CDN (в т.ч. Xet-CAS) отдаёт 206 +
@@ -2023,7 +2074,7 @@ pub fn download_components(
     let _claim = claim(&selected_ids, cancel, &|| {
         progress(json!({ "stage": "download", "phase": "waiting", "msg": "Жду другую закачку этих же компонентов…" }))
     })?;
-    let agent = dl_agent(repo_root)?;
+    let agent = dl_agent()?;
 
     // Что качать: прямые файлы не той версии/размера и архивы без записи об установке закреплённой версии.
     struct Planned<'a> {
@@ -2370,6 +2421,42 @@ fn write_entry(entry: &mut zip::read::ZipFile<impl std::io::Read>, out: &Path) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn download_proxy(address: &str, kind: dub_llm::net::ProxyKind) -> Result<ureq::Proxy, String> {
+        dl_proxy(&dub_llm::net::normalize(address, kind).map_err(|e| format!("{e:#}"))?)
+    }
+
+    #[test]
+    fn a_download_hands_the_proxy_its_password_as_is() {
+        use dub_llm::net::ProxyKind;
+        use ureq::ProxyProtocol;
+        for (address, kind, protocol) in [
+            ("1.2.3.4:8000:bob:p@ss", ProxyKind::Socks5, ProxyProtocol::Socks5h),
+            ("1.2.3.4:8000:bob:p@ss", ProxyKind::Http, ProxyProtocol::Http),
+            ("socks5://bob:p%40ss@1.2.3.4:8000", ProxyKind::Http, ProxyProtocol::Socks5),
+            ("http://bob:p@ss@1.2.3.4:8000", ProxyKind::Http, ProxyProtocol::Http),
+        ] {
+            let proxy = download_proxy(address, kind).unwrap();
+            assert_eq!((proxy.protocol(), proxy.username(), proxy.password()), (protocol, Some("bob"), Some("p@ss")), "{address}");
+            assert_eq!((proxy.host(), proxy.port()), ("1.2.3.4", 8000), "{address}");
+        }
+        let seller = download_proxy("1.2.3.4:8000:b@b:p;=!$&'()*+,ss", ProxyKind::Socks5).unwrap();
+        assert_eq!((seller.username(), seller.password()), (Some("b@b"), Some("p;=!$&'()*+,ss")));
+
+        let colon = download_proxy(&format!("http://bob:{}@1.2.3.4:8000", dub_llm::net::encode_userinfo("p@ss:1")), ProxyKind::Http).unwrap();
+        assert_eq!(format!("{}:{}", colon.username().unwrap(), colon.password().unwrap()), "bob:p@ss:1", "CONNECT sends user:password whole");
+
+        let plain = download_proxy("proxy.example:3128", ProxyKind::Http).unwrap();
+        assert_eq!((plain.username(), plain.password(), plain.port()), (None, None, 3128));
+        let v6 = download_proxy("[::1]:1080", ProxyKind::Socks5).unwrap();
+        assert_eq!((v6.protocol(), v6.port()), (ProxyProtocol::Socks5h, 1080));
+
+        for (password, kind) in [("p@ss:1/x", ProxyKind::Http), ("p@ss:1/x", ProxyKind::Socks5), ("pa:ss", ProxyKind::Socks5), ("pa ss", ProxyKind::Http), ("p\u{e4}ss", ProxyKind::Http)] {
+            let address = format!("bob:{}@1.2.3.4:8000", dub_llm::net::encode_userinfo(password));
+            let refused = download_proxy(&address, kind).expect_err(password);
+            assert!(refused.contains("ureq") && !refused.contains(password) && !refused.contains(&dub_llm::net::encode_userinfo(password)), "{refused}");
+        }
+    }
 
     fn temp_root(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("dub-setup-{tag}-{}", uuid::Uuid::new_v4().simple()));

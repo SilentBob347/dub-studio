@@ -23,7 +23,7 @@ mod dub_timing;
 mod endpoints;
 mod guard;
 mod llm_provider;
-mod openrouter_cli;
+mod openrouter;
 mod f0;
 mod frame;
 mod hw;
@@ -67,6 +67,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use jobs::JobQueue;
+/// Маршрут прокси приложения — для клиентов вне сервера (апдейтер десктопа).
+pub use dub_llm::net;
 
 /// E2E-верификация caption-композита БЕЗ ASR/Gemma/TTS: берём УЖЕ проанализированный project.json
 /// (кэш transcript+raw_ctx), заново гоним OCR-стадию + compose (реальная детекция + матчинг титров),
@@ -213,12 +215,10 @@ pub fn augment_path_for_tools(repo_root: &Path) {
     }
 }
 
-/// Прописать прокси из models/active.json в env процесса (если включён), чтобы стандартные HTTP-клиенты
-/// (ureq default-agent, reqwest в record.rs, Tauri-апдейтер в десктоп-процессе) шли через него. Вызывать
-/// на старте — ДО первого HTTP-запроса. Закачки моделей и облако строят клиент явно и подхватывают смену
-/// прокси без рестарта; остальному (апдейтер/метаданные HF) смена прокси требует рестарта.
-pub fn apply_proxy_env(repo_root: &Path) {
-    models::apply_proxy_env(&repo_root.join("models"));
+/// Маршрут прокси из models/active.json для всех HTTP-клиентов приложения (dub_llm::net): вызывать на старте.
+/// Сохранение формы прокси перестраивает его сразу, без рестарта.
+pub fn init_proxy_route(repo_root: &Path) {
+    models::apply_proxy_route(&repo_root.join("models"));
 }
 
 /// Поднять axum-сервер БЛОКИРУЮЩЕ на собственном tokio-рантайме. Для встраивания в десктоп-оболочку ОДНИМ
@@ -229,7 +229,7 @@ pub fn serve_blocking(repo_root: impl AsRef<Path>, listener: std::net::TcpListen
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         augment_path_for_tools(&root);
-        apply_proxy_env(&root);
+        init_proxy_route(&root);
         serve(AppState::new(&root), listener).await
     })
 }
@@ -379,6 +379,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/engine/openrouter/models", get(endpoints::openrouter_models))
         .route("/engine/openrouter/voices", get(endpoints::openrouter_voices))
         .route("/engine/openrouter/verify", post(endpoints::openrouter_verify))
+        .route("/engine/openrouter/catalog", get(endpoints::openrouter_catalog))
+        .route("/engine/openrouter/catalog/refresh", post(endpoints::openrouter_catalog_refresh))
+        .route("/engine/server/models", get(endpoints::server_models))
+        .route(
+            "/engine/server/key",
+            get(secrets_api::server_key_settings).put(secrets_api::update_server_key).delete(secrets_api::delete_server_key),
+        )
         .route(
             "/engine/openrouter/settings",
             get(secrets_api::openrouter_settings)
@@ -1718,9 +1725,9 @@ async fn analyze_enqueue(st: &AppState, pid: &str, args_json: Value) -> Result<S
         ensure_job_components(&paths.repo_root, &paths.models_root, args.casting, analyze::wants_diarization(&args), &cb)?;
         jobs::check_cancelled()?;
         // Трекинг затрат OpenRouter в ДОЛЛАРАХ (перевод/vision через облако): total_usage до/после.
-        let cost_before = openrouter_cli::total_usage_usd(&paths.models_root);
+        let cost_before = openrouter::total_usage_usd(&paths.models_root);
         let mut proj = analyze::run(&args, &paths, &cb)?;
-        if let (Some(b), Some(a)) = (cost_before, openrouter_cli::total_usage_usd(&paths.models_root)) {
+        if let (Some(b), Some(a)) = (cost_before, openrouter::total_usage_usd(&paths.models_root)) {
             let spent = (a - b).max(0.0);
             if spent > 0.0 {
                 cb(json!({ "stage": "cost", "msg": format!("OpenRouter: потрачено ${spent:.4} за анализ (всего использовано ${a:.2})") }));
@@ -1861,9 +1868,9 @@ async fn render_enqueue(st: &AppState, pid: &str) -> Result<String, Box<Response
         // regen_dub если есть dirty-сегменты (voice/text/rewrite правились).
         let regen = proj.segments.iter().any(|s| s.dirty);
         // Трекинг затрат OpenRouter в ДОЛЛАРАХ: total_usage до/после (None -> облако не использовалось).
-        let cost_before = openrouter_cli::total_usage_usd(&paths.models_root);
+        let cost_before = openrouter::total_usage_usd(&paths.models_root);
         render::run(&proj, &paths, regen, &cb)?;
-        if let (Some(b), Some(a)) = (cost_before, openrouter_cli::total_usage_usd(&paths.models_root)) {
+        if let (Some(b), Some(a)) = (cost_before, openrouter::total_usage_usd(&paths.models_root)) {
             let spent = (a - b).max(0.0);
             if spent > 0.0 {
                 cb(json!({ "stage": "cost", "msg": format!("OpenRouter: потрачено ${spent:.4} за прогон (всего использовано ${a:.2})") }));
@@ -1968,7 +1975,8 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
     };
 
     let llama_bin = st.llama_bin.clone();
-    let mt_model = st.opts.mt_model_path.clone();
+    // Квант Gemma — выбранный сейчас (models::resolve_mt), а не найденный при старте сервера.
+    let (mt_model, _) = models::resolve_mt(&st.models_root, &models::load_selection(&st.models_root));
     let models_root_xl = st.models_root.clone();
     let paths = render_paths(st, &dst_dir, input);
     let dst_for_job = dst_dir.clone();
@@ -1986,7 +1994,7 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
             let spoken = matches!(p.mode.as_str(), "dub" | "voiceover");
             progress(json!({ "type": "progress", "stage": "translate",
                 "msg": format!("Перевод {} строк → {}", p.segments.len(), lang_c) }));
-            // LLM-провайдер: облако OpenRouter (если включено) ИЛИ локальный llama-server (плоский MT).
+            // LLM-провайдер перевода: своя Gemma (плоский MT), локальный сервер или OpenRouter.
             let prov = crate::llm_provider::open(
                 &crate::llm_provider::LlmOpen {
                     llama_bin: &llama_bin,
@@ -2083,7 +2091,8 @@ async fn retranslate_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
     }
 
     let llama_bin = st.llama_bin.clone();
-    let mt_model = st.opts.mt_model_path.clone();
+    // Квант Gemma — выбранный сейчас (models::resolve_mt), а не найденный при старте сервера.
+    let (mt_model, _) = models::resolve_mt(&st.models_root, &models::load_selection(&st.models_root));
     let models_root_xl = st.models_root.clone();
     let dir_for_job = dir.clone();
     let pid_res = pid.to_string();

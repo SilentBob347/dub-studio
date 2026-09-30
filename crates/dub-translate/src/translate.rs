@@ -276,6 +276,9 @@ pub fn run(
         }
         c0 += CHUNK;
     }
+    for &gi in &idxs {
+        segs[gi].tgt = crate::fix_translation(&segs[gi].tgt, tgt);
+    }
     // деградация: пустые -> оставить исходник, чтобы дубляж не был пуст (как в питоне).
     let empty: Vec<usize> = idxs.iter().cloned().filter(|&gi| segs[gi].tgt.is_empty()).collect();
     for &gi in &empty {
@@ -335,14 +338,15 @@ pub fn rewrite(
         let parsed = parse_numbered(&out, chunk.len());
         for (j, &gi) in chunk.iter().enumerate() {
             let src_line = segs[gi].text.trim().to_string();
-            if let Some(p) = &parsed[j] {
-                segs[gi].tgt = p.clone();
-            } else {
-                // пропущенная/сбитая строка -> перевести её (не озвучивать сырой исходник).
-                let budget = char_budget(segs[gi].end - segs[gi].start);
-                let one = translate_one(llm, &src_line, &tgt_name, extra, "", budget, &style_c)?;
-                segs[gi].tgt = if one.is_empty() { src_line } else { one };
-            }
+            segs[gi].tgt = match &parsed[j] {
+                Some(p) => crate::fix_translation(p, tgt),
+                None => {
+                    // пропущенная/сбитая строка -> перевести её (не озвучивать сырой исходник).
+                    let budget = char_budget(segs[gi].end - segs[gi].start);
+                    let one = translate_one(llm, &src_line, &tgt_name, extra, "", budget, &style_c)?;
+                    if one.is_empty() { src_line } else { crate::fix_translation(&one, tgt) }
+                }
+            };
         }
         c0 += CHUNK;
     }

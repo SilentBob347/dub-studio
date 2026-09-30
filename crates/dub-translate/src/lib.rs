@@ -6,11 +6,13 @@
 
 mod ctx;
 mod seg;
+mod text_fix;
 mod translate;
 mod vision;
 
 pub use ctx::{run as ctx_run, CtxConfig, CtxResult};
 pub use seg::Seg;
+pub use text_fix::{cyrillic_homoglyphs, fix_translation};
 pub use translate::{rewrite as flat_rewrite, run as flat_run};
 pub use vision::{analyze_layout, classify_content_type, is_counter, scene_context, Layout, FONTS};
 

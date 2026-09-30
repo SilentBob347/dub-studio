@@ -40,12 +40,19 @@ pub fn write_selection(mroot: &Path, selection: &Value) -> std::io::Result<()> {
 
 /// Выбор для ответов API. Секреты не уходят никогда: вместо ключа OpenRouter — `or_key_set`, пароль
 /// вырезан из `proxy_url`, вместо него — `proxy_password_set`.
+/// `llm_provider`/`vision_provider` в ответе — действующий провайдер стадии, даже если в active.json его ещё нет
+/// (прежние флаги or_llm_on/or_vision_on).
 pub fn public_selection(mroot: &Path) -> Value {
-    redact_selection(
+    let mut public = redact_selection(
         &load_selection(mroot),
         crate::credentials::openrouter_source().is_some(),
         crate::credentials::proxy_password().is_some(),
-    )
+    );
+    let slots = public.as_object_mut().expect("redact_selection returns object");
+    for (key, stage) in [("llm_provider", "llm"), ("vision_provider", "vision")] {
+        slots.insert(key.into(), Value::String(llm_backend(mroot, stage).as_str().into()));
+    }
+    public
 }
 
 pub(crate) fn redact_selection(selection: &Value, or_key_set: bool, proxy_password_set: bool) -> Value {
@@ -131,12 +138,20 @@ pub fn is_selection_key(key: &str) -> bool {
             | "breath_on"       // "1" -> авто-вставка легких вдохов в паузах между фразами; "0" -> выкл
             | "speech_rate_on"  // "1" -> адаптация темпа генерации TTS под длину текста/слота; "0" -> дефолт темп
             | "emo_ref_on"      // "1" -> эмоциональный референс сцены (перенос эмоций из оригинального вокала); "0" -> выкл
+            // Провайдер перевода и отдельно vision: local (своя Gemma) | server (локальный OpenAI-совместимый
+            // сервер: Ollama, LM Studio, vLLM) | openrouter. Значение проверяет select_model.
+            | "llm_provider"
+            | "vision_provider"
+            // Локальный OpenAI-совместимый сервер: адрес и модели из его /v1/models. Ключ — в хранилище секретов.
+            | "srv_url"
+            | "srv_llm"
+            | "srv_vision"
             // Облачные модели (OpenRouter) — опциональная замена тяжёлого локального LLM/TTS. Всё ВЫКЛ по умолчанию.
             // Ключ OpenRouter сюда не входит: он в хранилище секретов (credentials), ручка /engine/openrouter/settings.
-            | "or_llm_on"       // "1" -> перевод через OpenRouter chat вместо локальной Gemma
+            | "or_llm_on"       // прежний флаг перевода через OpenRouter; читается, только пока llm_provider не задан
             | "or_llm"          // id LLM-модели перевода (напр. "google/gemini-2.5-flash")
-            | "or_vision_on"    // "1" -> vision-анализ кадров через OpenRouter multimodal
-            | "or_vision"       // id vision-модели (пусто -> берём or_llm, если он multimodal)
+            | "or_vision_on"    // прежний флаг vision через OpenRouter; читается, только пока vision_provider не задан
+            | "or_vision"       // id vision-модели (пусто -> or_llm, если он принимает картинки)
             | "or_tts_on"       // "1" -> TTS через облако вместо локального Higgs
             | "or_tts_model"    // id TTS-модели OpenRouter (напр. "openai/gpt-4o-mini-tts")
             | "or_tts_voice"    // голос по умолчанию для облачного TTS (напр. "alloy")
@@ -144,10 +159,17 @@ pub fn is_selection_key(key: &str) -> bool {
             | "or_asr_on"       // "1" -> транскрипция (ASR) через OpenRouter вместо локального Parakeet/Whisper
             | "or_asr"          // id STT-модели OpenRouter (напр. "openai/whisper-large-v3")
             | "or_concurrency"  // число параллельных облачных запросов (чанки в N потоков; OpenRouter ~50 конкур.)
-            // Прокси: у части юзеров прямой доступ к HF/OpenRouter закрыт -> все обращения через свой прокси.
-            // Адрес меняется только через /engine/proxy/settings: там пароль отделяется в хранилище секретов.
-            | "proxy_on"        // "1" -> проксировать весь исходящий трафик приложения через proxy_url
+            // Прокси (режим, тип, адрес) меняется только через /engine/proxy/settings: там пароль уходит в хранилище
+            // секретов, а маршрут запросов перестраивается сразу.
     )
+}
+
+/// Допустимое значение слота, у которого значения — перечень. Для прочих слотов — любое непустое.
+pub fn is_selection_value(key: &str, value: &str) -> bool {
+    match key {
+        "llm_provider" | "vision_provider" => LlmBackend::parse(value).is_some(),
+        _ => true,
+    }
 }
 
 /// Backend конкретной локальной стадии по ключу (sep_backend/diar_backend/asr_backend): "cpu"/"gpu"
@@ -179,17 +201,56 @@ pub fn openrouter_key() -> Option<String> {
     crate::credentials::openrouter_api_key().map(|(key, _)| key)
 }
 
-/// URL прокси-сервера из active.json — ТОЛЬКО если прокси включён (proxy_on=="1") и URL непустой, иначе None.
-/// Через него идут ВСЕ обращения приложения: закачка моделей (ureq), OpenRouter (Go-хелпер), метаданные HF
-/// (reqwest). Формат: http|https|socks5://[user:pass@]host:port. Валидность URL проверяет /engine/proxy/test.
-/// В active.json адрес лежит без пароля; пароль подставляется из хранилища секретов.
-pub fn proxy_url(mroot: &Path) -> Option<String> {
-    let sel = load_selection(mroot);
-    if pick(&sel, "proxy_on") != Some("1") {
-        return None;
+/// Режим прокси из active.json. Прежние версии знали только proxy_on + proxy_url: включённый прокси с адресом —
+/// свой, иначе — как в Windows (прежний «выключенный» прокси тоже пускал запросы по переменным окружения).
+pub fn proxy_mode(sel: &Value) -> dub_llm::net::ProxyMode {
+    use dub_llm::net::ProxyMode;
+    if let Some(mode) = pick(sel, "proxy_mode") {
+        if let Some(mode) = ProxyMode::parse(mode) {
+            return mode;
+        }
+        tracing::error!("proxy_mode {mode:?} в active.json не распознан — считаю «как в Windows»");
     }
-    let url = pick(&sel, "proxy_url")?;
-    Some(proxy_with_password(url, crate::credentials::proxy_password().as_deref()))
+    if pick(sel, "proxy_on") == Some("1") && pick(sel, "proxy_url").is_some() {
+        ProxyMode::Custom
+    } else {
+        ProxyMode::System
+    }
+}
+
+/// Тип прокси для адреса без схемы.
+pub fn proxy_kind(sel: &Value) -> dub_llm::net::ProxyKind {
+    pick(sel, "proxy_kind").and_then(dub_llm::net::ProxyKind::parse).unwrap_or_default()
+}
+
+/// Адрес своего прокси, по которому идут запросы: адрес из active.json (без пароля) и пароль из хранилища.
+pub(crate) fn proxy_address(sel: &Value, password: Option<&str>) -> Option<String> {
+    pick(sel, "proxy_url").map(|url| proxy_with_password(url, password))
+}
+
+/// Маршрут прокси из active.json и хранилища секретов: адрес лежит без пароля, пароль подставляется из хранилища.
+pub fn proxy_settings(mroot: &Path) -> dub_llm::net::ProxySettings {
+    let sel = load_selection(mroot);
+    dub_llm::net::ProxySettings {
+        mode: proxy_mode(&sel),
+        kind: proxy_kind(&sel),
+        address: proxy_address(&sel, crate::credentials::proxy_password().as_deref()),
+    }
+}
+
+/// Сделать настройки прокси маршрутом всех запросов приложения (старт сервера и каждое сохранение формы).
+/// Свой адрес, который не читается, — ошибка в лог: запросы идут напрямую, окно показывает причину.
+pub fn apply_proxy_route(mroot: &Path) {
+    let settings = proxy_settings(mroot);
+    if settings.mode == dub_llm::net::ProxyMode::Custom {
+        match dub_llm::net::normalize(settings.address.as_deref().unwrap_or_default(), settings.kind) {
+            Ok(url) => tracing::info!("прокси: свой, {}", dub_llm::net::masked(url.as_str())),
+            Err(e) => tracing::error!("прокси: свой адрес не читается ({e:#}) — запросы идут напрямую, пока его не исправят в настройках"),
+        }
+    } else {
+        tracing::info!("прокси: {}", settings.mode.as_str());
+    }
+    dub_llm::net::set(settings);
 }
 
 /// Разбор `[scheme://][user[:password]@]host…` (схему ureq допускает опустить): (до userinfo, user, password,
@@ -206,12 +267,14 @@ fn proxy_userinfo(url: &str) -> Option<(&str, &str, Option<&str>, &str)> {
     Some((&url[..start], user, password, &rest[at + 1..]))
 }
 
-/// Отделить пароль от адреса прокси: (адрес без пароля, пароль). Логин остаётся в адресе.
+/// Отделить пароль от адреса прокси: (адрес без пароля, пароль как есть — %XX раскодированы). Логин остаётся
+/// в адресе.
 pub fn split_proxy_password(url: &str) -> (String, Option<String>) {
     match proxy_userinfo(url) {
-        Some((head, user, Some(password), tail)) => {
-            (format!("{head}{user}@{tail}"), Some(password.to_string()).filter(|p| !p.is_empty()))
-        }
+        Some((head, user, Some(password), tail)) => (
+            format!("{head}{user}@{tail}"),
+            Some(dub_llm::net::decode_userinfo(password)).filter(|p| !p.is_empty()),
+        ),
         _ => (url.to_string(), None),
     }
 }
@@ -221,38 +284,98 @@ pub fn proxy_has_user(url: &str) -> bool {
     proxy_userinfo(url).is_some_and(|(_, user, _, _)| !user.is_empty())
 }
 
-/// Подставить пароль в адрес с логином и без пароля; адрес со своим паролем или без логина — как есть.
+/// Подставить пароль (как есть, не %XX) в адрес с логином и без пароля; адрес со своим паролем или без логина —
+/// как есть. Пароль кодируется %XX: с / ? # @ : адрес иначе читался бы с чужими хостом и портом.
 pub fn proxy_with_password(url: &str, password: Option<&str>) -> String {
     match (proxy_userinfo(url), password.filter(|p| !p.is_empty())) {
-        (Some((head, user, None, tail)), Some(password)) if !user.is_empty() => format!("{head}{user}:{password}@{tail}"),
+        (Some((head, user, None, tail)), Some(password)) if !user.is_empty() => {
+            format!("{head}{user}:{}@{tail}", dub_llm::net::encode_userinfo(password))
+        }
         _ => url.to_string(),
     }
 }
 
-/// Прописать прокси из active.json в env процесса (HTTP(S)_PROXY/ALL_PROXY + lowercase-варианты). Стандартные
-/// клиенты подхватывают его сами: ureq default-agent (Config::default -> Proxy::try_from_env), reqwest, и
-/// дочерние процессы (Go-хелпер: http.ProxyFromEnvironment). Вызывать ОДИН раз на старте — ДО первого
-/// HTTP-клиента (default-agent кешируется). Смена прокси -> рестарт; но закачки строят агента явно из
-/// proxy_url и подхватывают смену без рестарта (см. setup::dl_agent).
-pub fn apply_proxy_env(mroot: &Path) {
-    if let Some(url) = proxy_url(mroot) {
-        for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
-            std::env::set_var(k, &url);
+/// Кто переводит (stage "llm") или смотрит кадры (stage "vision").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmBackend {
+    /// Своя Gemma через llama-server.
+    Local,
+    /// Локальный OpenAI-совместимый сервер пользователя (Ollama, LM Studio, vLLM, llama-server).
+    Server,
+    /// OpenRouter.
+    OpenRouter,
+}
+
+impl LlmBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmBackend::Local => "local",
+            LlmBackend::Server => "server",
+            LlmBackend::OpenRouter => "openrouter",
         }
-        tracing::info!("прокси включён: весь трафик через {}", mask_proxy(&url));
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "local" => Some(LlmBackend::Local),
+            "server" => Some(LlmBackend::Server),
+            "openrouter" => Some(LlmBackend::OpenRouter),
+            _ => None,
+        }
     }
 }
 
-/// Спрятать user:pass в URL прокси для логов (не светим креды): scheme://***@host:port.
-fn mask_proxy(url: &str) -> String {
-    match proxy_userinfo(url) {
-        Some((head, _, _, tail)) => format!("{head}***@{tail}"),
-        None => url.to_string(),
+/// Провайдер стадии "llm" | "vision": llm_provider / vision_provider; пока они не заданы — прежние флаги
+/// or_llm_on / or_vision_on (с ключом OpenRouter), иначе своя Gemma.
+pub fn llm_backend(mroot: &Path, stage: &str) -> LlmBackend {
+    let key = if stage == "vision" { "vision_provider" } else { "llm_provider" };
+    let sel = load_selection(mroot);
+    if let Some(value) = pick(&sel, key) {
+        match LlmBackend::parse(value) {
+            Some(backend) => return backend,
+            None => tracing::error!("{key}={value:?} в active.json не распознан — беру прежние флаги or_*_on"),
+        }
+    }
+    // Прежний формат: vision шёл тем же провайдером, что перевод (or_vision_on выбирал лишь отдельную модель).
+    let legacy_stage = if stage == "vision" { "llm" } else { stage };
+    if openrouter_stage_on(mroot, legacy_stage) {
+        LlmBackend::OpenRouter
+    } else {
+        LlmBackend::Local
     }
 }
 
-/// Включён ли облачный путь для стадии `stage` ("llm"|"vision"|"tts"): галка ИЛИ есть ключ.
-/// Требует ключ OpenRouter — без ключа облако невозможно, откатываемся на локальный движок.
+/// Адрес локального OpenAI-совместимого сервера по умолчанию — Ollama; LM Studio (1234), vLLM (8000) и
+/// llama-server задаются в настройках.
+pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:11434";
+
+/// Адрес локального сервера из настроек или адрес по умолчанию.
+pub fn server_url(mroot: &Path) -> String {
+    pick(&load_selection(mroot), "srv_url").unwrap_or(DEFAULT_SERVER_URL).to_string()
+}
+
+/// Модель локального сервера для стадии "llm" | "vision". Пусто — не выбрана.
+pub fn server_model(mroot: &Path, stage: &str) -> String {
+    let key = if stage == "vision" { "srv_vision" } else { "srv_llm" };
+    pick(&load_selection(mroot), key).unwrap_or("").to_string()
+}
+
+/// Идёт ли через OpenRouter хоть одна стадия (перевод, vision, TTS, ASR) — стоит ли считать затраты.
+pub fn openrouter_any_on(mroot: &Path) -> bool {
+    llm_backend(mroot, "llm") == LlmBackend::OpenRouter
+        || llm_backend(mroot, "vision") == LlmBackend::OpenRouter
+        || openrouter_stage_on(mroot, "tts")
+        || openrouter_stage_on(mroot, "asr")
+}
+
+/// Нужна ли своя Gemma: перевод или vision идут через неё.
+pub fn local_gemma_needed(mroot: &Path) -> bool {
+    llm_backend(mroot, "llm") == LlmBackend::Local || llm_backend(mroot, "vision") == LlmBackend::Local
+}
+
+/// Включён ли облачный путь для стадии `stage` ("llm"|"vision"|"tts"|"asr") по флагу or_*_on.
+/// Требует ключ OpenRouter — без ключа облако невозможно. Для "llm"/"vision" это только прежний формат
+/// настроек: провайдера стадии решает `llm_backend`.
 pub fn openrouter_stage_on(mroot: &Path, stage: &str) -> bool {
     if crate::credentials::openrouter_source().is_none() {
         return false;
@@ -704,20 +827,24 @@ mod secret_tests {
     fn a_proxy_password_is_split_off_and_put_back() {
         assert_eq!(
             split_proxy_password("http://alice:p%40ss:w@proxy.lan:3128"),
-            ("http://alice@proxy.lan:3128".to_string(), Some("p%40ss:w".to_string()))
+            ("http://alice@proxy.lan:3128".to_string(), Some("p@ss:w".to_string()))
         );
+        assert_eq!(split_proxy_password("http://alice:p@ss@proxy.lan:3128").1.as_deref(), Some("p@ss"), "a raw @ as older versions wrote it");
         assert_eq!(split_proxy_password("socks5://proxy.lan:1080"), ("socks5://proxy.lan:1080".to_string(), None));
         assert_eq!(split_proxy_password("http://alice@proxy.lan:3128"), ("http://alice@proxy.lan:3128".to_string(), None));
         assert_eq!(split_proxy_password("http://alice:@proxy.lan:3128"), ("http://alice@proxy.lan:3128".to_string(), None));
-        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", Some("p%40ss:w")), "http://alice:p%40ss:w@proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", Some("p@ss:w")), "http://alice:p%40ss%3Aw@proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", Some("pa/ss?#")), "http://alice:pa%2Fss%3F%23@proxy.lan:3128");
+        for password in ["p@ss:w", "pa/ss?#", "100%", "пароль"] {
+            let (_, back) = split_proxy_password(&proxy_with_password("http://alice@proxy.lan:3128", Some(password)));
+            assert_eq!(back.as_deref(), Some(password));
+        }
         assert_eq!(proxy_with_password("http://alice:own@proxy.lan:3128", Some("stored")), "http://alice:own@proxy.lan:3128");
         assert_eq!(proxy_with_password("http://proxy.lan:3128", Some("stored")), "http://proxy.lan:3128");
         assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", None), "http://alice@proxy.lan:3128");
         assert!(proxy_has_user("http://alice@proxy.lan:3128") && !proxy_has_user("http://proxy.lan:3128"));
         assert!(!proxy_has_user("http://proxy.lan:3128/path@x"));
         assert_eq!(split_proxy_password("alice:hunter2@proxy.lan:3128"), ("alice@proxy.lan:3128".to_string(), Some("hunter2".to_string())));
-        assert_eq!(mask_proxy("alice:hunter2@proxy.lan:3128"), "***@proxy.lan:3128");
-        assert_eq!(mask_proxy("socks5://alice:hunter2@proxy.lan:1080"), "socks5://***@proxy.lan:1080");
     }
 
     #[test]
@@ -744,7 +871,54 @@ mod secret_tests {
 
     #[test]
     fn secrets_are_not_selection_slots() {
-        assert!(!is_selection_key("or_key") && !is_selection_key("proxy_url"));
-        assert!(is_selection_key("proxy_on") && is_selection_key("or_llm_on"));
+        assert!(!is_selection_key("or_key") && !is_selection_key("proxy_url") && !is_selection_key("srv_key"));
+        assert!(is_selection_key("or_llm_on") && is_selection_key("llm_provider") && is_selection_key("srv_url"));
+        assert!(!is_selection_key("proxy_on") && !is_selection_key("proxy_mode"), "the proxy changes only through its form");
+        assert!(is_selection_value("vision_provider", "server") && !is_selection_value("llm_provider", "ollama"));
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+    use dub_llm::net::{ProxyKind, ProxyMode};
+    use serde_json::json;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dub-models-{tag}-{}-{}", std::process::id(), uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn each_stage_has_its_own_provider() {
+        let root = scratch("backend");
+        assert_eq!(llm_backend(&root, "llm"), LlmBackend::Local);
+        set_selection(&root, "llm_provider", "openrouter").unwrap();
+        set_selection(&root, "vision_provider", "server").unwrap();
+        assert_eq!(llm_backend(&root, "llm"), LlmBackend::OpenRouter);
+        assert_eq!(llm_backend(&root, "vision"), LlmBackend::Server);
+        assert!(!local_gemma_needed(&root));
+        set_selection(&root, "vision_provider", "local").unwrap();
+        assert!(local_gemma_needed(&root));
+        assert_eq!(server_url(&root), DEFAULT_SERVER_URL);
+        set_selection(&root, "srv_url", "http://192.168.1.5:1234/v1").unwrap();
+        set_selection(&root, "srv_vision", "qwen2.5-vl").unwrap();
+        assert_eq!(server_url(&root), "http://192.168.1.5:1234/v1");
+        assert_eq!(server_model(&root, "vision"), "qwen2.5-vl");
+        assert_eq!(server_model(&root, "llm"), "");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_old_proxy_switch_reads_as_a_mode() {
+        let custom = json!({ "proxy_on": "1", "proxy_url": "http://proxy.lan:3128" });
+        assert_eq!(proxy_mode(&custom), ProxyMode::Custom);
+        assert_eq!(proxy_mode(&json!({ "proxy_on": "0", "proxy_url": "http://proxy.lan:3128" })), ProxyMode::System);
+        assert_eq!(proxy_mode(&json!({ "proxy_on": "1" })), ProxyMode::System, "on without an address was never a route");
+        assert_eq!(proxy_mode(&json!({})), ProxyMode::System);
+        assert_eq!(proxy_mode(&json!({ "proxy_mode": "off", "proxy_on": "1", "proxy_url": "h:1" })), ProxyMode::Off);
+        assert_eq!(proxy_kind(&json!({ "proxy_kind": "socks5" })), ProxyKind::Socks5);
+        assert_eq!(proxy_kind(&json!({})), ProxyKind::Http);
     }
 }

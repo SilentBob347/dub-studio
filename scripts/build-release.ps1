@@ -75,7 +75,6 @@ $modelsRoot = Join-Path $ModelsSource 'models'
 $missing = @()
 foreach ($file in $bundledRuntime) { if (-not (Test-Path (Join-Path $modelsRoot "higgs-engine\$file"))) { $missing += "models\higgs-engine\$file" } }
 foreach ($file in $bundledOcr) { if (-not (Test-Path (Join-Path $modelsRoot "ocr\$file"))) { $missing += "models\ocr\$file" } }
-if (-not (Test-Path (Join-Path $repoRoot 'tools\openrouter-helper\openrouter-helper.exe'))) { $missing += 'tools\openrouter-helper\openrouter-helper.exe' }
 if (-not (Test-Path (Join-Path $repoRoot 'fonts'))) { $missing += 'fonts' }
 if ($missing.Count -gt 0) {
     Fail ("bundled files are missing under $ModelsSource (and the repository):`n  " + ($missing -join "`n  ") + "`nPass -ModelsSource <folder containing models\higgs-engine and models\ocr>, for example the installed application.")
@@ -153,14 +152,12 @@ try {
     if (Test-Path $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force }
     $stagedHiggs = Join-Path $stagingRoot 'models\higgs-engine'
     $stagedOcr = Join-Path $stagingRoot 'models\ocr'
-    $stagedHelper = Join-Path $stagingRoot 'tools\openrouter-helper'
-    New-Item -ItemType Directory -Force -Path $stagedHiggs, $stagedOcr, $stagedHelper | Out-Null
+    New-Item -ItemType Directory -Force -Path $stagedHiggs, $stagedOcr | Out-Null
     # The server is compiled into the desktop executable: no dub-server.exe goes into the bundle.
     Copy-Item -LiteralPath (Join-Path $frontendRoot 'dist') -Destination (Join-Path $stagingRoot 'frontend\dist') -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot 'fonts') -Destination (Join-Path $stagingRoot 'fonts') -Recurse
     foreach ($file in $bundledRuntime) { Copy-Required (Join-Path $modelsRoot "higgs-engine\$file") $stagedHiggs }
     foreach ($file in $bundledOcr) { Copy-Required (Join-Path $modelsRoot "ocr\$file") $stagedOcr }
-    Copy-Required (Join-Path $repoRoot 'tools\openrouter-helper\openrouter-helper.exe') $stagedHelper
     Write-Host "[OK] bundle staged in $stagingRoot"
     $env:DUB_RELEASE_STAGING = $stagingRoot
     try {

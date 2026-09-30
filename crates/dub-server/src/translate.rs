@@ -6,7 +6,7 @@
 //! пустым — перевод не блокирует транскрипт-стадию analyze (её результат уже валиден).
 
 use dub_core::{Brand, Project, SubStyle};
-use dub_llm::{ChatClient, LlamaServer, ServerOpts};
+use dub_llm::ChatClient;
 use dub_translate::{classify_content_type, ctx_run, CtxConfig, Seg};
 use serde_json::Value;
 
@@ -30,26 +30,33 @@ fn wants_translate(proj: &Project) -> bool {
 
 /// Автономная классификация типа контента (real/anime) для кастинга. Нужна, когда translate-стадия
 /// пропущена ранним return (same-lang / transcribe / нет LLM), а content_type="auto": иначе casting
-/// молча берёт "real"-детектор для анимации. Поднимает Gemma+mmproj ТОЛЬКО ради классификации и гасит.
-/// None -> классифицировать не удалось (нет бинаря/весов/сервер не встал) -> вызывающий оставит дефолт.
+/// молча берёт "real"-детектор для анимации. Открывает vision-провайдер (своя Gemma+mmproj, локальный
+/// сервер или OpenRouter) ТОЛЬКО ради классификации и закрывает.
+/// None -> классифицировать не удалось (причина в прогрессе) -> вызывающий оставит дефолт.
 pub fn classify_content_type_standalone(
     paths: &AnalyzePaths,
     total: f64,
     progress: &Progress,
 ) -> Option<String> {
-    // Без mmproj (vision-проектор) классификация невозможна: слать кадры в text-only модель = молча "real"
-    // с ложным «0 голосов». Нет проектора -> None, вызывающий честно оставит дефолт.
-    if !paths.llama_bin.is_file() || !paths.mt_model.is_file() || !paths.mmproj.is_file() {
-        return None;
-    }
-    let opts = ServerOpts::new(&paths.llama_bin, &paths.mt_model)
-        .with_ubatch(crate::models::sel_num(&paths.models_root, "llama_ubatch").map(|f| f as u32))
-        .with_mmproj(&paths.mmproj)
-        .with_log_file(crate::llm_provider::llama_log_path(&paths.models_root));
-    let srv = LlamaServer::start(&opts).ok()?;
-    let client = ChatClient::new(srv.base_url()).ok()?;
+    // Без vision-модели классификация невозможна: слать кадры в text-only модель = молча "real"
+    // с ложным «0 голосов». Нет vision -> None, вызывающий честно оставит дефолт.
+    let provider = match crate::llm_provider::open(
+        &crate::llm_provider::LlmOpen {
+            llama_bin: &paths.llama_bin,
+            mt_model: &paths.mt_model,
+            mmproj: &paths.mmproj,
+            models_root: &paths.models_root,
+        },
+        crate::llm_provider::LlmMode::Vision,
+    ) {
+        Ok(provider) => provider,
+        Err(e) => {
+            emit(progress, "vision", &format!("тип контента не определён: vision недоступен ({e})"));
+            return None;
+        }
+    };
     let tmp = paths.work_dir.join("ctype_frame.png");
-    let ct = classify_content_type(&client, &paths.input, &tmp, total, |m| emit(progress, "vision", m));
+    let ct = classify_content_type(provider.client(), &paths.input, &tmp, total, |m| emit(progress, "vision", m));
     let _ = std::fs::remove_file(&tmp);
     Some(ct)
 }
@@ -100,43 +107,29 @@ pub fn stage(
         return Ok(());
     }
 
-    // Поднять сайдкар Gemma (+mmproj для vision). Существование бинаря/весов проверяет start().
-    if !paths.llama_bin.is_file() {
-        return Err(format!("перевод не выполнен: llama-server не найден ({})", paths.llama_bin.display()));
-    }
-    if !paths.mt_model.is_file() {
-        return Err(format!("перевод не выполнен: GGUF Gemma не найден ({})", paths.mt_model.display()));
-    }
-
-    // LLM-провайдер: облако OpenRouter (если включено в настройках + есть ключ) ИЛИ локальный llama-server
-    // (Gemma+mmproj). Vision-режим: облаку — multimodal-модель, локали — mmproj. Fail-safe как раньше.
-    let prov = match crate::llm_provider::open(
-        &crate::llm_provider::LlmOpen {
-            llama_bin: &paths.llama_bin,
-            mt_model: &paths.mt_model,
-            mmproj: &paths.mmproj,
-            models_root: &paths.models_root,
-        },
-        crate::llm_provider::LlmMode::Vision,
-    ) {
-        Ok(p) => {
-            emit(progress, "translate", if p.is_remote() {
-                "перевод/vision через облако (OpenRouter)"
-            } else {
-                "поднимаю llama-server (Gemma + mmproj)"
-            });
-            p
+    // Провайдеры перевода и vision выбираются независимо (своя Gemma / локальный сервер / OpenRouter): облачный
+    // перевод не требует локальных весов. Перевод недоступен — стадия пропускается с причиной (fail-safe);
+    // недоступный vision перевод не останавливает.
+    let pair = match crate::llm_provider::open_pair(&crate::llm_provider::LlmOpen {
+        llama_bin: &paths.llama_bin,
+        mt_model: &paths.mt_model,
+        mmproj: &paths.mmproj,
+        models_root: &paths.models_root,
+    }) {
+        Ok(pair) => {
+            emit(progress, "translate", &pair.describe());
+            pair
         }
         Err(e) => return Err(format!("перевод не выполнен: LLM недоступен: {e}")),
     };
-    let client = prov.client();
+    let client = pair.text();
 
     // Авто-детект типа контента для кастинга (#115): юзер выбрал «Авто» + кастинг включён -> классифицируем
-    // live-action vs анимация Gemma-vision (сервер уже поднят). Только при наличии mmproj (иначе vision нет
-    // -> casting-стадия сделает автономный детект/дефолт). Результат в проект; casting-стадия прочитает.
-    if args.casting && args.content_type == "auto" && paths.mmproj.is_file() {
+    // live-action vs анимация vision-моделью (уже открыта). Нет vision -> casting-стадия сделает автономный
+    // детект/дефолт. Результат в проект; casting-стадия прочитает.
+    if let (true, Some(vision)) = (args.casting && args.content_type == "auto", pair.vision()) {
         let tmp = paths.work_dir.join("ctype_frame.png");
-        let ct = classify_content_type(&client, &paths.input, &tmp, total, |m| {
+        let ct = classify_content_type(vision, &paths.input, &tmp, total, |m| {
             emit(progress, "vision", m);
         });
         let _ = std::fs::remove_file(&tmp);
@@ -173,7 +166,7 @@ pub fn stage(
     };
 
     emit(progress, "vision", "ctx-проход: vision layout/scene + перевод транскрипта");
-    let res = ctx_run(&client, &cfg, &mut segs, rewrite, |m| {
+    let res = ctx_run(client, pair.vision(), &cfg, &mut segs, rewrite, |m| {
         emit(progress, "vision", m);
     });
 
@@ -183,7 +176,7 @@ pub fn stage(
     if res.is_ok() {
         ensure_translation_coverage(client, &mut segs, &args.src_lang, &proj.tgt_lang, progress);
     }
-    drop(prov); // глушим локальный llama-server (освобождаем VRAM перед TTS/берном); облако — no-op
+    drop(pair); // глушим свою Gemma (освобождаем VRAM перед TTS/берном); удалённые провайдеры — no-op
 
     let extra = match res {
         Ok(r) => r.extra,

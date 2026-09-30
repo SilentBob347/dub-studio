@@ -222,9 +222,27 @@ async function coded<T>(r: Response): Promise<T> {
 }
 const sendCoded = <T>(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<T> =>
   fetch(`${BASE}${path}`, body === undefined ? { method } : { method, headers: JSON_HEADERS, body: JSON.stringify(body) }).then(coded<T>);
+const getCoded = <T>(path: string): Promise<T> => fetch(`${BASE}${path}`).then(coded<T>);
 
 export type OpenRouterSettings = { configured: boolean; source: "environment" | "local_store" | null; environment_variable: string };
-export type ProxySettings = { on: boolean; url: string; password_set: boolean };
+// Прокси: режим (как в Windows / свой / без прокси), тип для адреса без схемы, адрес без пароля и problem —
+// почему сохранённый свой адрес не читается.
+export type ProxyMode = "system" | "custom" | "off";
+export type ProxyKind = "http" | "https" | "socks5" | "socks4";
+export type ProxySettings = { mode: ProxyMode; kind: ProxyKind; on: boolean; url: string; password_set: boolean; problem: string | null };
+export type ProxyProbe = { ok: boolean; hf?: boolean; openrouter?: boolean; hf_error?: string | null; openrouter_error?: string | null; error?: string };
+// Модель каталога OpenRouter: цены — строки USD за единицу (токен), как у OpenRouter.
+export type OrPricing = { prompt?: string; completion?: string; image?: string; audio?: string; request?: string };
+export type OrModel = { id: string; name: string; context_length?: number | null; pricing?: OrPricing | null; input_modalities?: string[]; voices?: string[] };
+export type OrModelKind = "llm" | "vision" | "tts" | "asr";
+export type OrCatalog = { refreshed_at: number; total: number; counts: Record<OrModelKind, number> };
+// Провайдер перевода/vision: своя Gemma, локальный OpenAI-совместимый сервер или OpenRouter. Сервер отдаёт
+// действующий провайдер в llm_provider/vision_provider, даже если он выбран прежними флагами or_*_on.
+export type LlmProviderKind = "local" | "server" | "openrouter";
+export const llmProviderOf = (sel: Selection | undefined, stage: "llm" | "vision"): LlmProviderKind => {
+  const v = slot(sel, stage === "llm" ? "llm_provider" : "vision_provider");
+  return v === "server" || v === "openrouter" ? v : "local";
+};
 
 export const api = {
   capabilities: () => getJson<Capabilities>("/engine/capabilities"),
@@ -250,12 +268,21 @@ export const api = {
   deleteOpenrouterKey: () => sendCoded<OpenRouterSettings>("DELETE", "/engine/openrouter/settings"),
   // Прокси: адрес без пароля + флаг. password: нет поля — оставить сохранённый, null — удалить, строка — заменить.
   proxySettings: () => getJson<ProxySettings>("/engine/proxy/settings"),
-  saveProxy: (form: { on?: boolean; url?: string; password?: string | null }) => sendCoded<ProxySettings>("PUT", "/engine/proxy/settings", form),
-  openrouterModels: (kind: "llm" | "vision" | "tts" | "asr") => getJson<{ models: { id: string; name: string; context?: number }[] }>(`/engine/openrouter/models?kind=${kind}`),
+  saveProxy: (form: { mode?: ProxyMode; kind?: ProxyKind; url?: string; password?: string | null }) => sendCoded<ProxySettings>("PUT", "/engine/proxy/settings", form),
+  // Каталог OpenRouter (кэш на сервере, ключ не нужен): модели стадии, сводка, обновление из сети.
+  openrouterModels: (kind: OrModelKind) => getJson<{ models: OrModel[]; refreshed_at: number }>(`/engine/openrouter/models?kind=${kind}`),
+  openrouterCatalog: () => getJson<OrCatalog>("/engine/openrouter/catalog"),
+  refreshOpenrouterCatalog: () => postJson<OrCatalog>("/engine/openrouter/catalog/refresh", {}),
+  // Локальный OpenAI-совместимый сервер: модели по адресу (через сервер студии) и ключ (только «задан ли»).
+  // Ключ принадлежит адресу, для которого его сохранили: на другой адрес сервер студии его не отправит.
+  serverModels: (url: string) => getCoded<{ models: string[] }>(`/engine/server/models?url=${encodeURIComponent(url)}`),
+  serverKey: (url: string) => getJson<{ configured: boolean }>(`/engine/server/key?url=${encodeURIComponent(url)}`),
+  saveServerKey: (apiKey: string, url: string) => sendCoded<{ configured: boolean }>("PUT", "/engine/server/key", { api_key: apiKey, url }),
+  deleteServerKey: () => sendCoded<{ configured: boolean }>("DELETE", "/engine/server/key"),
   // Голоса TTS-модели с полом/возрастом/русским (встроенный справочник) — для дропдауна + автокастинга.
   openrouterVoices: (model: string) => getJson<{ voices: { name: string; gender: string; age: string; ru: boolean }[]; supportsRussian: boolean | null }>(`/engine/openrouter/voices?model=${encodeURIComponent(model)}`),
-  // Прокси: проверить связность до HF (закачка моделей) и OpenRouter через указанный URL. Пусто -> прямой доступ.
-  proxyTest: (url: string, password?: string) => postJson<{ ok: boolean; hf?: boolean; openrouter?: boolean; hf_error?: string | null; openrouter_error?: string | null; error?: string }>("/engine/proxy/test", password ? { url, password } : { url }),
+  // Прокси: проверить связность до HF (закачка моделей) и OpenRouter при таком режиме/адресе — до сохранения.
+  proxyTest: (form: { mode: ProxyMode; kind: ProxyKind; url: string; password?: string }) => postJson<ProxyProbe>("/engine/proxy/test", form),
   // Пресеты железа: список + детект GPU/VRAM + рекомендация; применение пишет кванты/облако в active.json.
   hwPresets: () => getJson<{ presets: { id: string; title: string; subtitle: string }[]; hardware: { gpuName: string; totalVramGb: number; totalRamGb: number; hasGpu: boolean; recommended: string; reason: string } }>("/engine/presets"),
   applyPreset: (id: string) => postJson<{ ok: boolean; id: string; applied: { key: string; value: string }[] }>("/engine/preset", { id }),

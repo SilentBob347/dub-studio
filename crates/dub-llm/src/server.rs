@@ -254,7 +254,7 @@ impl LlamaServer {
     /// битый gguf / занятый порт), сразу отдаём ошибку с хвостом stderr, не ждём весь таймаут.
     fn wait_ready(&mut self, timeout_secs: u64) -> Result<(), LlmError> {
         let health = format!("{}/health", self.base_url);
-        let client = reqwest::blocking::Client::builder()
+        let client = crate::net::local_builder()
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(|e| LlmError::Spawn(format!("http client: {e}")))?;

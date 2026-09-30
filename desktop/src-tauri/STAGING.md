@@ -23,7 +23,7 @@ scripts\build-release.ps1 -ReleaseNotes "..." -ModelsSource "F:\AI\Dub Studio"
    затем `cargo test --workspace` и `cargo test --manifest-path desktop/src-tauri/Cargo.toml`. Фронт идёт первым:
    оболочка вшивает `frontend/dist` при компиляции, а `dist` в git не лежит.
 2. Staging в `desktop/src-tauri/staging/` (каталог генерируется, в git не попадает): `frontend/dist`, `fonts`,
-   `models/higgs-engine` (только VC++-рантайм), `models/ocr` (PP-OCR), `tools/openrouter-helper`. Сервер встроен в
+   `models/higgs-engine` (только VC++-рантайм), `models/ocr` (PP-OCR). Сервер встроен в
    exe оболочки, отдельный `dub-server.exe` в бандл не кладётся.
 3. `tauri build --config tauri.bundle.conf.json` (он добавляет `bundle.resources` на staging, то же: `npm run bundle`
    в `desktop/`): NSIS и MSI с подписью

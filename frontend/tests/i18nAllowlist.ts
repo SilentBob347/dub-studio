@@ -3,7 +3,7 @@ import type { Allow } from "./scanHardcoded";
 export const ALLOW: Allow = {
   tokens: new Set<string>([
     "OpenRouter", "GitHub", "Telegram", "Claude Code", "Nerual Dreming", "ArtGeneration.me", "Нейро-Софт",
-    "Parakeet-TDT", "Higgs Audio v3", "Gemma-4 12B", "OCR PP-OCR", "Whisper", "Montserrat", "GPU", "VRAM", "RAM", "VRAM ·",
+    "Parakeet-TDT", "Higgs Audio v3", "OCR PP-OCR", "Hugging Face", "HTTP", "HTTPS", "SOCKS5", "SOCKS4", "Whisper", "Montserrat", "GPU", "VRAM", "RAM", "VRAM ·",
     "SPK", "AA", "v", "dB", "px", "px/s", "(Ctrl+Z)", "(Ctrl+Shift+Z)",
     
     "Content-Type",
@@ -18,23 +18,23 @@ export const ALLOW: Allow = {
  * spelled the same in the language. "*" applies to every language.
  */
 export const SAME_AS_EN: Record<"*" | "ru" | "zh" | "es" | "pt" | "fr", string[]> = {
-  "*": ["app.name", "keepOrig.mp4", "keepOrig.mkv", "casting.gender.unknown", "asrVariant.int8", "asrVariant.fp32", "asrVariant.ultra", "jobs.atStage", "downloads.speed"],
+  "*": ["app.name", "keepOrig.mp4", "keepOrig.mkv", "casting.gender.unknown", "asrVariant.int8", "asrVariant.fp32", "asrVariant.ultra", "jobs.atStage", "downloads.speed", "providers.localGemma", "providers.serverUrlPlaceholder"],
   ru: [],
   zh: ["units.gb", "units.mb", "units.kb", "units.b"],
   es: [
     "style.color", "voice.g_female", "voice.g_male", "remix.title", "jobs.kind.remix", "compare.original", "multilang.openEditor",
     "settings.auto", "settings.sec", "common.error", "setup.error", "batch.error", "transcribe.sec",
     "comp.audioLabel", "comp.subsOriginal", "trStyle.normal", "casting.contentAuto",
-    "units.gb", "units.mb", "units.kb", "units.b", "units.watt", "cloud.beta", "proxy.title", "hwPreset.ram",
+    "units.gb", "units.mb", "units.kb", "units.b", "units.watt", "cloud.beta", "proxy.title", "hwPreset.ram", "secrets.proxyTitle",
   ],
   pt: [
     "voice.g_female", "voice.g_male", "remix.title", "jobs.kind.remix", "compare.original", "multilang.openEditor",
     "settings.auto", "settings.sec", "transcribe.sec", "comp.subsOriginal", "trStyle.normal", "casting.contentAuto",
-    "units.gb", "units.mb", "units.kb", "units.b", "units.watt", "cloud.beta", "proxy.title", "hwPreset.ram",
+    "units.gb", "units.mb", "units.kb", "units.b", "units.watt", "cloud.beta", "proxy.title", "hwPreset.ram", "secrets.proxyTitle",
   ],
   fr: [
     "editor.style", "voice.recordStop", "voice.g_female", "remix.title", "jobs.kind.remix", "compare.original", "settings.vision",
     "settings.auto", "settings.sec", "help.sectionsTitle", "common.pause", "comp.audioLabel", "comp.subsOriginal",
-    "trStyle.normal", "casting.contentAuto", "units.watt", "proxy.title", "proxy.services",
+    "trStyle.normal", "casting.contentAuto", "units.watt", "proxy.title", "proxy.services", "secrets.proxyTitle",
   ],
 };

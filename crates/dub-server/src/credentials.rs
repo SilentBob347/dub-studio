@@ -24,6 +24,7 @@ pub const OPENROUTER_ENV_VAR: &str = "OPENROUTER_API_KEY";
 pub const SECRETS_DIR_ENV_VAR: &str = "DUB_STUDIO_SECRETS_DIR";
 const OPENROUTER_FILE: &str = "openrouter-api-key";
 const PROXY_PASSWORD_FILE: &str = "proxy-password";
+const LOCAL_SERVER_FILE: &str = "local-server-key";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +54,53 @@ pub fn store_openrouter_api_key(api_key: Option<&str>) -> Result<Option<Credenti
     let dir = secrets_dir().context("no per-user application data directory for credential storage")?;
     let stored = write_secret(&dir, OPENROUTER_FILE, api_key, "an OpenRouter API key must be a single line")?;
     Ok(stored.then_some(CredentialSource::LocalStore))
+}
+
+/// Ключ локального OpenAI-совместимого сервера (LM Studio, vLLM с --api-key) лежит вместе с адресом, для
+/// которого его сохранили (`dub_llm::server_base`), и отдаётся только для этого адреса: сменённый адрес или
+/// чужой адрес в запросе ключа не получают.
+#[derive(serde::Deserialize)]
+struct ServerKeyRecord {
+    address: String,
+    key: String,
+}
+
+/// Ключ локального сервера для запросов на `address`; None — ключа нет или он сохранён для другого адреса.
+pub fn local_server_key_for(address: &str) -> Option<String> {
+    local_server_key_in(&secrets_dir()?, address)
+}
+
+/// Записать ключ локального сервера для адреса `address`; None или пусто — удалить. Возвращает, лежит ли теперь
+/// ключ.
+pub fn store_local_server_key(address: &str, key: Option<&str>) -> Result<bool> {
+    let dir = secrets_dir().context("no per-user application data directory for credential storage")?;
+    store_local_server_key_in(&dir, address, key)
+}
+
+pub(crate) fn store_local_server_key_in(dir: &Path, address: &str, key: Option<&str>) -> Result<bool> {
+    let Some(key) = key.map(str::trim).filter(|key| !key.is_empty()) else {
+        return write_secret(dir, LOCAL_SERVER_FILE, None, "");
+    };
+    if key.contains(['\r', '\n']) {
+        bail!("a server key must be a single line");
+    }
+    let address = dub_llm::server_base(address);
+    if address.is_empty() {
+        bail!("a server key needs the address of its server");
+    }
+    let record = serde_json::json!({ "address": address, "key": key }).to_string();
+    write_secret(dir, LOCAL_SERVER_FILE, Some(&record), "a server key must be a single line")
+}
+
+pub(crate) fn local_server_key_in(dir: &Path, address: &str) -> Option<String> {
+    let text = read_secret(dir, LOCAL_SERVER_FILE)?;
+    match serde_json::from_str::<ServerKeyRecord>(&text) {
+        Ok(record) => (record.address == dub_llm::server_base(address)).then_some(record.key),
+        Err(error) => {
+            tracing::error!("the local server key is stored without its address ({error}); save the key again");
+            None
+        }
+    }
 }
 
 /// Пароль прокси: хранится отдельно от адреса, в active.json лежит адрес без пароля.
@@ -236,6 +284,33 @@ mod tests {
     }
 
     #[test]
+    fn the_local_server_key_belongs_to_its_address() {
+        let dir = scratch("server-key");
+        let lan = "http://192.168.1.5:1234";
+        assert!(store_local_server_key_in(&dir, lan, Some(" lm-studio-key ")).unwrap());
+        for same in [lan, "http://192.168.1.5:1234/", "http://192.168.1.5:1234/v1", " http://192.168.1.5:1234/v1/ "] {
+            assert_eq!(local_server_key_in(&dir, same).as_deref(), Some("lm-studio-key"), "{same}");
+        }
+        for other in ["http://attacker.example:1234", "http://192.168.1.5:1235", "https://192.168.1.5:1234", "http://127.0.0.1:11434"] {
+            assert_eq!(local_server_key_in(&dir, other), None, "the key must not reach {other}");
+        }
+        assert!(!fs::read_to_string(dir.join(LOCAL_SERVER_FILE)).unwrap().contains('\n'));
+        assert!(store_local_server_key_in(&dir, "", Some("k")).is_err());
+        assert!(store_local_server_key_in(&dir, lan, Some("a\nb")).is_err());
+
+        assert!(store_local_server_key_in(&dir, "http://127.0.0.1:11434", Some("other")).unwrap());
+        assert_eq!(local_server_key_in(&dir, lan), None, "a key saved for another address replaces the old one");
+        assert_eq!(local_server_key_in(&dir, "http://127.0.0.1:11434").as_deref(), Some("other"));
+
+        fs::write(dir.join(LOCAL_SERVER_FILE), "bare-key").unwrap();
+        assert_eq!(local_server_key_in(&dir, lan), None, "a key without its address goes nowhere");
+
+        assert!(!store_local_server_key_in(&dir, lan, None).unwrap());
+        assert_eq!(local_server_key_in(&dir, lan), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn tests_never_reach_the_users_store() {
         if env::var_os(SECRETS_DIR_ENV_VAR).is_none() {
             assert!(secrets_dir().unwrap().starts_with(env::temp_dir()));
@@ -262,7 +337,7 @@ mod tests {
         assert_eq!(selection["tts"], "q6_k");
         assert_eq!(selection["proxy_on"], "1");
         assert_eq!(read_secret(&secrets, OPENROUTER_FILE).as_deref(), Some("sk-or-v1-secret"));
-        assert_eq!(proxy_password_in(&secrets).as_deref(), Some("s3cr%40t"));
+        assert_eq!(proxy_password_in(&secrets).as_deref(), Some("s3cr@t"), "the store keeps the password itself, not its %XX form");
         assert!(!models.join("active.json.tmp").exists());
 
         assert_eq!(migrate_legacy_selection_into(&models, &secrets).unwrap(), Migrated::default());

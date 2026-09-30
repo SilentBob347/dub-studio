@@ -2,7 +2,7 @@
 //! Корень репо резолвится из env DUB_STUDIO_ROOT, иначе — рабочий каталог процесса.
 
 use dub_server::service::{self, Claim};
-use dub_server::{apply_proxy_env, augment_path_for_tools, serve, AppState};
+use dub_server::{augment_path_for_tools, init_proxy_route, serve, AppState};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     // Прописать в PATH каталоги скачанных бинарей (ffmpeg/llama/higgs-engine) до старта — чтобы после
     // автозакачки они находились без рестарта процесса.
     augment_path_for_tools(&repo_root);
-    apply_proxy_env(&repo_root);
+    init_proxy_route(&repo_root);
 
     let state = AppState::new(&repo_root);
     tracing::info!(

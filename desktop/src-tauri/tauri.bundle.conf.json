@@ -8,8 +8,7 @@
       "staging/frontend/dist": "frontend/dist",
       "staging/fonts": "fonts",
       "staging/models/higgs-engine": "models/higgs-engine",
-      "staging/models/ocr": "models/ocr",
-      "staging/tools/openrouter-helper": "tools/openrouter-helper"
+      "staging/models/ocr": "models/ocr"
     }
   }
 }

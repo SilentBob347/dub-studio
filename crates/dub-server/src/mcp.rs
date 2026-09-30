@@ -838,7 +838,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "settings_get",
-                description: "The studio's settings and the values each takes: the model variant of each stage (tts, mt, sep, asr, asr_engine, whisper_model, whisper_compute, whisper_device), where each local stage runs (local_backend, sep_backend, diar_backend, asr_backend: auto, gpu, cpu), the voicing switches (qc_asr, qc_duration, multitake, breath_on, speech_rate_on, emo_ref_on, duck_on), the memory limits (llama_ubatch, higgs_ref_secs), the cloud stages through OpenRouter (or_llm_on, or_llm, or_vision_on, or_vision, or_tts_on, or_tts_model, or_tts_voice, or_tts_autocast, or_asr_on, or_asr, or_concurrency), whether the proxy is on (proxy_on; proxy_settings_set sets its address) and the stage benchmark (bench). The OpenRouter key is never shown: or_key_set says whether there is one.",
+                description: "The studio's settings and the values each takes: the model variant of each stage (tts, mt, sep, asr, asr_engine, whisper_model, whisper_compute, whisper_device), where each local stage runs (local_backend, sep_backend, diar_backend, asr_backend: auto, gpu, cpu), the voicing switches (qc_asr, qc_duration, multitake, breath_on, speech_rate_on, emo_ref_on, duck_on), the memory limits (llama_ubatch, higgs_ref_secs), who translates and who reads frames (llm_provider, vision_provider: local = the studio's Gemma, server = a local OpenAI-compatible server at srv_url with the models srv_llm and srv_vision, openrouter = the cloud with or_llm and or_vision), the other cloud stages through OpenRouter (or_tts_on, or_tts_model, or_tts_voice, or_tts_autocast, or_asr_on, or_asr, or_concurrency), whether the proxy is on (proxy_on; proxy_settings_set sets its address) and the stage benchmark (bench). The OpenRouter key is never shown: or_key_set says whether there is one.",
                 schema: nothing,
                 call: |_| get("/engine/capabilities".into()),
             },
@@ -962,6 +962,48 @@ fn tools() -> &'static [Tool] {
                 description: "The OpenRouter models for a cloud stage: llm (translation), vision (reading frames), tts (voices), asr (speech recognition). Needs the key.",
                 schema: || object(json!({ "kind": { "type": "string", "enum": ["llm", "vision", "tts", "asr"] } }), &["kind"]),
                 call: |args| get(format!("/engine/openrouter/models{}", query(&[("kind", Some(text(args, "kind")?))]))),
+            },
+            Tool {
+                name: "openrouter_catalog",
+                description: "The state of the studio's OpenRouter model catalog (kept on disk): when it was fetched and how many models each cloud stage can choose from (llm, vision, tts, asr); openrouter_models lists them with prices and context.",
+                schema: nothing,
+                call: |_| get("/engine/openrouter/catalog".into()),
+            },
+            Tool {
+                name: "openrouter_catalog_refresh",
+                description: "Fetch the OpenRouter model catalog again now instead of the copy on disk.",
+                schema: nothing,
+                call: |_| post("/engine/openrouter/catalog/refresh".into(), json!({})),
+            },
+            Tool {
+                name: "local_server_models",
+                description: "The models of the local OpenAI-compatible server (Ollama, LM Studio, vLLM, llama-server) for translation and vision: url is its address (default: the one in settings); a stored key goes only to the address it was saved for.",
+                schema: || object(json!({ "url": { "type": "string" } }), &[]),
+                call: |args| get(format!("/engine/server/models{}", query(&[("url", given(args, "url"))]))),
+            },
+            Tool {
+                name: "local_server_key_status",
+                description: "Whether an API key is stored for the local server's address (url, default: the one in settings); the key itself is never shown.",
+                schema: || object(json!({ "url": { "type": "string" } }), &[]),
+                call: |args| get(format!("/engine/server/key{}", query(&[("url", given(args, "url"))]))),
+            },
+            Tool {
+                name: "local_server_key_set",
+                description: "Store an API key for the local server (vLLM and LM Studio can ask for one); it is sent only to that address (url, default: the one in settings).",
+                schema: || object(json!({ "api_key": { "type": "string" }, "url": { "type": "string" } }), &["api_key"]),
+                call: |args| {
+                    let mut body = json!({ "api_key": text(args, "api_key")? });
+                    if let Some(url) = given(args, "url") {
+                        body["url"] = url.into();
+                    }
+                    send(Method::PUT, "/engine/server/key".into(), body)
+                },
+            },
+            Tool {
+                name: "local_server_key_delete",
+                description: "Remove the API key stored for the local server's address in settings.",
+                schema: nothing,
+                call: |_| send(Method::DELETE, "/engine/server/key".into(), json!({})),
             },
             Tool {
                 name: "openrouter_voices",

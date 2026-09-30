@@ -124,11 +124,17 @@ fn spawn_update_check(app: tauri::AppHandle, portable: bool) {
     let install_in_place =
         !portable && tauri::utils::platform::bundle_type() == Some(BundleType::Nsis);
     tauri::async_runtime::spawn(async move {
+        // Прокси из настроек: GitHub, откуда обновления, — среди сайтов, ради которых прокси и ставят.
+        let builder = match dub_server::net::fixed() {
+            dub_server::net::Fixed::System => app.updater_builder(),
+            dub_server::net::Fixed::Direct => app.updater_builder().no_proxy(),
+            dub_server::net::Fixed::Through(proxy) => app.updater_builder().proxy(proxy),
+        };
         // Установщик — ребёнок этого процесса, а процесс сидит в своём job с kill-on-close: без
         // освобождения установщик умер бы вместе со студией, ничего не поставив. Свой хук заменяет
         // штатный, поэтому cleanup_before_exit вызывается здесь же.
         let cleanup = app.clone();
-        let mut builder = app.updater_builder().on_before_exit(move || {
+        let mut builder = builder.on_before_exit(move || {
             cleanup.cleanup_before_exit();
             dub_server::process_group::terminate_group_members();
             if !dub_server::process_group::release_children() {
@@ -250,6 +256,8 @@ pub fn run() {
     };
     let repo_root = placed.server_root;
     setup_server_env(&repo_root);
+    // Маршрут прокси до проверки обновлений: сервер ставит его в своём потоке, без гарантии, что раньше.
+    dub_server::init_proxy_route(&repo_root);
 
     let context = tauri::generate_context!();
     service::set_app_version(context.package_info().version.to_string());

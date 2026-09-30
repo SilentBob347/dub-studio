@@ -831,7 +831,7 @@ fn translate_taglines(
     use dub_translate::{flat_run, Seg};
 
     let paths = ctx.paths;
-    // LLM-провайдер: облако OpenRouter (если включено) ИЛИ локальный llama-server (плоский MT, без mmproj).
+    // LLM-провайдер перевода: своя Gemma (плоский MT, без mmproj), локальный сервер или OpenRouter.
     let prov = match crate::llm_provider::open(
         &crate::llm_provider::LlmOpen {
             llama_bin: &paths.llama_bin,

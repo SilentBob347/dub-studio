@@ -162,7 +162,11 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
   `fonts_list`, `caption_presets_list`, `launch_defaults_get`, `launch_defaults_set` (what the start
   screen's form opens with), `studio_paths` (where the data, projects and models are).
 - **openrouter**: `openrouter_status`, `openrouter_set_key`, `openrouter_delete_key`,
-  `openrouter_verify`, `openrouter_models`, `openrouter_voices`.
+  `openrouter_verify`, `openrouter_models`, `openrouter_voices`, `openrouter_catalog`,
+  `openrouter_catalog_refresh`.
+- **local server** (Ollama, LM Studio, vLLM, llama-server for translation and vision):
+  `local_server_models`, `local_server_key_status`, `local_server_key_set`, `local_server_key_delete`;
+  the provider of each stage is `settings_set` `llm_provider` / `vision_provider` (local, server, openrouter).
 - **project**: `projects_list` (query, since, until), `project_create`, `project_get`,
   `project_analyze`, `project_resume`, `project_retranslate`, `project_remix`,
   `project_align`, `project_dub_audio`, `project_render`, `project_export_lang`,

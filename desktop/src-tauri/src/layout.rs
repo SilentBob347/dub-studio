@@ -16,12 +16,11 @@ pub const PORTABLE_MARKER: &str = "portable.flag";
 /// Ресурсы бандла (`bundle.resources` в tauri.bundle.conf.json): установщик кладёт их рядом с exe.
 /// Когда данные уезжают в запасной каталог, сервер ищет их там же, где и скачанные модели, поэтому
 /// поставляемые файлы копируются туда.
-const BUNDLED_RESOURCES: [&str; 5] = [
+const BUNDLED_RESOURCES: [&str; 4] = [
     "frontend/dist",
     "fonts",
     "models/ocr",
     "models/higgs-engine",
-    "tools/openrouter-helper",
 ];
 
 pub struct Layout {
