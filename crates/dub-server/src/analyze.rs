@@ -254,7 +254,7 @@ pub struct AnalyzeArgs {
     pub tgt_lang: String,
     pub mode: String,   // auto | dub | nodub | transcribe (auto -> dub по умолчанию, до vision-стадии)
     pub src_lang: String,
-    pub subs: String,   // auto | none | translate | transcribe
+    pub subs: String,   // auto | none | translate | transcribe | bilingual
     pub rewrite: String,
     pub translate_style: String, // доп-инструкция стиля перевода (#112); пусто = без стиля
     pub burn: bool,     // вжигать ли субтитры/титры на видео (композируемость; дефолт true)
@@ -366,6 +366,8 @@ fn resolve_modes(args: &AnalyzeArgs) -> (String, String) {
     let subs = match (args.subs.as_str(), mode.as_str()) {
         ("none", _) => "none",
         ("transcribe", _) | (_, "transcribe") => "transcribe",
+        // перевод основной строкой + оригинал второй
+        ("bilingual", _) => "bilingual",
         // dub / nodub c subs=auto|translate -> translate
         _ => "translate",
     }
@@ -428,7 +430,7 @@ fn has_speech_text(text: &str) -> bool {
 }
 
 const DIAR_VER: &str = "nemotron3-diar-v3 · offline · merge_gap=0.8 · min_spk=10%[1.5..2.5] · out-v2";
-const ASR_VER: &str = "asr-v3-hallucination-filter";
+const ASR_VER: &str = "asr-v4-abbrev-speaker-split";
 const TRANSLATE_VER: &str = "gemma-ctx-v3";
 const OCR_VER: &str = "ppocr-onnx-v2";
 const CAST_VER: &str = "casting-v1";
@@ -689,8 +691,9 @@ fn quote_list(items: &[String]) -> String {
 
 /// Слить короткие огрызки ОДНОГО спикера в одну фразу (#115). Whisper дробит предложение на «If» +
 /// «they find you.» — каждый огрызок озвучивается отдельно и звучит рвано. Клеим сосед в предыдущий,
-/// если: тот же спикер, зазор < 0.35с, хотя бы один из двух короткий (<1.6с), суммарно ≤12с и <200 симв.
-/// Так «одна фраза, разбитая таймингом» снова становится одной; две полные разные фразы НЕ склеиваются.
+/// если: тот же спикер, зазор < 0.35с, хотя бы один из двух короткий (<1.6с) или из одного слова,
+/// суммарно не длиннее капа реплики (SEG_MAX_DUR) и <200 симв. Так «одна фраза, разбитая таймингом»
+/// снова становится одной; две полные разные фразы НЕ склеиваются.
 fn merge_short_turns(segs: &mut Vec<Segment>) {
     if segs.len() < 2 {
         return;
@@ -701,7 +704,7 @@ fn merge_short_turns(segs: &mut Vec<Segment>) {
     // склеится и озвучится рвано (ровно то, что merge и должен убирать).
     const OVERLAP: f64 = 0.2;
     const SHORT: f64 = 1.6;
-    const MAX_DUR: f64 = 12.0;
+    const MAX_DUR: f64 = dub_asr::SEG_MAX_DUR;
     const MAX_CH: usize = 200;
     let src = std::mem::take(segs);
     let mut out: Vec<Segment> = Vec::with_capacity(src.len());
@@ -716,7 +719,8 @@ fn merge_short_turns(segs: &mut Vec<Segment>) {
             }
             let same_spk = last.speaker == s.speaker;
             let gap = s.start - last.end;
-            let short = (last.end - last.start) < SHORT || (s.end - s.start) < SHORT;
+            let one_word = |x: &Segment| x.src_text.split_whitespace().count() <= 1;
+            let short = (last.end - last.start) < SHORT || (s.end - s.start) < SHORT || one_word(last) || one_word(&s);
             let dur_ok = (s.end - last.start) <= MAX_DUR;
             let ch_ok = last.src_text.chars().count() + s.src_text.chars().count() < MAX_CH;
             if same_spk && gap > -OVERLAP && gap < GAP && short && dur_ok && ch_ok {
@@ -1027,10 +1031,11 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         let ts = asr
             .transcribe(&asr_wav, &args.src_lang)
             .map_err(|e| format!("transcribe: {e}"))?;
-        let segs: Vec<Segment> = ts
+        // Спикер — по словам: реплика, на которой сменился спикер диаризации, режется на слове смены.
+        let segs: Vec<Segment> = dub_asr::split_at_speaker_turns(ts, turns)
             .into_iter()
             .enumerate()
-            .map(|(i, s)| {
+            .map(|(i, (s, spk))| {
                 let words: Vec<Value> = s
                     .words
                     .iter()
@@ -1038,16 +1043,11 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
                     .collect();
                 let mut extra = serde_json::Map::new();
                 extra.insert("words".into(), Value::Array(words));
-                let spk = if turns.is_empty() {
-                    "0".to_string()
-                } else {
-                    speaker_for(s.start, s.end, turns)
-                };
                 Segment {
                     id: format!("s{i}"),
                     start: s.start,
                     end: s.end,
-                    speaker: Some(spk),
+                    speaker: Some(spk.to_string()),
                     src_text: s.text,
                     tgt_text: String::new(),
                     voice: None,
@@ -1516,5 +1516,78 @@ mod resume_tests {
         assert_eq!(r[0].text, "TITLE");
         assert_eq!((r[0].w, r[0].t1), (30, 2.0));
         assert_eq!((d[0].h, d[0].t), (10.0, 0.5));
+    }
+}
+
+#[cfg(test)]
+mod segment_rules_tests {
+    use super::*;
+
+    fn seg(id: &str, start: f64, end: f64, spk: &str, text: &str) -> Segment {
+        Segment { id: id.into(), start, end, speaker: Some(spk.into()), src_text: text.into(), ..Default::default() }
+    }
+
+    fn texts(v: &[Segment]) -> Vec<&str> {
+        v.iter().map(|s| s.src_text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_short_english_piece_joins_the_next_line_of_its_speaker() {
+        let mut v = vec![seg("s0", 0.0, 0.3, "0", "If"), seg("s1", 0.5, 1.9, "0", "they find you.")];
+        merge_short_turns(&mut v);
+        assert_eq!(texts(&v), ["If they find you."]);
+        assert_eq!((v[0].start, v[0].end), (0.0, 1.9));
+    }
+
+    #[test]
+    fn a_russian_one_word_line_joins_even_when_it_is_long() {
+        let mut v = vec![seg("s0", 0.0, 1.8, "1", "Ну-у-у"), seg("s1", 2.0, 4.5, "1", "ладно, пойдём.")];
+        merge_short_turns(&mut v);
+        assert_eq!(texts(&v), ["Ну-у-у ладно, пойдём."]);
+    }
+
+    #[test]
+    fn a_german_piece_of_another_speaker_stays_apart() {
+        let mut v = vec![seg("s0", 0.0, 0.4, "0", "Ja"), seg("s1", 0.5, 2.0, "1", "das geht nicht.")];
+        merge_short_turns(&mut v);
+        assert_eq!(texts(&v), ["Ja", "das geht nicht."]);
+    }
+
+    #[test]
+    fn a_join_never_goes_over_the_line_cap_or_across_a_pause() {
+        let mut long = vec![seg("s0", 0.0, 0.5, "0", "Hey"), seg("s1", 0.6, 8.4, "0", "a very long line that runs past the cap")];
+        merge_short_turns(&mut long);
+        assert_eq!(long.len(), 2, "итог длиннее SEG_MAX_DUR");
+        let mut pause = vec![seg("s0", 0.0, 0.5, "0", "Hey"), seg("s1", 1.0, 2.0, "0", "you there")];
+        merge_short_turns(&mut pause);
+        assert_eq!(pause.len(), 2, "пауза 0.5 с — это две фразы");
+    }
+
+    fn args(mode: &str, subs: &str) -> AnalyzeArgs {
+        AnalyzeArgs {
+            tgt_lang: "ru".into(),
+            mode: mode.into(),
+            src_lang: "auto".into(),
+            subs: subs.into(),
+            rewrite: String::new(),
+            translate_style: String::new(),
+            burn: true,
+            detect_text: false,
+            casting: false,
+            casting_ref: String::new(),
+            content_type: "auto".into(),
+            import_translated: false,
+            align_subs: false,
+        }
+    }
+
+    #[test]
+    fn bilingual_subtitles_are_kept_for_a_dub_and_the_original_is_kept_for_a_transcript() {
+        assert_eq!(resolve_modes(&args("dub", "bilingual")), ("dub".into(), "bilingual".into()));
+        assert_eq!(resolve_modes(&args("voiceover", "bilingual")).1, "bilingual");
+        assert_eq!(resolve_modes(&args("nodub", "bilingual")).1, "bilingual");
+        assert_eq!(resolve_modes(&args("dub", "transcribe")).1, "transcribe");
+        assert_eq!(resolve_modes(&args("transcribe", "bilingual")).1, "transcribe");
+        assert_eq!(resolve_modes(&args("auto", "auto")).1, "translate");
     }
 }

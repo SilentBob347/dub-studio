@@ -69,11 +69,24 @@ impl DiarIndex {
     /// Спикер для реплики [start,end): argmax суммарного перекрытия по спикеру. Возвращает
     /// `Some(speaker)` при наличии перекрытия, иначе `None` (тогда вызвать [`Self::nearest`]).
     pub fn speaker_by_overlap(&self, start: f64, end: f64) -> Option<i32> {
+        // argmax по перекрытию; тай-брейк — меньший id спикера (детерминизм).
+        self.overlaps(start, end)
+            .into_iter()
+            .max_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(b.0.cmp(&a.0)) // при равном перекрытии предпочесть МЕНЬШИЙ id
+            })
+            .map(|(spk, _)| spk)
+    }
+
+    /// Суммарное перекрытие [start, end) с репликами каждого спикера (только спикеры с перекрытием > 0),
+    /// по возрастанию id.
+    pub fn overlaps(&self, start: f64, end: f64) -> Vec<(i32, f64)> {
         if self.turns.is_empty() || end <= start {
-            return None;
+            return Vec::new();
         }
-        use std::collections::HashMap;
-        let mut acc: HashMap<i32, f64> = HashMap::new();
+        let mut acc: std::collections::BTreeMap<i32, f64> = std::collections::BTreeMap::new();
         // с первого кандидата идём вправо, пока turn.start < end (дальше пересечений быть не может,
         // т.к. отсортировано по start)
         let from = self.first_candidate(start);
@@ -86,14 +99,7 @@ impl DiarIndex {
                 *acc.entry(t.speaker).or_insert(0.0) += ov;
             }
         }
-        // argmax по перекрытию; тай-брейк — меньший id спикера (детерминизм).
-        acc.into_iter()
-            .max_by(|a, b| {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(b.0.cmp(&a.0)) // при равном перекрытии предпочесть МЕНЬШИЙ id
-            })
-            .map(|(spk, _)| spk)
+        acc.into_iter().collect()
     }
 
     /// Ближайший спикер по центру реплики — фолбэк для реплик без перекрытия (fill_nearest).
