@@ -21,7 +21,7 @@ parakeet-rs = { version = "=0.3.7", default-features = false, features = ["sortf
 # ExecutionConfig::with_custom_configure (уровень оптимизации графа).
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "tracing", "api-28"] }
 hound = "3.5"
-# Ресемплинг с ограничением полосы (как audio-post студий): FFT-ресемплер вместо линейной интерполяции.
+# Ресемплинг с ограничением полосы (FFT-ресемплер, как audio-post студий).
 rubato = "5.0"
 audioadapter = "5.0"
 audioadapter-buffers = "5.2"
