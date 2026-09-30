@@ -37,6 +37,22 @@
 
 这是**完全原生重写**。没有内嵌 Python、没有 torch、没有 CUDA wheel。整条流水线是 **Rust + 原生 C++/CUDA 引擎（GGUF/ONNX）**：单进程、启动快、显存占用低。模型、引擎、CUDA/VC++ 运行库和 ffmpeg 都由应用在首次运行时**自行一键下载安装**。**推荐 NVIDIA，但并非必需** —— 分离有 CPU 版本，说话人分离与语音识别可在 CPU 上运行，繁重部分（翻译、视觉、TTS）交给云端，因此在完全没有 NVIDIA 的机器上也能完成配音。
 
+## 面向 AI 智能体
+
+Dub Studio 打开时会在 `http://127.0.0.1:8793/mcp` 提供 MCP 服务：Claude Code、Claude Desktop、Cursor、Codex 等智能体可以通过同一套代码完成窗口能做的一切——用视频文件创建项目、进行分析、逐行修改译文、时间轴和说话人、分配配音、设置字幕样式、添加标题和模糊区域、渲染、把同一视频导出为更多语言、写出 SRT 和 TXT，并把结果保存到文件夹。在设置的 **智能体 (MCP)** 部分可以看到智能体是否已连接，以及要粘贴到客户端的内容。
+
+拿到这个仓库后，智能体可以自行完成安装并操控工作室：
+
+1. 从[最新版本](https://github.com/timoncool/dub-studio/releases/latest)安装工作室并启动。
+2. 连接到它的 MCP 服务：
+   ```bash
+   claude mcp add --transport http dub-studio http://127.0.0.1:8793/mcp
+   ```
+   其他客户端：`{ "mcpServers": { "dub-studio": { "type": "streamable-http", "url": "http://127.0.0.1:8793/mcp" } } }`
+3. 阅读服务器提供的技能说明（资源 `studio://skill`，提示词 `studio`），内容与 [docs/mcp-skill.md](docs/mcp-skill.md) 相同——包含所有工具、基本规则和分步操作——然后从工具 `studio_status` 开始。
+
+[llms.txt](llms.txt) 为会查找它的工具提供同样的信息。若想在 Claude Code 中长期保留该技能，请把 [docs/mcp-skill.md](docs/mcp-skill.md) 保存为 `~/.claude/skills/dub-studio/SKILL.md`。只有本机上的智能体和工作室自己的窗口可以连接。
+
 ## 五种模式，随时切换
 
 | 模式 | 作用 |

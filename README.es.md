@@ -37,6 +37,22 @@ Por defecto todo se ejecuta **localmente en tu equipo** —— sin nube ni suscr
 
 Es **una reescritura totalmente nativa**. Sin Python embebido, sin torch, sin ruedas CUDA. Toda la canalización es **Rust + motores nativos C++/CUDA (GGUF/ONNX)**: un proceso, arranque rápido, poca VRAM. Los modelos, motores, runtime de CUDA/VC++ y ffmpeg los **descarga e instala la propia app** en el primer arranque. **NVIDIA es recomendable, pero no obligatoria**: la separación trae una compilación para CPU, la diarización y el ASR corren en CPU, y las etapas pesadas (traducción, visión, TTS) van a la nube, así que un doblaje puede montarse en un equipo sin NVIDIA alguna.
 
+## Para agentes de IA
+
+Mientras Dub Studio está abierto, ofrece un servidor MCP en `http://127.0.0.1:8793/mcp`: un agente como Claude Code, Claude Desktop, Cursor o Codex hace todo lo que hace la ventana, con el mismo código: crea proyectos a partir de archivos de vídeo, los analiza, corrige la traducción, los tiempos y los hablantes línea por línea, asigna las voces, da estilo a los subtítulos, añade títulos y zonas de desenfoque, renderiza, exporta el mismo vídeo a más idiomas, escribe SRT y TXT y guarda los resultados en una carpeta. En Ajustes, **Agente (MCP)** muestra si hay un agente conectado y qué pegar en el cliente.
+
+Con este repositorio, un agente puede instalarlo todo y manejar el estudio por sí mismo:
+
+1. Instalar el estudio desde la [última versión](https://github.com/timoncool/dub-studio/releases/latest) e iniciarlo.
+2. Conectarse a su servidor MCP:
+   ```bash
+   claude mcp add --transport http dub-studio http://127.0.0.1:8793/mcp
+   ```
+   Otros clientes: `{ "mcpServers": { "dub-studio": { "type": "streamable-http", "url": "http://127.0.0.1:8793/mcp" } } }`
+3. Leer la skill que sirve el servidor (recurso `studio://skill`, prompt `studio`), el mismo texto que [docs/mcp-skill.md](docs/mcp-skill.md) —todas las herramientas, las reglas básicas y recetas paso a paso— y empezar con la herramienta `studio_status`.
+
+[llms.txt](llms.txt) dice lo mismo para las herramientas que lo buscan. Para tener la skill siempre en Claude Code, guarda [docs/mcp-skill.md](docs/mcp-skill.md) como `~/.claude/skills/dub-studio/SKILL.md`. Solo pueden conectarse los agentes de este ordenador y la propia ventana del estudio.
+
 ## Cinco modos, conmutables al vuelo
 
 | Modo | Qué hace |
