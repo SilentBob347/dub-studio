@@ -10,6 +10,7 @@ import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
 import { playSfx, sfxEnabled, setSfxEnabled } from "./lib/sfx";
 import ResourceMonitor from "./components/ResourceMonitor";
+import SubsAlignToggle from "./components/SubsAlignToggle";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -1030,6 +1031,7 @@ function DropZone() {
   const [file, setFile] = useState<File | null>(null);                          // staged video — analyzed on Start, not on drop
   const [subsFile, setSubsFile] = useState<File | null>(null);                  // опц. готовые субтитры (SRT/ASS) -> текст+тайминг вместо ASR
   const [subsTranslated, setSubsTranslated] = useState(false);                  // сабы уже на языке перевода -> tgt из них, MT пропустить (Даб Студио только озвучивает)
+  const [subsAlign, setSubsAlign] = useState(false);
   // Композируемые опции обработки (независимы, любые комбинации). audio = аудио-выход; subs = содержимое
   // субтитров; burn = вжигать ли их на видео; funnyOn+funny = шуточный ремикс (сочетается с дубляжом/голосом).
   const [audio, setAudio] = useState<"nodub" | "dub" | "voiceover" | "transcribe">("dub");
@@ -1192,7 +1194,7 @@ function DropZone() {
       // Готовый кастинг из библиотеки применяем только когда кастинг реально включён (та же видимость, что у галки).
       const effCastingRef = effCasting ? castingRef : "";
       const effContentType = effCasting ? contentType : "real";
-      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType);
+      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType, !audioOnly && !!subsFile && !subsTranslated && subsAlign);
       await api.watchJob(job_id, (e) => { if (e.type === "progress") s.setProgress(e.stage || "", e.msg || "", e.pct ?? null); });
       if (audio === "voiceover") await api.patch(project_id, { op: "voiceover_gain", gain_db: voGain });   // громкость оригинала со старта -> рендер ниже подхватит
       // Блюр-подложка под субтитрами — опция дубляжа/субтитров (дефолт вкл). Патчим, когда сабы вжигаются.
@@ -1358,7 +1360,8 @@ function DropZone() {
                       <input type="checkbox" checked={subsTranslated} onChange={(e) => setSubsTranslated(e.target.checked)} className="accent-[var(--color-accent)]" />
                       {t("import.translated")}
                     </label>
-                    <button onClick={() => { setSubsFile(null); setSubsTranslated(false); }} className="inline-flex items-center gap-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={10} />{t("import.subsClear")}</button>
+                    {!subsTranslated && <SubsAlignToggle checked={subsAlign} onChange={setSubsAlign} />}
+                    <button onClick={() => { setSubsFile(null); setSubsTranslated(false); setSubsAlign(false); }} className="inline-flex items-center gap-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={10} />{t("import.subsClear")}</button>
                   </div>
                 : <span className="text-[10px] text-[var(--color-muted)] leading-tight text-center max-w-[300px]">{t("import.subsHint")}</span>}
             </div>
