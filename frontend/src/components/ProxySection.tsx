@@ -10,6 +10,18 @@ const KINDS: { id: ProxyKind; label: string }[] = [
   { id: "socks4", label: "SOCKS4" },
 ];
 
+// Схема, которую сервер ставит адресу без схемы (dub_llm::net::ProxyKind::scheme). У адреса со схемой тип
+// задаёт схема: выбор типа переписывает её, а при загрузке тип читается из неё.
+const SCHEME: Record<ProxyKind, string> = { http: "http", https: "https", socks5: "socks5h", socks4: "socks4a" };
+const SCHEME_RE = /^([a-z0-9]+):\/\//i;
+const kindOfUrl = (address: string): ProxyKind | null => {
+  const scheme = address.trim().match(SCHEME_RE)?.[1].toLowerCase();
+  if (!scheme) return null;
+  if (scheme.startsWith("socks5")) return "socks5";
+  if (scheme.startsWith("socks4")) return "socks4";
+  return scheme === "https" ? "https" : scheme === "http" ? "http" : null;
+};
+
 const tabCls = (on: boolean) =>
   `flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${on ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`;
 const fieldCls = "flex-1 min-w-0 px-2 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] mono focus:border-[var(--color-accent)] outline-none disabled:opacity-60";
@@ -33,7 +45,7 @@ export default function ProxySection() {
   const [probe, setProbe] = useState<ProxyProbe | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const apply = (s: ProxySettings) => {
-    setMode(s.mode); setKind(s.kind); setUrl(s.url); setPasswordSet(s.password_set); setPassword(""); setProblem(s.problem); setLoaded(true);
+    setMode(s.mode); setKind(kindOfUrl(s.url) ?? s.kind); setUrl(s.url); setPasswordSet(s.password_set); setPassword(""); setProblem(s.problem); setLoaded(true);
   };
   const detail = (e: unknown) => (e instanceof ApiError ? e.detail || e.code : e instanceof Error ? e.message : String(e));
   useEffect(() => {
@@ -57,6 +69,10 @@ export default function ProxySection() {
     setProbe(null); setMsg(null);
     if (next === "custom") { setMode(next); if (url.trim()) save({ mode: next, kind }); return; }
     save({ mode: next });
+  };
+  const pickKind = (next: ProxyKind) => {
+    setKind(next);
+    setUrl((u) => (SCHEME_RE.test(u.trim()) ? u.trim().replace(SCHEME_RE, `${SCHEME[next]}://`) : u));
   };
   const saveCustom = () => {
     const form: Parameters<typeof api.saveProxy>[0] = { mode: "custom", kind, url: url.trim() };
@@ -102,7 +118,7 @@ export default function ProxySection() {
           <div>
             <div className="text-[11px] text-[var(--color-muted)] mb-0.5">{t("secrets.proxyKind")}</div>
             <div className="flex gap-1">
-              {KINDS.map((k) => <button key={k.id} disabled={!loaded} onClick={() => setKind(k.id)} className={tabCls(kind === k.id)}>{k.label}</button>)}
+              {KINDS.map((k) => <button key={k.id} disabled={!loaded} onClick={() => pickKind(k.id)} className={tabCls(kind === k.id)}>{k.label}</button>)}
             </div>
           </div>
           <input type="text" value={url} disabled={!loaded} onChange={(e) => setUrl(e.target.value)}
