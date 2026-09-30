@@ -50,9 +50,12 @@ pub struct CtxConfig {
 }
 
 /// run — единый проход. rewrite=Some(instr) -> творческий ре-дубляж; None -> точный перевод.
-/// llm — уже поднятый клиент к llama-server с mmproj. Пишет segs[i].tgt и возвращает extra.
+/// llm — клиент перевода; vision — клиент мультимодальной модели для кадров и аудио-контекста (у локальной
+/// Gemma это тот же сервер с mmproj). vision=None — фазы 1-3 пропускаются, перевод идёт без них.
+/// Пишет segs[i].tgt и возвращает extra.
 pub fn run(
     llm: &ChatClient,
+    vision: Option<&ChatClient>,
     cfg: &CtxConfig,
     segs: &mut [Seg],
     rewrite: Option<&str>,
@@ -69,8 +72,10 @@ pub fn run(
     // ── фаза 1: VISION layout — ТОЛЬКО если субтитры/титры будут вжигаться ─
     // (гейт по режиму: в «без субтитров»/burn=off выход layout никем не используется, а это 2 vision-
     // вызова на каждый из 5-10 кейфреймов = минуты Gemma на длинном видео впустую).
-    if cfg.want_layout {
-        match vision::analyze_layout(llm, &cfg.input, &tmp, cfg.total, cfg.vh) {
+    if cfg.want_layout && vision.is_none() {
+        log("  ctx vision layout: пропущен (vision-модель не выбрана или недоступна)");
+    } else if let (true, Some(vision_llm)) = (cfg.want_layout, vision) {
+        match vision::analyze_layout(vision_llm, &cfg.input, &tmp, cfg.total, cfg.vh) {
             Ok(layout) => {
                 extra["sub_style"] = layout.sub_style.unwrap_or(Value::Null);
                 extra["sub_y"] = layout.sub_y.map(|y| Value::from(y)).unwrap_or(Value::Null);
@@ -88,14 +93,17 @@ pub fn run(
     }
 
     // ── фаза 2: VISION scene-контекст ──────────────────────────────────────
-    match vision::scene_context(llm, &cfg.input, &tmp, cfg.total, &tgt) {
-        Ok(sc) => extra["scene_context"] = Value::from(sc),
-        Err(e) => log(&format!("  ctx scene skipped: {e}")),
+    match vision {
+        Some(vision_llm) => match vision::scene_context(vision_llm, &cfg.input, &tmp, cfg.total, &tgt) {
+            Ok(sc) => extra["scene_context"] = Value::from(sc),
+            Err(e) => log(&format!("  ctx scene skipped: {e}")),
+        },
+        None => log("  ctx scene: пропущен (vision-модель не выбрана или недоступна)"),
     }
 
     // ── фаза 3: AUDIO-контекст (окна <=28с). Fail-safe: нет вокала / модель не умеет audio -> пусто ──
-    if let Some(vocals) = &cfg.vocals16 {
-        match audio_context(llm, vocals, &tgt) {
+    if let (Some(vocals), Some(vision_llm)) = (&cfg.vocals16, vision) {
+        match audio_context(vision_llm, vocals, &tgt) {
             Ok(ac) if !ac.is_empty() => extra["audio_context"] = Value::from(ac),
             Ok(_) => {}
             Err(e) => log(&format!("  ctx audio skipped: {e}")),
@@ -136,13 +144,13 @@ pub fn run(
 
     for (i, s) in segs.iter_mut().enumerate() {
         let t = by_n.get(&(i + 1)).cloned().unwrap_or_default();
-        s.tgt = if t.is_empty() { s.text.trim().to_string() } else { t };
+        s.tgt = if t.is_empty() { s.text.trim().to_string() } else { crate::fix_translation(&t, &cfg.tgt_lang) };
     }
     // переводы тайтлов идут после речевых строк.
     if let Some(arr) = extra["titles"].as_array_mut() {
         for (j, ttl) in arr.iter_mut().enumerate() {
             let default = ttl.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let tr = by_n.get(&(n_seg + j + 1)).cloned().unwrap_or(default);
+            let tr = by_n.get(&(n_seg + j + 1)).map(|t| crate::fix_translation(t, &cfg.tgt_lang)).unwrap_or(default);
             ttl.as_object_mut().map(|o| o.insert("tgt".into(), Value::from(tr)));
         }
     }

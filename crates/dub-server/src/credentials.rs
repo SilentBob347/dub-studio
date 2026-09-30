@@ -24,6 +24,7 @@ pub const OPENROUTER_ENV_VAR: &str = "OPENROUTER_API_KEY";
 pub const SECRETS_DIR_ENV_VAR: &str = "DUB_STUDIO_SECRETS_DIR";
 const OPENROUTER_FILE: &str = "openrouter-api-key";
 const PROXY_PASSWORD_FILE: &str = "proxy-password";
+const LOCAL_SERVER_FILE: &str = "local-server-key";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +54,26 @@ pub fn store_openrouter_api_key(api_key: Option<&str>) -> Result<Option<Credenti
     let dir = secrets_dir().context("no per-user application data directory for credential storage")?;
     let stored = write_secret(&dir, OPENROUTER_FILE, api_key, "an OpenRouter API key must be a single line")?;
     Ok(stored.then_some(CredentialSource::LocalStore))
+}
+
+/// Ключ локального OpenAI-совместимого сервера (LM Studio, vLLM с --api-key), если он его спрашивает.
+pub fn local_server_key() -> Option<String> {
+    read_secret(&secrets_dir()?, LOCAL_SERVER_FILE)
+}
+
+/// Записать ключ локального сервера; None или пусто — удалить. Возвращает, лежит ли теперь ключ.
+pub fn store_local_server_key(key: Option<&str>) -> Result<bool> {
+    let dir = secrets_dir().context("no per-user application data directory for credential storage")?;
+    store_local_server_key_in(&dir, key)
+}
+
+pub(crate) fn store_local_server_key_in(dir: &Path, key: Option<&str>) -> Result<bool> {
+    write_secret(dir, LOCAL_SERVER_FILE, key, "a server key must be a single line")
+}
+
+#[cfg(test)]
+fn local_server_key_in(dir: &Path) -> Option<String> {
+    read_secret(dir, LOCAL_SERVER_FILE)
 }
 
 /// Пароль прокси: хранится отдельно от адреса, в active.json лежит адрес без пароля.
@@ -232,6 +253,16 @@ mod tests {
         assert!(!write_secret(&dir, OPENROUTER_FILE, Some("   "), "one line").unwrap());
         assert_eq!(read_secret(&dir, OPENROUTER_FILE), None);
         assert!(!write_secret(&dir, OPENROUTER_FILE, None, "one line").unwrap());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_local_server_key_is_stored_and_removed() {
+        let dir = scratch("server-key");
+        assert!(store_local_server_key_in(&dir, Some(" lm-studio-key ")).unwrap());
+        assert_eq!(local_server_key_in(&dir).as_deref(), Some("lm-studio-key"));
+        assert!(!store_local_server_key_in(&dir, None).unwrap());
+        assert_eq!(local_server_key_in(&dir), None);
         fs::remove_dir_all(&dir).unwrap();
     }
 

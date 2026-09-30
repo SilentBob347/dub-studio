@@ -167,7 +167,7 @@ const VOICE_PACK_URL: &str =
 const VOICES_DATASET: &str = "Slait/russia_voices";
 
 fn hf_client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
+    dub_llm::net::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| format!("http: {e}"))
@@ -230,7 +230,7 @@ pub fn download_pack(dir: &std::path::Path, cb: &dyn Fn(serde_json::Value)) -> R
     use std::io::{Read, Write};
     std::fs::create_dir_all(dir).map_err(|e| format!("создать {}: {e}", dir.display()))?;
     cb(serde_json::json!({ "stage": "voicepack", "msg": "скачивание пака голосов", "pct": 0 }));
-    let client = reqwest::blocking::Client::builder()
+    let client = dub_llm::net::builder()
         .timeout(None)
         .build()
         .map_err(|e| format!("http: {e}"))?;

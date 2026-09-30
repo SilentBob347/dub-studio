@@ -301,8 +301,29 @@ compose всегда даёт титру bbox (матч ИЛИ fallback цент
 | Метод | Путь | Назначение |
 |-------|------|-----------|
 | GET | `/engine/openrouter/settings` | `{configured, source: environment\|local_store\|null, environment_variable}` |
-| PUT | `/engine/openrouter/settings` | `{api_key}`: проверка ключа в OpenRouter (операция verify сайдкара), затем сохранение; ответ как у GET. Коды: `empty_key`/`invalid_key` 400, `key_rejected` 400, `verify_failed` 502, `environment_key` 409, `store_failed` 500 |
+| PUT | `/engine/openrouter/settings` | `{api_key}`: проверка ключа в OpenRouter (`GET /key`), затем сохранение; ответ как у GET. Коды: `empty_key`/`invalid_key` 400, `key_rejected` 400, `verify_failed` 502, `environment_key` 409, `store_failed` 500 |
 | DELETE | `/engine/openrouter/settings` | Удалить сохранённый ключ; ответ как у GET. `environment_key` 409 |
-| GET | `/engine/proxy/settings` | `{on, url, password_set}` — адрес без пароля |
-| PUT | `/engine/proxy/settings` | `{on?, url?, password?}`: `password` нет или `""` — оставить сохранённый, `null` — удалить, строка — заменить; пароль, вписанный в адрес, уходит в хранилище; `url: ""` — убрать прокси. Коды: `proxy_password_without_user`, `invalid_proxy_url`, `invalid_proxy_password`, `invalid_proxy_on` 400, `store_failed` 500 |
-| POST | `/engine/proxy/test` | `{url, password?}`: адрес с логином без пароля проверяется с паролем из тела; сохранённый пароль подставляется, только если `url` совпадает с сохранённым адресом |
+| GET | `/engine/proxy/settings` | `{mode: system\|custom\|off, kind: http\|https\|socks5\|socks4, on, url, password_set, problem}` — адрес без пароля; `problem` — почему сохранённый свой адрес не читается |
+| PUT | `/engine/proxy/settings` | `{mode?, kind?, url?, password?, on?}`: адрес в любой записи (`host:port:user:pass`, `user:pass@host:port`, `scheme://…`) приводится к URL со схемой по `kind`; `on` — прежняя форма (true = custom, false = off); `password` нет или `""` — оставить сохранённый, `null` — удалить, строка — заменить; пароль, вписанный в адрес, уходит в хранилище; `url: ""` — убрать адрес. Маршрут всех запросов перестраивается сразу. Коды: `proxy_password_without_user`, `invalid_proxy_url`, `invalid_proxy_mode`, `invalid_proxy_kind`, `proxy_url_required`, `invalid_proxy_password`, `invalid_proxy_on` 400, `store_failed` 500 |
+| POST | `/engine/proxy/test` | `{mode?, kind?, url, password?}` (mode по умолчанию custom): HF и OpenRouter параллельно, 15 с, `{ok, hf, openrouter, hf_error, openrouter_error}`; адрес с логином без пароля проверяется с паролем из тела; сохранённый пароль подставляется, только если `url` совпадает с сохранённым адресом |
+| GET/PUT/DELETE | `/engine/server/key` | Ключ локального OpenAI-совместимого сервера: `{configured}`; PUT `{api_key}` (`empty_key`/`invalid_key` 400), DELETE — удалить |
+
+## Провайдеры LLM, OpenRouter, прокси — **done**
+
+- Перевод и vision выбираются независимо: слоты `llm_provider`/`vision_provider` = `local` (своя Gemma) \| `server`
+  (локальный OpenAI-совместимый сервер: Ollama, LM Studio, vLLM, llama-server) \| `openrouter`. Пока слот не задан —
+  прежние `or_llm_on`/`or_vision_on`. В `selection` ответа — всегда действующий провайдер. Сервер: `srv_url`
+  (по умолчанию `http://127.0.0.1:11434`), `srv_llm`, `srv_vision`; ключ — `/engine/server/key`.
+- OpenRouter — из Rust (`dub_llm::openrouter`, без сайдкара): чат, `/audio/speech` (pcm -> WAV 24 кГц моно),
+  `/audio/transcriptions` (verbose_json), `GET /key`. Каталог — `GET /models?output_modalities=all`, кэш
+  `models/openrouter-catalog.json`.
+- Прокси — `dub_llm::net`: режимы как в Windows / свой / без прокси, маршрут спрашивается на каждый запрос;
+  127.0.0.1, localhost, LAN и имена без точки — всегда напрямую.
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/engine/openrouter/models?kind=llm\|vision\|tts\|asr` | Модели каталога для стадии: `{models:[{id, name, context_length, pricing, input_modalities, voices}], refreshed_at}` (ключ не нужен) |
+| GET | `/engine/openrouter/catalog` | `{refreshed_at, total, counts:{llm, vision, tts, asr}}` |
+| POST | `/engine/openrouter/catalog/refresh` | Скачать каталог заново; ответ как у GET |
+| POST | `/engine/openrouter/verify` | `{key}` -> `{ok:true, data}` \| `{ok:false, error}` без сохранения |
+| GET | `/engine/server/models?url=` | Модели локального сервера (`GET <url>/v1/models` через сервер студии): `{models:[id]}`; 502 `{error: server_unreachable, detail}` |

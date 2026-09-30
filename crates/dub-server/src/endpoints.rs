@@ -27,95 +27,180 @@ pub async fn presets() -> Json<Value> {
 }
 
 // ─── GET /engine/openrouter/models?kind=llm|vision|tts|asr ──────────────────
-// Динамический каталог OpenRouter через сайдкар (Go SDK, операция models с фильтром модальности):
-// llm = output text; vision = input image; tts = output speech; asr = output transcription.
+// Модели каталога OpenRouter, подходящие стадии (llm = текст -> текст; vision = картинка -> текст;
+// tts = синтез речи; asr = транскрипция): id, имя, цены (строки USD за токен, как у OpenRouter), контекст,
+// голоса. Каталог — из кэша (память -> диск -> сеть), ключ не нужен.
 pub async fn openrouter_models(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Response {
-    let kind = q.get("kind").cloned().unwrap_or_else(|| "llm".to_string());
-    let Some(key) = crate::models::openrouter_key() else {
-        return (StatusCode::BAD_REQUEST, "ключ OpenRouter не задан").into_response();
+    let kind = q.get("kind").map(String::as_str).unwrap_or("llm");
+    let Some(capability) = dub_llm::openrouter::Capability::parse(kind) else {
+        return (StatusCode::BAD_REQUEST, format!("unknown model kind: {kind:?}")).into_response();
     };
-    let repo = st.repo_root.clone();
-    let payload = match kind.as_str() {
-        "vision" => json!({ "input_modalities": "image" }),
-        "tts" => json!({ "output_modalities": "speech" }),
-        "asr" => json!({ "output_modalities": "transcription" }),
-        _ => json!({ "output_modalities": "text" }),
-    };
-    let res = tokio::task::spawn_blocking(move || {
-        crate::openrouter_cli::run_json(&repo, &key, "models", &payload)
-    })
-    .await
-    .unwrap_or_else(|e| Err(e.to_string()));
-    match res {
-        // helper отдаёт ModelsListResponse {data:[...]}; прокидываем data как список.
-        Ok(v) => {
-            let data = v.get("data").cloned().unwrap_or(v);
-            Json(json!({ "models": data })).into_response()
+    let models_root = st.models_root.clone();
+    match tokio::task::spawn_blocking(move || crate::openrouter::catalog(&models_root)).await.unwrap_or_else(|e| Err(e.to_string())) {
+        Ok(cached) => {
+            let models: Vec<Value> = cached.catalog().models_for(capability).map(model_view).collect();
+            Json(json!({ "models": models, "refreshed_at": cached.refreshed_at })).into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, format!("каталог OpenRouter: {e}")).into_response(),
     }
 }
 
+/// Модель каталога для окна: без служебных полей чат-клиента.
+fn model_view(model: &dub_llm::openrouter::CatalogModel) -> Value {
+    json!({
+        "id": model.id,
+        "name": model.name,
+        "context_length": model.context_length,
+        "pricing": model.pricing,
+        "input_modalities": model.input_modalities,
+        "voices": model.voices,
+    })
+}
+
+// ─── GET /engine/openrouter/catalog, POST /engine/openrouter/catalog/refresh ─
+// Сводка каталога: сколько моделей по стадиям и когда он обновлялся; refresh — скачать заново.
+fn catalog_summary(cached: &crate::openrouter::CachedCatalog) -> Value {
+    use dub_llm::openrouter::Capability;
+    let catalog = cached.catalog();
+    let count = |capability| catalog.models_for(capability).count();
+    json!({
+        "refreshed_at": cached.refreshed_at,
+        "total": cached.models.len(),
+        "counts": {
+            "llm": count(Capability::Text),
+            "vision": count(Capability::Vision),
+            "tts": count(Capability::Speech),
+            "asr": count(Capability::Transcription),
+        },
+    })
+}
+
+pub async fn openrouter_catalog(State(st): State<AppState>) -> Response {
+    let models_root = st.models_root.clone();
+    match tokio::task::spawn_blocking(move || crate::openrouter::catalog(&models_root)).await.unwrap_or_else(|e| Err(e.to_string())) {
+        Ok(cached) => Json(catalog_summary(&cached)).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("каталог OpenRouter: {e}")).into_response(),
+    }
+}
+
+pub async fn openrouter_catalog_refresh(State(st): State<AppState>) -> Response {
+    let models_root = st.models_root.clone();
+    match tokio::task::spawn_blocking(move || crate::openrouter::refresh(&models_root)).await.unwrap_or_else(|e| Err(e.to_string())) {
+        Ok(cached) => Json(catalog_summary(&cached)).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("каталог OpenRouter: {e}")).into_response(),
+    }
+}
+
 // ─── POST /engine/openrouter/verify {key} ───────────────────────────────────
-// Проверка ключа OpenRouter через сайдкар (Go SDK, операция verify -> credits). Ключ из формы (ввод
-// перед сохранением), НЕ логируется.
-pub async fn openrouter_verify(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
+// Проверка ключа OpenRouter (GET /key) без сохранения. Ключ из формы, НЕ логируется. Ответ:
+// {ok:true, data:{label, limit, usage, …}} | {ok:false, error}.
+pub async fn openrouter_verify(Json(body): Json<Value>) -> Response {
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     if key.is_empty() {
         return (StatusCode::BAD_REQUEST, "пустой ключ").into_response();
     }
-    let repo = st.repo_root.clone();
     let res = tokio::task::spawn_blocking(move || {
-        crate::openrouter_cli::run_json(&repo, &key, "verify", &json!({}))
+        dub_llm::openrouter::OpenRouter::new(Some(key)).and_then(|client| client.check_key()).map_err(|e| format!("{e:#}"))
     })
     .await
     .unwrap_or_else(|e| Err(e.to_string()));
     match res {
-        Ok(v) => Json(v).into_response(),
+        Ok(dub_llm::openrouter::KeyCheck::Accepted(data)) => Json(json!({ "ok": true, "data": data })).into_response(),
+        Ok(dub_llm::openrouter::KeyCheck::Rejected(detail)) => Json(json!({ "ok": false, "error": detail })).into_response(),
         Err(e) => Json(json!({ "ok": false, "error": e })).into_response(),
     }
 }
 
-// ─── POST /engine/proxy/test {url, password?} — проверить связность через прокси ────────────────────────────────
-// Пробуем достучаться до HF (закачка моделей) и OpenRouter (облако) через указанный прокси. Пустой url ->
-// проверка ПРЯМОГО доступа (без прокси): юзер сразу видит, нужен ли ему прокси вообще. http_status_as_error
-// выключаем — меряем транспорт (дошли до сервера через прокси), а не HTTP-статус ответа.
+// ─── GET /engine/server/models?url= — модели локального OpenAI-совместимого сервера ──────────────────────
+// Сервер пользователя (Ollama, LM Studio, vLLM, llama-server) отвечает на GET <адрес>/v1/models списком
+// {data:[{id}]}. Спрашиваем через сервер студии, чтобы окно не ходило на чужой адрес само. Без url — адрес из
+// настроек. Ключ — из хранилища секретов.
+pub async fn server_models(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let url = q
+        .get("url")
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| crate::models::server_url(&st.models_root));
+    let res = tokio::task::spawn_blocking(move || list_server_models(&url, crate::credentials::local_server_key()))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
+        Ok(models) => Json(json!({ "models": models })).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": "server_unreachable", "detail": e }))).into_response(),
+    }
+}
+
+/// id моделей сервера по адресу `url` (с `/v1` или без).
+pub(crate) fn list_server_models(url: &str, key: Option<String>) -> Result<Vec<String>, String> {
+    let base = url.trim().trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    if base.is_empty() {
+        return Err("адрес сервера не задан".into());
+    }
+    let endpoint = format!("{base}/v1/models");
+    let client = dub_llm::net::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("http: {e}"))?;
+    let mut request = client.get(&endpoint);
+    if let Some(key) = key {
+        request = request.bearer_auth(key);
+    }
+    let response = request.send().map_err(|e| format!("сервер {base} не ответил: {}", dub_llm::net::why(&e)))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("{endpoint} ответил {status}"));
+    }
+    let body: Value = response.json().map_err(|e| format!("{endpoint} вернул не JSON: {e}"))?;
+    let models = body
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{endpoint} вернул не список моделей OpenAI (нет поля data)"))?;
+    Ok(models.iter().filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string)).collect())
+}
+
+// ─── POST /engine/proxy/test {mode?, kind?, url, password?} — проверить связность ──────────────────────────
+// Отвечают ли HF (закачка моделей) и OpenRouter (облако) при таком прокси — до сохранения. mode по умолчанию
+// custom (прежняя форма {url}); прямой доступ — mode=off, прокси Windows — mode=system. Ответ с любым
+// HTTP-статусом считается: меряем транспорт. 15 с на каждый, оба параллельно, причины ошибок цепочкой.
 pub async fn proxy_test(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
-    let url = crate::secrets_api::proxy_test_address(
+    let mode = match body.get("mode").and_then(Value::as_str) {
+        None => dub_llm::net::ProxyMode::Custom,
+        Some(mode) => match dub_llm::net::ProxyMode::parse(mode) {
+            Some(mode) => mode,
+            None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_proxy_mode", "detail": mode }))).into_response(),
+        },
+    };
+    let kind = match body.get("kind").and_then(Value::as_str) {
+        None => crate::models::proxy_kind(&crate::models::load_selection(&st.models_root)),
+        Some(kind) => match dub_llm::net::ProxyKind::parse(kind) {
+            Some(kind) => kind,
+            None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_proxy_kind", "detail": kind }))).into_response(),
+        },
+    };
+    let address = crate::secrets_api::proxy_test_address(
         &st.models_root,
         crate::credentials::secrets_dir().as_deref(),
         body.get("url").and_then(Value::as_str).unwrap_or(""),
         body.get("password").and_then(Value::as_str),
     );
-    let res = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let agent: ureq::Agent = if url.is_empty() {
-            ureq::Agent::config_builder().http_status_as_error(false).build().into()
-        } else {
-            let proxy = ureq::Proxy::new(&url).map_err(|e| format!("некорректный URL прокси: {e}"))?;
-            ureq::Agent::config_builder()
-                .proxy(Some(proxy))
-                .http_status_as_error(false)
-                .build()
-                .into()
-        };
-        let probe = |target: &str| -> Option<String> {
-            agent.get(target).call().err().map(|e| e.to_string())
-        };
-        // Лёгкие публичные JSON-эндпоинты обоих сервисов (без ключа): проверяем именно то, что проксируем.
-        let hf = probe("https://huggingface.co/api/models/immich-app/buffalo_l");
-        let or = probe("https://openrouter.ai/api/v1/models");
-        Ok(json!({
-            "ok": hf.is_none() && or.is_none(),
-            "hf": hf.is_none(),
-            "openrouter": or.is_none(),
-            "hf_error": hf,
-            "openrouter_error": or,
-        }))
-    })
-    .await
-    .unwrap_or_else(|e| Err(e.to_string()));
+    let settings = dub_llm::net::ProxySettings { mode, kind, address: Some(address).filter(|a| !a.trim().is_empty()) };
+    let res = tokio::task::spawn_blocking(move || dub_llm::net::test(settings).map_err(|e| format!("{e:#}")))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
     match res {
-        Ok(v) => Json(v).into_response(),
+        Ok(v) => {
+            let hf = v["huggingface"].as_bool() == Some(true);
+            let or = v["openrouter"].as_bool() == Some(true);
+            Json(json!({
+                "ok": hf && or,
+                "hf": hf,
+                "openrouter": or,
+                "hf_error": v["huggingface_error"],
+                "openrouter_error": v["openrouter_error"],
+            }))
+            .into_response()
+        }
         Err(e) => Json(json!({ "ok": false, "error": e })).into_response(),
     }
 }
@@ -196,6 +281,9 @@ pub async fn select_model(State(st): State<AppState>, Json(body): Json<Value>) -
         }
         if val.trim().is_empty() {
             return (StatusCode::BAD_REQUEST, "empty value").into_response();
+        }
+        if !crate::models::is_selection_value(key, val) {
+            return (StatusCode::BAD_REQUEST, format!("invalid value for {key}: {val:?}")).into_response();
         }
         if let Err(e) = crate::models::set_selection(&st.models_root, key, val) {
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("write selection: {e}")).into_response();
@@ -296,7 +384,8 @@ pub async fn remix_project(
         return (StatusCode::CONFLICT, "project not analyzed yet").into_response();
     }
     let llama_bin = st.llama_bin.clone();
-    let mt_model = st.opts.mt_model_path.clone();
+    // Квант Gemma — выбранный сейчас (models::resolve_mt), а не найденный при старте сервера.
+    let (mt_model, _) = crate::models::resolve_mt(&st.models_root, &crate::models::load_selection(&st.models_root));
     let models_root = st.models_root.clone();
     let instr = instruction.trim().to_string();
     let dir_for_job = dir.clone();
@@ -313,7 +402,7 @@ pub async fn remix_project(
             "msg": format!("ремикс {} строк → {}", p.segments.len(),
                            &instr[..instr.len().min(60)]) }));
 
-        // LLM-провайдер: облако OpenRouter (если включено) ИЛИ локальный llama-server (плоский rewrite).
+        // LLM-провайдер перевода: своя Gemma, локальный сервер или OpenRouter (плоский rewrite).
         // Text-режим: mmproj не нужен (передаём пустой путь — фабрика его в Text-режиме игнорирует).
         let prov = crate::llm_provider::open(
             &crate::llm_provider::LlmOpen {
@@ -444,5 +533,30 @@ where
             st.jobs.mark_abandoned(&job_id).await;
             (StatusCode::GATEWAY_TIMEOUT, "frame render timed out").into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_endpoint_tests {
+    use super::*;
+    use dub_llm::test_http::{serve, Reply};
+
+    #[test]
+    fn a_local_server_lists_its_models_in_any_address_form() {
+        let server = serve(vec![
+            Reply::json(200, r#"{"object":"list","data":[{"id":"gemma3:12b"},{"id":"qwen2.5vl:7b"}]}"#),
+            Reply::json(200, r#"{"data":[]}"#),
+            Reply::json(200, r#"{"models":[]}"#),
+            Reply::json(401, r#"{"error":"no key"}"#),
+        ]);
+        assert_eq!(list_server_models(&format!("{}/v1/", server.base()), Some("k".into())).unwrap(), ["gemma3:12b", "qwen2.5vl:7b"]);
+        let first = server.request(0);
+        assert!(first.starts_with("GET /v1/models "), "{first}");
+        assert!(first.to_ascii_lowercase().contains("authorization: bearer k"));
+        assert!(list_server_models(&server.base(), None).unwrap().is_empty());
+        assert!(!server.request(1).to_ascii_lowercase().contains("authorization:"));
+        assert!(list_server_models(&server.base(), None).unwrap_err().contains("data"));
+        assert!(list_server_models(&server.base(), None).unwrap_err().contains("401"));
+        assert!(list_server_models("  ", None).is_err());
     }
 }

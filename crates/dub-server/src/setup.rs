@@ -969,11 +969,11 @@ pub fn setup_status(repo_root: &Path) -> SetupStatus {
         .iter()
         .map(|c| component_status(repo_root, c))
         .collect();
-    // Облачный пресет (OpenRouter) снимает ОБЯЗАТЕЛЬНОСТЬ тяжёлых локальных движков: если стадия перевода/
-    // TTS идёт через облако (флаг + ключ), её локальную модель качать НЕ обязательно — не гейтит ready и не
-    // преселектится на первом запуске (юзер выбрал облако -> не тянет ненужные гигабайты Gemma/Higgs).
+    // Облачный пресет (OpenRouter) и локальный сервер снимают ОБЯЗАТЕЛЬНОСТЬ тяжёлых локальных движков: если
+    // ни перевод, ни vision не идут через свою Gemma, а TTS/ASR — через облако (флаг + ключ), их локальную
+    // модель качать НЕ обязательно — не гейтит ready и не преселектится на первом запуске.
     let mroot = repo_root.join("models");
-    let cloud_llm = crate::models::openrouter_stage_on(&mroot, "llm");
+    let cloud_llm = !crate::models::local_gemma_needed(&mroot);
     let cloud_tts = crate::models::openrouter_stage_on(&mroot, "tts");
     let cloud_asr = crate::models::openrouter_asr_on(&mroot);
     for c in comps.iter_mut() {
@@ -1059,8 +1059,8 @@ pub fn download_components(
     }
 
     // Один агент на весь job: если включён прокси — все GET (probe + чанки) идут через него. Клонируется в
-    // каждый воркер (общий пул соединений). Живая смена прокси без рестарта: агент строится из active.json тут.
-    let agent = dl_agent(repo_root);
+    // каждый воркер (общий пул соединений). Живая смена прокси без рестарта: агент строится по маршруту тут.
+    let agent = dl_agent()?;
 
     let tmp_dir = std::env::temp_dir().join("dub-studio-setup");
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -1399,18 +1399,17 @@ fn write_at(f: &File, buf: &[u8], off: u64) -> std::io::Result<usize> {
     f.write_at(buf, off)
 }
 
-/// Построить ureq-агента для закачки: включён прокси в active.json -> ВСЕ GET идут через него; иначе дефолтный
-/// агент (Config::default сам подхватит HTTP(S)_PROXY из env, если он задан на старте). Некорректный URL прокси
-/// -> лог + дефолт: закачка по прямому пути честно упадёт на заблокированном соединении, а не молча пойдёт мимо
-/// прокси. Один агент на весь job (общий пул соединений) -> клонируется в воркеры (Agent = cheap Clone).
-fn dl_agent(repo_root: &Path) -> ureq::Agent {
-    if let Some(url) = crate::models::proxy_url(&repo_root.join("models")) {
-        match ureq::Proxy::new(&url) {
-            Ok(proxy) => return ureq::Agent::config_builder().proxy(Some(proxy)).build().into(),
-            Err(e) => tracing::warn!("некорректный URL прокси ({e}) — закачка без прокси; проверьте настройки"),
-        }
-    }
-    ureq::Agent::new_with_defaults()
+/// Построить ureq-агента для закачки по текущему маршруту прокси (dub_llm::net: свой / как в Windows / напрямую).
+/// ureq не спрашивает прокси на каждый запрос, поэтому агент строится на каждую закачку — смена прокси действует
+/// со следующей. Маршрут берётся для Hugging Face, откуда идут модели. Прокси, который ureq не принимает, —
+/// ошибка закачки, а не тихий уход мимо прокси. Один агент на весь job (общий пул соединений) -> клонируется
+/// в воркеры (Agent = cheap Clone).
+fn dl_agent() -> Result<ureq::Agent, String> {
+    let proxy = match dub_llm::net::proxy_url_for("https://huggingface.co/") {
+        Some(url) => Some(ureq::Proxy::new(&url).map_err(|e| format!("прокси {} не подходит для закачки: {e}", dub_llm::net::masked(&url)))?),
+        None => None,
+    };
+    Ok(ureq::Agent::config_builder().proxy(proxy).build().into())
 }
 
 /// Размер файла + поддержка byte-range: 1-байтовый ranged-пробник. HF CDN (в т.ч. Xet-CAS) отдаёт 206 +
