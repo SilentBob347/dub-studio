@@ -708,5 +708,18 @@
   "preview": {
     "frameAlt": "Image de l'aperçu",
     "updating": "mise à jour…"
+  },
+  "agent": {
+    "title": "Agent IA (MCP)",
+    "intro": "Un agent connecté ici (Claude Code, Cursor, Codex et d'autres) pilote tout le studio : il crée des projets à partir de vos vidéos, les analyse, corrige la traduction ligne par ligne, attribue les voix, fait le rendu, exporte dans d'autres langues et enregistre les résultats. Le serveur tourne avec le studio ; rien à installer.",
+    "lastCall": "Dernier appel de l'agent : {{call}} · il y a {{seconds}} s",
+    "none": "Aucun agent ne s'est encore connecté",
+    "windowOn": "La fenêtre est connectée : l'agent la voit",
+    "windowOff": "La fenêtre n'est pas connectée",
+    "address": "Adresse",
+    "config": "Claude Desktop, Cursor et autres clients",
+    "copy": "Copier",
+    "copied": "Copié",
+    "failed": "Impossible de lire l'état de l'agent"
   }
 }

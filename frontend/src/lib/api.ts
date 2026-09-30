@@ -38,6 +38,8 @@ export type ProjectSummary = {
   width: number; height: number; duration: number; segments: number;
   audio_only: boolean; mtime: number; done: boolean;
 };
+// Подключённый к MCP-серверу агент: последний вызов и сколько секунд назад. window_open появится с мостом окна.
+export type McpStatus = { agent_connected: boolean; agent_last_call: string | null; agent_seconds_ago: number | null; agent_calls: number; window_open?: boolean };
 export type ModelStack = { asr: string; llm: string; vision: string; tts: string };
 // Выбор active.json: строковые слоты + флаги секретов. Ключ OpenRouter и пароль прокси сервер не отдаёт.
 export type Selection = { [slot: string]: string | boolean | undefined; or_key_set?: boolean; proxy_password_set?: boolean };
@@ -224,6 +226,9 @@ export const api = {
   pickFolder: () => postJson<{ dir: string | null }>("/pick-folder", {}),   // нативный диалог выбора папки (batch-экспорт в одну папку)
   saveOutput: (pid: string, dir: string, name: string) => postJson<{ ok: boolean; path?: string }>(`/projects/${pid}/save-output`, { dir, name }),   // копия готового output в dir под именем оригинала
   dubUrl: (pid: string, rev = 0) => `${BASE}/projects/${pid}/dub?rev=${rev}`,   // playable dubbed video (frames + dub audio)
+  // MCP-сервер студии: адрес для подключения агента и его статус для раздела настроек «Агент (MCP)».
+  mcpUrl: () => `${BASE || window.location.origin}/mcp`,
+  mcpStatus: () => getJson<McpStatus>("/mcp/status"),
   // SSE job progress -> onEvent per message; resolves on done, rejects on error
   watchJob: (jobId: string, onEvent: (e: JobEvent) => void) =>
     new Promise<unknown>((resolve, reject) => {

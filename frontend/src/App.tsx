@@ -14,6 +14,7 @@ import ResourceMonitor from "./components/ResourceMonitor";
 import { GENDER_LABEL_KEY, genderKey } from "./lib/gender";
 import OpenRouterKey from "./components/OpenRouterKey";
 import ProxySection from "./components/ProxySection";
+import AgentPanel from "./components/AgentPanel";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -613,6 +614,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </label>
           <PresetsSection />
           <ModelsSection />
+          <AgentPanel />
         </div>
       </div>
     </div>

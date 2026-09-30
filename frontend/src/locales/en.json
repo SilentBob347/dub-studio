@@ -698,5 +698,18 @@
   "preview": {
     "frameAlt": "Preview frame",
     "updating": "updating…"
+  },
+  "agent": {
+    "title": "Agent (MCP)",
+    "intro": "An agent connected here (Claude Code, Cursor, Codex and others) drives the whole studio: it makes projects of your videos, analyzes them, fixes the translation line by line, casts the voices, renders, exports other languages and saves the results. The server runs with the studio; there is nothing to install.",
+    "lastCall": "Agent's last call: {{call}} · {{seconds}} s ago",
+    "none": "No agent has connected yet",
+    "windowOn": "The window is connected: the agent sees it",
+    "windowOff": "The window is not connected",
+    "address": "Address",
+    "config": "Claude Desktop, Cursor and other clients",
+    "copy": "Copy",
+    "copied": "Copied",
+    "failed": "Could not read the agent's status"
   }
 }

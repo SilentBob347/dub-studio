@@ -688,5 +688,18 @@
   "preview": {
     "frameAlt": "预览帧",
     "updating": "更新中…"
+  },
+  "agent": {
+    "title": "智能体 (MCP)",
+    "intro": "在此连接的智能体（Claude Code、Cursor、Codex 等）可以操控整个工作室：用你的视频创建项目、进行分析、逐行修改译文、分配配音、渲染、导出其他语言并保存结果。服务器随工作室一起运行，无需安装任何东西。",
+    "lastCall": "智能体最近一次调用：{{call}} · {{seconds}} 秒前",
+    "none": "尚无智能体连接",
+    "windowOn": "窗口已连接：智能体可以看到它",
+    "windowOff": "窗口未连接",
+    "address": "地址",
+    "config": "Claude Desktop、Cursor 及其他客户端",
+    "copy": "复制",
+    "copied": "已复制",
+    "failed": "无法读取智能体状态"
   }
 }
