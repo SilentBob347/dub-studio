@@ -8,19 +8,22 @@ use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use dub_core::glossary::{for_target, from_tsv, merge_tsv, merge_under, to_tsv, validate};
+use dub_core::glossary::{for_translation, from_tsv, merge_tsv, merge_under, to_tsv, validate};
 use dub_core::{GlossaryEntry, Project};
 use serde_json::{json, Value};
 
 use crate::{casting_library, jobs, save_project_atomic, AppState};
 
-/// Отпечаток глоссария для цели; пусто — записей нет (старый проект без глоссария не «устаревает»).
+/// Отпечаток того, что перевод на `tgt` берёт из глоссария (for_translation: термин, перевод, keep в порядке
+/// промпта); пусто — таких записей нет (старый проект без глоссария не «устаревает»).
 pub fn fingerprint(entries: &[GlossaryEntry], tgt: &str) -> String {
-    let effective = for_target(entries, tgt);
-    if effective.is_empty() {
+    let used = for_translation(entries, tgt);
+    if used.is_empty() {
         return String::new();
     }
-    let json = serde_json::to_string(&effective).expect("записи глоссария сериализуются в JSON");
+    let rows: Vec<(&str, &str, bool)> =
+        used.iter().map(|e| (e.term.as_str(), if e.keep { "" } else { e.translation.as_str() }, e.keep)).collect();
+    let json = serde_json::to_string(&rows).expect("строки глоссария сериализуются в JSON");
     blake3::hash(json.as_bytes()).to_hex().to_string()
 }
 
@@ -257,9 +260,41 @@ mod tests {
         assert_ne!(a, fingerprint(&[GlossaryEntry { translation: "Гари".into(), ..ru.clone() }], "ru"));
         assert_eq!(
             fingerprint(std::slice::from_ref(&ru), "es"),
-            fingerprint(&[GlossaryEntry { translation: "Хэрри".into(), ..ru }], "es"),
+            fingerprint(&[GlossaryEntry { translation: "Хэрри".into(), ..ru.clone() }], "es"),
             "another language's translation does not matter"
         );
+        assert_ne!(a, fingerprint(&[GlossaryEntry { keep: true, ..ru.clone() }], "ru"));
+        let spoken = GlossaryEntry {
+            pronunciation: "Гэрри".into(),
+            note: "hero".into(),
+            asr_fix: vec!["hairy".into()],
+            source: dub_core::glossary::GlossarySource::Auto,
+            ..ru.clone()
+        };
+        assert_eq!(a, fingerprint(std::slice::from_ref(&spoken), "ru"), "pronunciation, note, ASR variants and source do not");
+        let asr_only = GlossaryEntry { asr_fix: vec!["hogworts".into()], lang: String::new(), ..entry("Hogwarts", "") };
+        let with_asr_only = [ru.clone(), asr_only];
+        assert_eq!(a, fingerprint(&with_asr_only, "ru"), "an entry that sets no translation does not either");
+        assert_eq!(fingerprint(&with_asr_only[1..], "ru"), "");
+        let auto = GlossaryEntry { source: dub_core::glossary::GlossarySource::Auto, lang: "ru".into(), ..entry("Ron", "Рон") };
+        assert_eq!(
+            fingerprint(&[auto.clone(), ru.clone()], "ru"),
+            fingerprint(&[ru.clone(), auto], "ru"),
+            "the order is the prompt's: manual first"
+        );
+    }
+
+    #[test]
+    fn a_new_pronunciation_does_not_make_the_translation_stale() {
+        let mut p = Project { tgt_lang: "ru".into(), mode: "dub".into(), glossary: vec![entry("Harry", "Гарри")], ..Project::default() };
+        p.glossary_fp = fingerprint(&p.glossary, "ru");
+        p.glossary[0].pronunciation = "Гэрри".into();
+        p.glossary[0].note = "hero".into();
+        assert!(!stale(&p));
+        p.glossary.push(GlossaryEntry { asr_fix: vec!["hogworts".into()], ..entry("Hogwarts", "") });
+        assert!(!stale(&p), "«Add to glossary» from the editor only fixes recognition");
+        p.glossary[1].translation = "Хогвартс".into();
+        assert!(stale(&p));
     }
 
     #[test]

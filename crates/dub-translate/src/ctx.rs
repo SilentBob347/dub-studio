@@ -48,7 +48,7 @@ pub struct CtxConfig {
     /// Стилевая инструкция перевода (#112): доп-указание тона/регистра/лексики. Пусто = без стиля.
     /// Вставляется в инструкционную часть TP-промпта ПЕРЕД форматом-контрактом (он остаётся приоритетным).
     pub style: String,
-    /// Глоссарий проекта (и сериала): записи другого языка перевод не задают (glossary::for_target).
+    /// Глоссарий проекта (и сериала); перевод берёт из него glossary::for_translation.
     pub glossary: Vec<GlossaryEntry>,
 }
 
@@ -143,8 +143,7 @@ pub fn run(
 
     // Батч-перевод длинного скрипта (#82): чанки по бюджету + скользящий контекст + глоссарий.
     // Возвращает by_n = {глобальный_N -> перевод} — тот же контракт, что раньше давал единый вызов.
-    let mut glossary = dub_core::glossary::for_target(&cfg.glossary, &cfg.tgt_lang);
-    dub_core::glossary::manual_first(&mut glossary);
+    let glossary = dub_core::glossary::for_translation(&cfg.glossary, &cfg.tgt_lang);
     let job = Job { llm, tgt: &tgt, tgt_code: &cfg.tgt_lang, rewrite, style: &cfg.style, glossary };
     let by_n = translate_lines(&job, &line_texts, &budgets, &ctx, &mut log)?;
 

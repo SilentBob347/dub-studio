@@ -134,7 +134,7 @@ connected and the address to paste.
 
 **Names and terms the same in every line and episode**
 
-1. `glossary_get`: the project's glossary (`stale: true` - the translation was made with another one).
+1. `glossary_get`: the project's glossary (`stale: true` - the translation was made with other term translations or keep marks; pronunciation, `asr_fix` and note do not count).
 2. `glossary_extract` collects candidates from the text (a job: `studio_wait`, the entries are in its
    result); `glossary_set` with `merge: true` adds the ones to keep. An entry has `term` and either
    `translation` or `keep: true` (left as written); `pronunciation` changes only what the voice says,

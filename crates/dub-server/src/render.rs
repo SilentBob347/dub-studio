@@ -652,6 +652,7 @@ fn build_dub(
     regen_dub: bool,
     progress: &Progress,
 ) -> Result<PathBuf, String> {
+    let shown = proj;
     let tts_view = crate::tts_text::synthesis_view(proj, progress);
     let proj = &tts_view;
     let wd = &paths.work_dir;
@@ -1546,7 +1547,7 @@ fn build_dub(
         }
     }
 
-    record_dub_timing(proj, paths, &segs, &placed, &laid_spans, track_sf, progress)?;
+    record_dub_timing(shown, paths, &segs, &placed, &laid_spans, track_sf, progress)?;
 
     // 6) свести дорожку.
     let mixed = if voiceover {
@@ -1643,8 +1644,11 @@ fn build_dub(
 /// dub/voiceover берут отсюда тайминги событий, а пословные пресеты — слова, услышанные в самом дубле.
 /// Цикл укладки кладёт в `placed` ровно одну запись на каждый элемент `segs` в том же порядке, а
 /// timeline возвращает спаны в порядке `placed` (onset'ы неубывают, сортировка стабильная).
+/// `segs` — фразы вида для синтеза с индексом в полном списке сегментов; `shown` — проект с показанным
+/// текстом тех же сегментов в том же порядке. В запись идёт показанный текст: build_ass сверяет свежесть
+/// с tgt_text проекта, а не с текстом для синтеза.
 fn record_dub_timing(
-    proj: &Project,
+    shown: &Project,
     paths: &RenderPaths,
     segs: &[(usize, &dub_core::Segment)],
     placed: &[(f64, PathBuf, f64)],
@@ -1662,23 +1666,26 @@ fn record_dub_timing(
         return Ok(());
     }
     let seg_keep = |s: &dub_core::Segment| s.extra.get("keep_original").and_then(|v| v.as_bool()).unwrap_or(false);
-    let laid: Vec<crate::dub_timing::Laid> = segs
-        .iter()
-        .zip(placed)
-        .zip(laid_spans)
-        .filter(|(((_, s), _), _)| !seg_keep(s) && !s.tgt_text.trim().is_empty())
-        .map(|(((_, s), p), span)| crate::dub_timing::Laid { seg: s, file: &p.1, span: *span })
-        .collect();
-    let preset = &proj.captions.preset;
+    let mut laid: Vec<crate::dub_timing::Laid> = Vec::with_capacity(segs.len());
+    for (((i, s), p), span) in segs.iter().zip(placed).zip(laid_spans) {
+        if seg_keep(s) || s.tgt_text.trim().is_empty() {
+            continue;
+        }
+        let seg = shown.segments.get(*i).filter(|o| o.id == s.id).ok_or_else(|| {
+            format!("тайминги дубляжа: фраза {} вида для синтеза не совпала с сегментом проекта №{i}", s.id)
+        })?;
+        laid.push(crate::dub_timing::Laid { seg, file: &p.1, span: *span });
+    }
+    let preset = &shown.captions.preset;
     let caption_style = preset.name.as_deref().filter(|n| *n != "match");
-    let need_words = proj.subs.burn
-        && proj.subs.mode != "none"
+    let need_words = shown.subs.burn
+        && shown.subs.mode != "none"
         && dub_captions::word_timed_reveal(caption_style, preset.plate.as_deref(), preset.reveal.as_deref(), preset.font.as_deref());
     if need_words {
         emit(progress, "mix", &format!("пословные тайминги субтитров: распознавание {} фраз дубляжа", laid.len()));
     }
     let warn = |m: String| emit(progress, "mix", &m);
-    let asr = need_words.then_some((&paths.asr, proj.tgt_lang.as_str()));
+    let asr = need_words.then_some((&paths.asr, shown.tgt_lang.as_str()));
     crate::dub_timing::record(wd, &laid, track_sf, asr, &warn)?;
     Ok(())
 }
@@ -2720,6 +2727,62 @@ mod tests {
         proj.segments[0].tgt_text = "Пока мир".into();
         let ev = events(&proj);
         assert!(ev[0].starts_with("Dialogue: 1,0:00:01.00,0:00:02.00,"), "{}", ev[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_phrase_cleaned_for_synthesis_keeps_its_dub_timing_in_the_subtitles() {
+        let dir = std::env::temp_dir().join(format!("render_dubtiming_shown_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut shown = Project { mode: "dub".into(), tgt_lang: "ru".into(), ..Default::default() };
+        shown.subs.mode = "translate".into();
+        shown.subs.burn = false;
+        shown.segments = vec![
+            seg("s0", 1.0, 2.0, "«Привет»,  (смеётся) мир"),
+            seg("s1", 2.5, 3.0, "[музыка]"),
+            seg("s2", 4.0, 5.0, "Всё"),
+        ];
+        let view = crate::tts_text::synthesis_view(&shown, &|_| {});
+        assert_ne!(view.segments[0].tgt_text, shown.segments[0].tgt_text, "текст для синтеза очищен");
+        let segs: Vec<(usize, &Segment)> =
+            view.segments.iter().enumerate().filter(|(_, s)| !s.tgt_text.trim().is_empty()).collect();
+        let wav = dir.join("seg_fit.wav");
+        std::fs::write(&wav, b"x").unwrap();
+        let placed = vec![(3.0, wav.clone(), 1.5), (6.0, wav.clone(), 0.5)];
+        let spans = vec![(3.0, 4.5), (6.0, 6.5)];
+        let paths = RenderPaths {
+            input: dir.join("in.mp4"),
+            work_dir: dir.clone(),
+            output: dir.join("out.mp4"),
+            bsroformer_cli: PathBuf::new(),
+            bsroformer_model: PathBuf::new(),
+            higgs_dll: PathBuf::new(),
+            higgs_model_root: PathBuf::new(),
+            higgs_quant: String::new(),
+            fonts_dir: PathBuf::new(),
+            higgs_backend: "cpu".into(),
+            higgs_device: 0,
+            higgs_threads: 1,
+            max_stretch: 1.0,
+            voices_dir: PathBuf::new(),
+            asr: crate::models::AsrChoice::Parakeet(PathBuf::new()),
+            bench: false,
+            ref_secs: 12.0,
+            models_root: PathBuf::new(),
+        };
+        record_dub_timing(&shown, &paths, &segs, &placed, &spans, 1.0, &|_| {}).unwrap();
+        let ass_path = dir.join("caps.ass");
+        build_ass(&shown, &ass_path, Some(&dir), 1080, 1920, 10.0).unwrap();
+        let ass = std::fs::read_to_string(&ass_path).unwrap();
+        let starts: Vec<&str> = ass
+            .lines()
+            .filter(|l| l.starts_with("Dialogue: 1,"))
+            .map(|l| l.split(',').take(3).collect::<Vec<_>>()[1])
+            .collect();
+        assert!(starts.contains(&"0:00:03.00"), "фраза с кавычками и (смеётся) — на месте дубля: {ass}");
+        assert!(starts.contains(&"0:00:06.00"), "{ass}");
+        assert!(!starts.contains(&"0:00:01.00"), "не на тайминге оригинала: {ass}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

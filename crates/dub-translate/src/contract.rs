@@ -247,7 +247,7 @@ pub(crate) struct LineCheck<'a> {
     pub src: &'a str,
     pub budget: Option<usize>,
     pub tgt_lang: &'a str,
-    /// Глоссарий цели (for_target); проверяются записи, чей термин есть в исходной строке.
+    /// Глоссарий перевода (glossary::for_translation); проверяются записи, чей термин есть в исходной строке.
     pub glossary: &'a [GlossaryEntry],
     /// Творческий ремикс: содержание заменяется, глоссарий не требуется.
     pub rewrite: bool,

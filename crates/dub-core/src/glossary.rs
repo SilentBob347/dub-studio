@@ -109,6 +109,15 @@ pub fn manual_first(entries: &mut [GlossaryEntry]) {
     entries.sort_by_key(|e| e.source == GlossarySource::Auto);
 }
 
+/// Записи, которые задают перевод на язык `target` («keep: term» или «term → translation»), ручные раньше
+/// собранных. Ровно этот список перевод берёт из глоссария: промпт, проверка ответа, term-lock, отпечаток
+/// для кэша перевода. Произношение, варианты распознавания, примечание перевода не касаются.
+pub fn for_translation(entries: &[GlossaryEntry], target: &str) -> Vec<GlossaryEntry> {
+    let mut out: Vec<GlossaryEntry> = for_target(entries, target).into_iter().filter(|e| e.prompt_line().is_some()).collect();
+    manual_first(&mut out);
+    out
+}
+
 /// Проверить и привести в порядок список: поля обрезаны, пустой термин и повтор термина того же языка
 /// (или без языка) — ошибка с номером строки.
 pub fn validate(entries: Vec<GlossaryEntry>) -> Result<Vec<GlossaryEntry>, String> {
@@ -469,6 +478,20 @@ mod tests {
         assert!(es[0].translation.is_empty() && es[0].pronunciation.is_empty());
         let ru = for_target(&[e], "ru-RU");
         assert_eq!(ru[0].translation, "Гермиона");
+    }
+
+    #[test]
+    fn the_translation_takes_only_the_entries_that_set_it_manual_first() {
+        let mut auto = entry("Ron", "Рон");
+        auto.source = GlossarySource::Auto;
+        let mut spoken_only = entry("Nvidia", "");
+        spoken_only.pronunciation = "Энвидиа".into();
+        let mut other_lang = entry("Hermione", "Гермиона");
+        other_lang.lang = "es".into();
+        let mut kept = entry("GPU", "");
+        kept.keep = true;
+        let got = for_translation(&[auto, spoken_only, other_lang, entry("Harry", "Гарри"), kept], "ru");
+        assert_eq!(got.iter().map(|e| e.term.as_str()).collect::<Vec<_>>(), vec!["Harry", "GPU", "Ron"]);
     }
 
     #[test]

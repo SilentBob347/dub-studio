@@ -174,7 +174,7 @@ pub fn stage(
     // Сервер больше не нужен -> глушим (освобождаем VRAM, как del llm в питоне перед TTS/берном).
     // ГЕЙТ ПОКРЫТИЯ ПЕРЕВОДА (валидация В пайплайне): сегменты, оставшиеся английскими/непереведёнными
     // (tgt≈src ИЛИ латиница при нелатинском tgt), доперевести точечно flat_run — пока LLM ещё жив.
-    let glossary = dub_core::glossary::for_target(&proj.glossary, &proj.tgt_lang);
+    let glossary = dub_core::glossary::for_translation(&proj.glossary, &proj.tgt_lang);
     if res.is_ok() {
         ensure_translation_coverage(client, &mut segs, &args.src_lang, &proj.tgt_lang, &glossary, progress);
     }

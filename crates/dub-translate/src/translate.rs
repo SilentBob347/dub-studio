@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use dub_core::glossary::{for_target, manual_first, normalize};
+use dub_core::glossary::{for_translation, normalize};
 use dub_core::GlossaryEntry;
 use dub_llm::{strip_think, ChatClient, Message, Sampling};
 use regex::Regex;
@@ -244,9 +244,8 @@ pub fn run(
 /// run с глоссарием и журналом. style (#112) — доп-инструкция стиля, вставляется в инструкционную часть.
 pub fn run_with(llm: &ChatClient, segs: &mut [Seg], o: &FlatOpts, log: &mut dyn FnMut(&str)) -> Result<(), TranslateError> {
     let tgt_name = lang_name(o.tgt, o.tgt);
-    let mut glossary = for_target(o.glossary, o.tgt);
-    manual_first(&mut glossary);
-    let names = match glossary_pairs(llm, segs.iter().map(|s| s.text.as_str()), &name_src(o.src), &tgt_name, Some(6), &glossary) {
+    let glossary = for_translation(o.glossary, o.tgt);
+    let names =match glossary_pairs(llm, segs.iter().map(|s| s.text.as_str()), &name_src(o.src), &tgt_name, Some(6), &glossary) {
         Ok(pairs) => pairs,
         Err(e) => {
             log(&format!("  перевод: авто-глоссарий имён пропущен ({e})"));

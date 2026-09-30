@@ -1561,7 +1561,7 @@ fn tools() -> &'static [Tool] {
             // ---------------------------------------------------------------- glossary
             Tool {
                 name: "glossary_get",
-                description: "The project's glossary: terms with their translation, keep (left untranslated), pronunciation (how the voice says it; the screen keeps the translation), asr_fix (how speech recognition misspells the term; analysis corrects it), note, source (manual, or auto from glossary_extract) and lang (the language of translation and pronunciation). stale: the translation was made with another glossary - project_retranslate makes it again. format tsv answers term, translation, keep, pronunciation as tab-separated text.",
+                description: "The project's glossary: terms with their translation, keep (left untranslated), pronunciation (how the voice says it; the screen keeps the translation), asr_fix (how speech recognition misspells the term; analysis corrects it), note, source (manual, or auto from glossary_extract) and lang (the language of translation and pronunciation). stale: the translation was made with other term translations or keep marks (pronunciation, asr_fix and note do not count) - project_retranslate makes it again. format tsv answers term, translation, keep, pronunciation as tab-separated text.",
                 schema: || object(json!({ "pid": pid(), "format": { "type": "string", "enum": ["json", "tsv"] } }), &["pid"]),
                 call: |args| get(format!("{}{}", project_path(args, "/glossary")?, query(&[("format", given(args, "format").filter(|f| f != "json"))]))),
             },
