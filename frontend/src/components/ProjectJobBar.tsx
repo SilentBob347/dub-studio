@@ -102,7 +102,7 @@ export default function ProjectJobBar({ pid }: { pid: string }) {
       <div className={`${box} border-[var(--color-border)] bg-[var(--color-surface)]/95`}>
         <Loader2 size={13} className="animate-spin text-[var(--color-accent)] shrink-0" />
         <span className="font-medium shrink-0">{kindLabel(job.kind)}</span>
-        <span className="truncate text-[var(--color-muted)]">{detail}</span>
+        <span className="min-w-0 truncate text-[var(--color-muted)]">{detail}</span>
         <button onClick={() => cancel(job.id)} disabled={busy}
           className="ml-1 shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)] hover:border-[var(--color-warn)] disabled:opacity-50 transition-colors">
           {busy ? <Loader2 size={12} className="animate-spin" /> : <Square size={11} />}{busy ? t("jobs.cancelling") : t("jobs.cancel")}
@@ -115,8 +115,8 @@ export default function ProjectJobBar({ pid }: { pid: string }) {
     return (
       <div className={`${box} border-[var(--color-warn)]/40 bg-[color-mix(in_oklab,var(--color-warn)_12%,var(--color-surface))]`}>
         <span className="font-medium shrink-0">{kindLabel(record.kind)}</span>
-        <span className="truncate text-[var(--color-warn)]" title={errText(record.error)}>{stateLabel(record.state, record.stage)}</span>
-        {error && <span className="truncate mono text-[11px] text-[var(--color-warn)]" title={error}>{error}</span>}
+        <span className="min-w-0 truncate text-[var(--color-warn)]" title={errText(record.error)}>{stateLabel(record.state, record.stage)}</span>
+        {error && <span className="min-w-0 truncate mono text-[11px] text-[var(--color-warn)]" title={error}>{error}</span>}
         <button onClick={() => resume(record)} disabled={busy} title={t("jobs.continueHint")}
           className="ml-1 shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold hover:opacity-90 disabled:opacity-50 transition-opacity">
           {busy ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />}{t("jobs.continue")}
@@ -130,7 +130,7 @@ export default function ProjectJobBar({ pid }: { pid: string }) {
   if (error) {
     return (
       <div className={`${box} border-[var(--color-warn)]/40 bg-[var(--color-surface)]/95`}>
-        <span className="truncate mono text-[11px] text-[var(--color-warn)]" title={error}>{error}</span>
+        <span className="min-w-0 truncate mono text-[11px] text-[var(--color-warn)]" title={error}>{error}</span>
         <button onClick={() => setHidden(true)} title={t("jobs.dismiss")}
           className="shrink-0 text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={14} /></button>
       </div>

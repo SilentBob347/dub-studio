@@ -14,7 +14,7 @@ export function JobStateLabel({ p }: { p: ProjectSummary }) {
   const warn = RESUMABLE_STATES.has(p.job_state);
   return (
     <span title={errText(p.job_error)}
-      className={`shrink-0 px-1.5 rounded text-[10px] font-medium ${warn ? "text-[var(--color-warn)] bg-[color-mix(in_oklab,var(--color-warn)_12%,transparent)]" : "text-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_12%,transparent)]"}`}>
+      className={`min-w-0 truncate px-1.5 rounded text-[10px] font-medium ${warn ? "text-[var(--color-warn)] bg-[color-mix(in_oklab,var(--color-warn)_12%,transparent)]" : "text-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_12%,transparent)]"}`}>
       {label(p.job_state, p.job_stage)}
     </span>
   );
