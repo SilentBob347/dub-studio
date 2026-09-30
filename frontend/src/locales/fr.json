@@ -863,7 +863,7 @@
       "hint": "insère de douces respirations naturelles dans les pauses pour rendre la parole plus vivante"
     },
     "autoShorten": {
-      "tip": "Si une réplique doublée demande plus d'accélération que la limite naturelle, le modèle de traduction la réécrit plus court une fois et seule cette réplique est redoublée",
+      "tip": "Si une réplique doublée demande plus d'accélération que le rendu n'en applique (jusqu'à ×4 avec le débit de parole dynamique), le modèle de traduction la réécrit plus court une fois et seule cette réplique est redoublée",
       "label": "Raccourcir les répliques qui ne tiennent pas",
       "hint": "réécrire plus court la traduction des répliques qui ne tiennent pas et les redoubler"
     }
@@ -987,8 +987,8 @@
     "tight": "juste",
     "impossible": "ne tient pas",
     "renderedOver": "n'a pas tenu ×{{x}}",
-    "renderedTip": "Voix de {{raw}} s pour un créneau de {{slot}} s : il faut accélérer ×{{needed}}, la limite naturelle est ×{{cap}}",
-    "predictTip": "Environ {{est}} s de parole pour un créneau de {{slot}} s (×{{ratio}} ; limite naturelle ×{{cap}}). {{pace}}",
+    "renderedTip": "Voix de {{raw}} s pour un créneau de {{slot}} s : il faut accélérer ×{{needed}} ; naturel jusqu'à ×{{cap}}, le rendu accélère jusqu'à ×{{max}}",
+    "predictTip": "Environ {{est}} s de parole pour un créneau de {{slot}} s (×{{ratio}} ; naturel jusqu'à ×{{cap}}, le rendu accélère jusqu'à ×{{max}}). {{pace}}",
     "paceVoice": "Débit de {{cps}} caractères par seconde, mesuré sur cette voix",
     "paceLang": "Débit de {{cps}} caractères par seconde, habituel pour la langue (mesuré sur la voix après 3 répliques doublées)",
     "overCount_one": "{{count}} réplique ne tient pas",
@@ -1034,6 +1034,7 @@
     "unpinTip": "Désépingler : le prochain rendu pourra redoubler la réplique",
     "use": "Utiliser",
     "useTip": "Faire entendre cette prise dans le mixage (sans redoublage, seul le mixage est refait)",
+    "unpinFirst": "Une autre prise est épinglée : désépinglez-la pour choisir celle-ci",
     "rollback": "Revenir",
     "rollbackTip": "Revenir à cette prise et à son texte (annuler rétablit l'actuel)",
     "selecting": "Changement de prise et reconstruction du mixage",

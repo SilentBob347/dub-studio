@@ -150,10 +150,14 @@ pub fn eff_cap(cap: f64, needed: f64, drift: f64, rules: &FitRules) -> f64 {
     }
 }
 
-/// Фраза не влезла: для укладки её нужно ускорить сильнее штатного предела. Эскалация капа держит
-/// синхрон ценой скороговорки, поэтому считается от штатного, а не от эскалированного капа.
-pub fn over(needed: f64, cap: f64) -> bool {
-    needed > cap + 1e-9
+/// Потолок `eff_cap` при отставании `drift`: сильнее рендер не ускорит клип никогда.
+pub fn cap_ceiling(cap: f64, drift: f64, rules: &FitRules) -> f64 {
+    eff_cap(cap, f64::INFINITY, drift, rules)
+}
+
+/// Фраза не влезла: клипу нужно ускорение сильнее `eff_cap`, с которым рендер его подгоняет.
+pub fn over(needed: f64, eff_cap: f64) -> bool {
+    needed > eff_cap + 1e-9
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,16 +165,17 @@ pub fn over(needed: f64, cap: f64) -> bool {
 pub enum Verdict {
     /// Звучит в своём темпе: оценка не длиннее слота.
     Fits,
-    /// Уложится ускорением в пределах штатного капа.
+    /// Рендер уложит её ускорением в пределах своего капа (`cap_ceiling` без отставания).
     Tight,
-    /// Не уложится и штатным капом.
+    /// Не уложится и с ним.
     Impossible,
 }
 
-pub fn verdict(est: f64, slot: &Slot) -> Verdict {
+/// Прогноз до рендера: отставание дубля неизвестно, кап — как у реплики без отставания.
+pub fn verdict(est: f64, slot: &Slot, rules: &FitRules) -> Verdict {
     if est <= slot.target + 1e-9 {
         Verdict::Fits
-    } else if !over(needed(est, slot.target), slot.cap) {
+    } else if !over(needed(est, slot.target), cap_ceiling(slot.cap, 0.0, rules)) {
         Verdict::Tight
     } else {
         Verdict::Impossible
@@ -261,10 +266,29 @@ mod tests {
     #[test]
     fn verdict_bands() {
         let s = Slot { room: 2.0, target: 2.0, cap: 1.25 };
-        assert_eq!(verdict(2.0, &s), Verdict::Fits);
-        assert_eq!(verdict(2.5, &s), Verdict::Tight);
-        assert_eq!(verdict(2.51, &s), Verdict::Impossible);
-        assert_eq!(verdict(estimate("a".repeat(26).as_str(), 13.0), &s), Verdict::Fits);
+        assert_eq!(verdict(2.0, &s, &RULES), Verdict::Fits);
+        assert_eq!(verdict(2.5, &s, &RULES), Verdict::Tight);
+        assert_eq!(verdict(2.51, &s, &RULES), Verdict::Impossible);
+        assert_eq!(verdict(estimate("a".repeat(26).as_str(), 13.0), &s, &RULES), Verdict::Fits);
+        let sr = FitRules { speech_rate_on: true, ..RULES };
+        assert_eq!(verdict(2.51, &s, &sr), Verdict::Tight, "the dynamic speech rate speeds a line up to x4");
+        assert_eq!(verdict(8.0, &s, &sr), Verdict::Tight);
+        assert_eq!(verdict(8.01, &s, &sr), Verdict::Impossible);
+    }
+
+    #[test]
+    fn over_is_measured_against_the_cap_the_render_applied() {
+        let sr = FitRules { speech_rate_on: true, ..RULES };
+        assert_eq!(cap_ceiling(1.25, 0.0, &RULES), 1.25);
+        assert_eq!(cap_ceiling(1.25, 0.7, &RULES), CAP_DRIFT);
+        assert_eq!(cap_ceiling(1.25, 0.0, &sr), CAP_SPEECH_RATE);
+        for (needed, drift, rules) in [(1.3, 0.0, &RULES), (1.9, 0.7, &RULES), (2.1, 0.7, &RULES), (3.9, 0.0, &sr), (4.2, 0.0, &sr)] {
+            let applied = eff_cap(1.25, needed, drift, rules);
+            assert_eq!(over(needed, applied), over(needed, cap_ceiling(1.25, drift, rules)), "{needed} {drift}");
+        }
+        assert!(over(1.3, eff_cap(1.25, 1.3, 0.0, &RULES)));
+        assert!(!over(3.9, eff_cap(1.25, 3.9, 0.0, &sr)), "sped up x3.9, the line fits");
+        assert!(over(4.2, eff_cap(1.25, 4.2, 0.0, &sr)));
     }
 
     #[test]

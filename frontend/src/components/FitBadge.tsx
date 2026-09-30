@@ -19,14 +19,14 @@ export default function FitBadge({ fit }: { fit: Fit | null | undefined }) {
     const tone = r.over ? "impossible" : r.needed > 1 ? "tight" : "fits";
     const label = r.over ? t("fit.renderedOver", { x: x2(r.needed) }) : t(`fit.${tone}`);
     return (
-      <span title={t("fit.renderedTip", { raw: x2(r.raw), slot: x2(r.slot), needed: x2(r.needed), cap: x2(r.cap) })} className={`${cls} ${TONE[tone]}`}>
+      <span title={t("fit.renderedTip", { raw: x2(r.raw), slot: x2(r.slot), needed: x2(r.needed), cap: x2(r.cap), max: x2(r.eff_cap) })} className={`${cls} ${TONE[tone]}`}>
         {label}
       </span>
     );
   }
   const pace = t(fit.calibrated ? "fit.paceVoice" : "fit.paceLang", { cps: fit.cps.toFixed(1) });
   return (
-    <span title={t("fit.predictTip", { est: x2(fit.est), slot: x2(fit.slot), ratio: x2(fit.ratio), cap: x2(fit.cap), pace })}
+    <span title={t("fit.predictTip", { est: x2(fit.est), slot: x2(fit.slot), ratio: x2(fit.ratio), cap: x2(fit.cap), max: x2(fit.eff_cap), pace })}
       className={`${cls} ${TONE[fit.verdict]}`}>
       {t(`fit.${fit.verdict}`)}
     </span>

@@ -107,9 +107,20 @@ impl History {
         self.pinned.and_then(|n| self.get(n))
     }
 
+    /// Закреплённый дубль, который звучит вместо новой озвучки реплики с текстом `text`.
+    pub fn pinned_for(&self, text: &str) -> Option<&Take> {
+        self.pinned_take().filter(|p| p.text == text.trim())
+    }
+
     /// Самый свежий дубль с этим ключом синтеза.
     pub fn by_key(&self, key: &str) -> Option<&Take> {
         self.takes.iter().rev().find(|t| t.key == key)
+    }
+
+    /// Реплике с ключом `key` и текстом `text` синтез не нужен: звучит закреплённый дубль этого текста или
+    /// дубль с этим ключом уже есть.
+    pub fn covers(&self, key: &str, text: &str) -> bool {
+        self.pinned_for(text).is_some() || self.by_key(key).is_some()
     }
 
     /// Положить клип `src` новым дублем, сделать его активным и сохранить историю. Сверх `MAX_TAKES`
@@ -189,7 +200,7 @@ impl History {
 pub fn unpin_if_stale(wd: &Path, sid: &str, text: &str) -> Result<bool, String> {
     let mut h = History::load(wd, sid)?;
     match h.pinned_take() {
-        Some(p) if p.text != text.trim() => {
+        Some(_) if h.pinned_for(text).is_none() => {
             h.pinned = None;
             h.save(wd, sid)?;
             Ok(true)
@@ -250,6 +261,10 @@ pub fn resolve(wd: &Path, proj: &dub_core::Project, edit: &Value) -> Result<Valu
         "take_select" => {
             let n = edit.get("take").and_then(Value::as_u64).ok_or((400, "take_select needs take (its n from takes_list)".to_string()))?;
             let t = u32::try_from(n).ok().and_then(|n| h.get(n)).ok_or((404, format!("take {n} of segment {id:?} not found")))?;
+            // Пока дубль закреплён, рендер держит в файле сегмента его.
+            if let Some(p) = h.pinned.filter(|&p| p != t.n) {
+                return Err((409, format!("take {p} of segment {id:?} is pinned: unpin it (take_pin pinned false) before selecting another take")));
+            }
             out["take_text"] = t.text.clone().into();
             out["take_nonce"] = t.nonce.clone().unwrap_or(Value::Null);
             out["take_key"] = t.key.clone().into();
@@ -463,6 +478,46 @@ mod tests {
         resolve(&d, &proj, &pin).unwrap();
         commit(&d, &proj, &pin).unwrap();
         assert_eq!(History::load(&d, "s4").unwrap().pinned, Some(old));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn another_take_is_not_selected_while_one_is_pinned() {
+        let d = wd("select_pinned");
+        let mut proj = dub_core::Project::default();
+        proj.segments.push(dub_core::Segment { id: "s5".into(), tgt_text: "Текст".into(), ..Default::default() });
+        let mut h = History::default();
+        let a = h.add(&d, "s5", &clip(&d, "a.wav", b"A"), take("Текст", "ka"), 1.0).unwrap();
+        let b = h.add(&d, "s5", &clip(&d, "b.wav", b"B"), take("Текст", "kb"), 1.0).unwrap();
+        let pin = json!({ "op": "take_pin", "id": "s5", "pinned": true });
+        commit(&d, &proj, &resolve(&d, &proj, &pin).unwrap()).unwrap();
+        let other = resolve(&d, &proj, &json!({ "op": "take_select", "id": "s5", "take": a })).unwrap_err();
+        assert_eq!(other.0, 409);
+        assert!(other.1.contains(&format!("take {b}")) && other.1.contains("unpin"), "{}", other.1);
+        resolve(&d, &proj, &json!({ "op": "take_select", "id": "s5", "take": b })).expect("the pinned take itself stays selectable");
+        let unpin = json!({ "op": "take_pin", "id": "s5", "pinned": false });
+        commit(&d, &proj, &resolve(&d, &proj, &unpin).unwrap()).unwrap();
+        let sel = resolve(&d, &proj, &json!({ "op": "take_select", "id": "s5", "take": a })).unwrap();
+        commit(&d, &proj, &sel).unwrap();
+        assert_eq!(History::load(&d, "s5").unwrap().active, Some(a));
+        assert_eq!(std::fs::read(d.join("seg_s5.wav")).unwrap(), b"A");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_pinned_take_covers_a_regenerated_line_until_it_is_unpinned() {
+        let d = wd("covers");
+        let mut h = History::default();
+        let p = h.add(&d, "s6", &clip(&d, "a.wav", b"P"), take("Привет", "k-first"), 1.0).unwrap();
+        h.pinned = Some(p);
+        assert!(h.covers("k-regen", " Привет "), "a regeneration changes the key, the pinned take still plays");
+        assert_eq!(h.pinned_for("Привет").map(|t| t.n), Some(p));
+        assert!(!h.covers("k-regen", "Пока"), "other text is voiced anew");
+        assert!(h.pinned_for("Пока").is_none());
+        assert!(h.by_key("k-regen").is_none(), "covering adds nothing to the history");
+        h.pinned = None;
+        assert!(!h.covers("k-regen", "Привет"), "unpinned, the regeneration is voiced");
+        assert!(h.covers("k-first", "Привет"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -863,7 +863,7 @@
       "hint": "insere respirações suaves e naturais nas pausas para deixar a fala mais viva"
     },
     "autoShorten": {
-      "tip": "Se uma fala dublada precisar de mais aceleração que o limite natural, o modelo de tradução a reescreve mais curta uma vez e só essa fala é dublada de novo",
+      "tip": "Se uma fala dublada precisar de mais aceleração do que o render aplica (até ×4 com o ritmo de fala dinâmico), o modelo de tradução a reescreve mais curta uma vez e só essa fala é dublada de novo",
       "label": "Encurtar falas que não cabem",
       "hint": "reescrever mais curta a tradução das falas que não cabem e dublá-las de novo"
     }
@@ -987,8 +987,8 @@
     "tight": "no limite",
     "impossible": "não cabe",
     "renderedOver": "não coube ×{{x}}",
-    "renderedTip": "Áudio de {{raw}} s para um espaço de {{slot}} s: é preciso acelerar ×{{needed}}, o limite natural é ×{{cap}}",
-    "predictTip": "Cerca de {{est}} s de fala para um espaço de {{slot}} s (×{{ratio}}; limite natural ×{{cap}}). {{pace}}",
+    "renderedTip": "Áudio de {{raw}} s para um espaço de {{slot}} s: é preciso acelerar ×{{needed}}; natural até ×{{cap}}, o render acelera até ×{{max}}",
+    "predictTip": "Cerca de {{est}} s de fala para um espaço de {{slot}} s (×{{ratio}}; natural até ×{{cap}}, o render acelera até ×{{max}}). {{pace}}",
     "paceVoice": "Ritmo de {{cps}} caracteres por segundo, medido nesta voz",
     "paceLang": "Ritmo de {{cps}} caracteres por segundo, comum no idioma (medido na voz após 3 falas dubladas)",
     "overCount_one": "{{count}} fala não cabe",
@@ -1034,6 +1034,7 @@
     "unpinTip": "Soltar: o próximo render pode dublar a fala de novo",
     "use": "Usar",
     "useTip": "Fazer esta tomada tocar na mixagem (sem redublar, só a mixagem é refeita)",
+    "unpinFirst": "Outra tomada está fixada: solte-a para escolher esta",
     "rollback": "Voltar",
     "rollbackTip": "Voltar a esta tomada e ao seu texto (desfazer traz a atual de volta)",
     "selecting": "Trocando a tomada e refazendo a mixagem",

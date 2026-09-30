@@ -863,7 +863,7 @@
       "hint": "inserta respiraciones suaves y naturales en las pausas para dar vida al habla"
     },
     "autoShorten": {
-      "tip": "Si una frase doblada necesita más aceleración que el límite natural, el modelo de traducción la reescribe más corta una vez y solo esa frase se vuelve a doblar",
+      "tip": "Si una frase doblada necesita más aceleración de la que aplica el render (hasta ×4 con el ritmo de habla dinámico), el modelo de traducción la reescribe más corta una vez y solo esa frase se vuelve a doblar",
       "label": "Acortar las frases que no caben",
       "hint": "reescribir más corta la traducción de las frases que no caben y volver a doblarlas"
     }
@@ -987,8 +987,8 @@
     "tight": "justo",
     "impossible": "no cabe",
     "renderedOver": "no cupo ×{{x}}",
-    "renderedTip": "Audio de {{raw}} s para un hueco de {{slot}} s: hay que acelerar ×{{needed}}, el límite natural es ×{{cap}}",
-    "predictTip": "Unos {{est}} s de habla para un hueco de {{slot}} s (×{{ratio}}; el límite natural es ×{{cap}}). {{pace}}",
+    "renderedTip": "Audio de {{raw}} s para un hueco de {{slot}} s: hay que acelerar ×{{needed}}; natural hasta ×{{cap}}, el render acelera hasta ×{{max}}",
+    "predictTip": "Unos {{est}} s de habla para un hueco de {{slot}} s (×{{ratio}}; natural hasta ×{{cap}}, el render acelera hasta ×{{max}}). {{pace}}",
     "paceVoice": "Ritmo de {{cps}} caracteres por segundo, medido con esta voz",
     "paceLang": "Ritmo de {{cps}} caracteres por segundo, habitual en el idioma (se mide con la voz tras 3 frases dobladas)",
     "overCount_one": "{{count}} frase no cabe",
@@ -1034,6 +1034,7 @@
     "unpinTip": "Soltar: el próximo render puede volver a doblar la frase",
     "use": "Usar",
     "useTip": "Hacer que esta toma suene en la mezcla (sin redoblar, solo se rehace la mezcla)",
+    "unpinFirst": "Hay otra toma fijada: suéltala para elegir esta",
     "rollback": "Volver",
     "rollbackTip": "Volver a esta toma y a su texto (deshacer recupera el actual)",
     "selecting": "Cambiando la toma y rehaciendo la mezcla",

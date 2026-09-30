@@ -852,7 +852,7 @@
       "hint": "inserts natural soft breaths in pauses to make speech livelier"
     },
     "autoShorten": {
-      "tip": "If a voiced line needs more speed-up than the natural limit, the translation model rewrites it shorter once and only that line is voiced again",
+      "tip": "If a voiced line needs more speed-up than the render applies (up to ×4 with the dynamic speech rate), the translation model rewrites it shorter once and only that line is voiced again",
       "label": "Shorten lines that don't fit",
       "hint": "rewrite the translation of lines that don't fit their slot and voice them again"
     }
@@ -975,8 +975,8 @@
     "tight": "tight",
     "impossible": "won't fit",
     "renderedOver": "didn't fit ×{{x}}",
-    "renderedTip": "Voiced clip {{raw}} s for a {{slot}} s slot: needs ×{{needed}} speed-up, the natural limit is ×{{cap}}",
-    "predictTip": "About {{est}} s of speech for a {{slot}} s slot (×{{ratio}}; the natural limit is ×{{cap}}). {{pace}}",
+    "renderedTip": "Voiced clip {{raw}} s for a {{slot}} s slot: needs ×{{needed}} speed-up; natural up to ×{{cap}}, the render speeds up to ×{{max}}",
+    "predictTip": "About {{est}} s of speech for a {{slot}} s slot (×{{ratio}}; natural up to ×{{cap}}, the render speeds up to ×{{max}}). {{pace}}",
     "paceVoice": "Pace {{cps}} characters per second, measured on this voice",
     "paceLang": "Pace {{cps}} characters per second, usual for the language (measured on the voice after 3 voiced lines)",
     "overCount_one": "{{count}} line doesn't fit",
@@ -1017,6 +1017,7 @@
     "unpinTip": "Unpin: the next render may voice the line again",
     "use": "Use",
     "useTip": "Make this take the one in the mix (no re-voicing, only the mix is rebuilt)",
+    "unpinFirst": "Another take is pinned: unpin it to choose this one",
     "rollback": "Roll back",
     "rollbackTip": "Return to this take and its text (undo brings the current one back)",
     "selecting": "Switching the take and rebuilding the mix",

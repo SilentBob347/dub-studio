@@ -1102,13 +1102,13 @@ fn build_dub_pass(
             if seg_keep(s) || !needs(&ckpts, idx) || failed_before(idx) {
                 continue;
             }
-            // Дубль с этим ключом есть в истории — цикл ниже возьмёт его без синтеза.
-            let sid = sid_of(segs[idx].0, s);
-            if crate::takes::History::load(wd, &sid).is_ok_and(|h| h.by_key(&keys[idx]).is_some()) {
-                continue;
-            }
             let tgt = s.tgt_text.trim();
             if tgt.is_empty() {
+                continue;
+            }
+            // Закреплённый дубль этого текста или дубль с этим ключом — цикл ниже возьмёт его без синтеза.
+            let sid = sid_of(segs[idx].0, s);
+            if crate::takes::History::load(wd, &sid).is_ok_and(|h| h.covers(&keys[idx], tgt)) {
                 continue;
             }
             let raw = wd.join(format!("seg_{}.wav", sid_of(segs[idx].0, s)));
@@ -1180,19 +1180,17 @@ fn build_dub_pass(
         };
         // Закреплённый дубль рендер не заменяет, пока текст реплики тот, что в нём озвучен.
         let mut pinned_key: Option<String> = None;
-        if let Some(p) = hist.pinned_take().cloned() {
-            if p.text == tgt {
-                hist.restore(wd, &sid, p.n, &raw)?;
-                if need_synth {
-                    emit(progress, "tts", &format!("фраза {fi}: звучит закреплённый дубль — новая озвучка его не заменяет"));
-                }
-                need_synth = false;
-                pinned_key = Some(p.key);
-            } else {
-                hist.pinned = None;
-                hist.save(wd, &sid)?;
-                emit(progress, "tts", &format!("фраза {fi}: закрепление дубля снято — текст реплики изменён"));
+        if let Some(p) = hist.pinned_for(tgt).cloned() {
+            hist.restore(wd, &sid, p.n, &raw)?;
+            if need_synth {
+                emit(progress, "tts", &format!("фраза {fi}: звучит закреплённый дубль — новая озвучка его не заменяет"));
             }
+            need_synth = false;
+            pinned_key = Some(p.key);
+        } else if hist.pinned_take().is_some() {
+            hist.pinned = None;
+            hist.save(wd, &sid)?;
+            emit(progress, "tts", &format!("фраза {fi}: закрепление дубля снято — текст реплики изменён"));
         }
         let mut from_history = false;
         if need_synth && failed_before(idx) {
@@ -1391,7 +1389,8 @@ fn build_dub_pass(
             } // конец локальной (Higgs) ветки — при облаке wav уже записан выше
         }
         // Новая озвучка — в историю дублей (активной); облачный пре-синтез тоже озвучил её в этом проходе.
-        let synthesized = (need_synth && !kept_original) || batch_new.contains(&idx);
+        // При закреплённом дубле в файле сегмента он, а не новая озвучка.
+        let synthesized = pinned_key.is_none() && ((need_synth && !kept_original) || batch_new.contains(&idx));
         let mut take_n: Option<u32> = None;
         if synthesized {
             let source = if crate::shorten::already_shortened(s) { "shorten" } else { "synth" };
@@ -1504,7 +1503,7 @@ fn build_dub_pass(
         // текст пойдёт быстрее нормы. raw_dur==0 (сбой duration) -> сегмент не считаем в статистику.
         if raw_dur > 0.0 {
             fit_total += 1;
-            if needed > eff_cap {
+            if dub_core::fit::over(needed, eff_cap) {
                 fit_over_cap += 1;
                 emit(progress, "mix", &format!(
                     "сегмент {fi}: нужно растянуть x{needed:.2} (слот {target_slot:.2}с), кап x{eff_cap:.2} — текст быстрее нормы"
@@ -1675,14 +1674,15 @@ fn build_dub_pass(
         }
     }
 
-    // Замкнутая подгонка: фразы этого прохода, которым нужно ускорение сверх штатного капа, уходят на
-    // сокращение перевода (build_dub) — укладка и микс будут во втором проходе.
+    // Замкнутая подгонка: фразы этого прохода, которым нужно ускорение сверх капа, с которым рендер их
+    // подогнал (как у телеметрии «выше капа»), уходят на сокращение перевода (build_dub) — укладка и микс
+    // будут во втором проходе.
     if pass.shorten {
         let picks: Vec<(String, f64)> = shorten_cands
             .iter()
             .filter_map(|(pidx, id)| {
                 let r = fit_recs[*pidx].as_ref()?;
-                dub_core::fit::over(r.needed, r.cap).then(|| (id.clone(), r.slot))
+                dub_core::fit::over(r.needed, r.eff_cap).then(|| (id.clone(), r.slot))
             })
             .collect();
         if !picks.is_empty() {

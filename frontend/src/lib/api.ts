@@ -15,7 +15,7 @@ export type FitVerdict = "fits" | "tight" | "impossible";
 export type FitRendered = { needed: number; cap: number; eff_cap: number; raw: number; slot: number; dur: number | null; over: boolean };
 export type Fit = {
   est: number; slot: number; ratio: number; verdict: FitVerdict; calibrated: boolean; cps: number; cap: number;
-  over: boolean; rendered: FitRendered | null;
+  eff_cap: number; over: boolean; rendered: FitRendered | null;
 };
 // История дублей фразы: сводка у реплики и полный список (GET /segments/{id}/takes).
 export type TakesSummary = { count: number; active: number | null; pinned: number | null };

@@ -55,6 +55,7 @@ export default function TakesPanel({ pid, seg, disabled, onSelect, onPin }: {
       {takes.takes.map((tk) => {
         const active = takes.active === tk.n;
         const pinned = takes.pinned === tk.n;
+        const otherPinned = takes.pinned !== null && !pinned;
         return (
           <div key={tk.n} className={`flex items-start gap-1.5 px-1.5 py-1 ${active ? "bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)]" : ""}`}>
             <button onClick={() => toggle(tk.n)} title={playing === tk.n ? t("common.pause") : t("takes.listen")}
@@ -78,8 +79,8 @@ export default function TakesPanel({ pid, seg, disabled, onSelect, onPin }: {
                 {pinned ? t("takes.unpin") : t("takes.pin")}
               </button>
             ) : (
-              <button onClick={() => run(`use${tk.n}`, () => onSelect(tk.n))} disabled={disabled || busy !== null}
-                title={tk.text_matches ? t("takes.useTip") : t("takes.rollbackTip")} className={btn}>
+              <button onClick={() => run(`use${tk.n}`, () => onSelect(tk.n))} disabled={disabled || busy !== null || otherPinned}
+                title={otherPinned ? t("takes.unpinFirst") : tk.text_matches ? t("takes.useTip") : t("takes.rollbackTip")} className={btn}>
                 {busy === `use${tk.n}` ? <Loader2 size={11} className="animate-spin" /> : tk.text_matches ? <Check size={11} /> : <RotateCcw size={11} />}
                 {tk.text_matches ? t("takes.use") : t("takes.rollback")}
               </button>

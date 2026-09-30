@@ -91,6 +91,8 @@ fn r2(x: f64) -> f64 {
 pub struct SegFit {
     pub est: f64,
     pub slot: Slot,
+    /// Предел ускорения, с которым рендер уложит реплику без отставания (fit::cap_ceiling).
+    pub eff_cap: f64,
     pub cps: f64,
     pub calibrated: bool,
     pub verdict: Verdict,
@@ -100,10 +102,11 @@ pub struct SegFit {
 }
 
 impl SegFit {
-    /// Не влезает: по отчёту рендера этого текста, а без него — по прогнозу.
+    /// Не влезает: по отчёту рендера этого текста (нужно больше, чем кап, с которым рендер его подогнал), а
+    /// без него — по прогнозу.
     pub fn over(&self) -> bool {
         match &self.rendered {
-            Some(r) => fit::over(r.needed, r.cap),
+            Some(r) => fit::over(r.needed, r.eff_cap),
             None => self.verdict == Verdict::Impossible,
         }
     }
@@ -117,13 +120,13 @@ impl SegFit {
         let rendered = self.rendered.as_ref().map(|r| {
             json!({
                 "needed": r2(r.needed), "cap": r2(r.cap), "eff_cap": r2(r.eff_cap), "raw": r2(r.raw), "slot": r2(r.slot),
-                "dur": self.laid.map(r2), "over": fit::over(r.needed, r.cap),
+                "dur": self.laid.map(r2), "over": fit::over(r.needed, r.eff_cap),
             })
         });
         json!({
             "est": r2(self.est), "slot": r2(self.slot.target), "ratio": r2(self.est / self.slot.target.max(1e-9)),
             "verdict": self.verdict, "calibrated": self.calibrated, "cps": (self.cps * 10.0).round() / 10.0,
-            "cap": r2(self.slot.cap), "over": self.over(), "rendered": rendered,
+            "cap": r2(self.slot.cap), "eff_cap": r2(self.eff_cap), "over": self.over(), "rendered": rendered,
         })
     }
 }
@@ -141,9 +144,10 @@ pub fn seg_fit(proj: &Project, i: usize, rules: &FitRules, calib: &Calibration, 
     Some(SegFit {
         est,
         slot,
+        eff_cap: fit::cap_ceiling(slot.cap, 0.0, rules),
         cps,
         calibrated,
-        verdict: fit::verdict(est, &slot),
+        verdict: fit::verdict(est, &slot, rules),
         rendered: fresh.and_then(|t| t.fit.clone()),
         laid: fresh.map(|t| t.dur),
     })
@@ -260,6 +264,19 @@ mod tests {
         assert_eq!(j["rendered"]["needed"], 1.3);
         assert_eq!(j["calibrated"], true);
         assert_eq!(j["verdict"], "impossible");
+        assert_eq!(j["eff_cap"], 1.25);
+
+        let mut sped = slow.clone();
+        sped.segments.get_mut("a").unwrap().fit.as_mut().unwrap().eff_cap = 1.3;
+        let a = seg_fit(&p, 0, &RULES, &cal, Some(&sped)).unwrap();
+        assert!(!a.over(), "the render sped it up x1.3 within its escalated cap: it fits");
+        assert_eq!(a.to_json()["rendered"]["over"], false);
+
+        let sr = FitRules { speech_rate_on: true, ..RULES };
+        let c = seg_fit(&p, 2, &sr, &Calibration::from_timing(None, "ru"), None).unwrap();
+        assert_eq!(c.verdict, Verdict::Tight, "the dynamic speech rate speeds 40 characters over 2 s up to x4");
+        assert!(!c.over());
+        assert_eq!(c.to_json()["eff_cap"], dub_core::fit::CAP_SPEECH_RATE);
     }
 
     #[test]

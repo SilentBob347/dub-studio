@@ -101,9 +101,10 @@ connected and the address to paste.
 **Make the translation fit the timing**
 
 1. `project_get`: every voiced line of a dub or voice-over has `fit` - `verdict` `fits`
-   (spoken at its own pace), `tight` (sped up within the cap) or `impossible`, `over`
-   when it does not fit, and after a render `rendered.needed` against `rendered.cap` for
-   the text the render voiced. `calibrated: true` once three clips of that voice were
+   (spoken at its own pace), `tight` (the render speeds it up within `eff_cap`: up to 4x
+   with `speech_rate_on`, else the natural `cap`) or `impossible`, `over` when it does not
+   fit, and after a render `rendered.needed` against `rendered.eff_cap` for the text the
+   render voiced. `calibrated: true` once three clips of that voice were
    measured; before that the language's usual pace is used.
 2. `segment_shorten` with the `ids` of the lines, or `all_over: true`; `studio_wait`. The
    translation model rewrites each shorter within the slot's character limit; the result
@@ -116,7 +117,8 @@ connected and the address to paste.
 1. `takes_list` with the line `id`: the last five voicings with their text, duration and
    QC similarity; `active` is what the mix plays.
 2. `take_select` with `take` (its `n`) - a take of other text brings that text back - then
-   `project_dub_audio` mixes again without voicing.
+   `project_dub_audio` mixes again without voicing. While another take is pinned it is
+   refused: `take_pin` with `pinned: false` first.
 3. `take_pin` with `pinned: true` keeps the active take through regenerations and QC;
    editing the line's text unpins it.
 
