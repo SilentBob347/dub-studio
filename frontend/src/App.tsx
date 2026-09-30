@@ -10,6 +10,7 @@ import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
 import { playSfx, sfxEnabled, setSfxEnabled } from "./lib/sfx";
 import ResourceMonitor from "./components/ResourceMonitor";
+import WhatsNew from "./components/WhatsNew";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -874,6 +875,7 @@ function TopBar() {
           <span className="text-[12px] font-bold flex items-center gap-1"><Plus size={13} /> {t("nav.new")}</span>
           <span className="text-[9px] text-[var(--color-muted)] font-normal leading-none mt-0.5">ручная настройка</span>
         </button>
+        <WhatsNew />
         <button onClick={() => setHelp(true)} title={t("help.title")}
           className="p-1.5 rounded-md text-[var(--color-muted)] hover:text-[var(--color-text)] transition-colors"><HelpCircle size={18} /></button>
         <button onClick={() => setSettings(true)} title={t("settings.title")}

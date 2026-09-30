@@ -493,5 +493,20 @@
     "empty": "Library is empty — save a cast from the editor.",
     "delete": "Delete profile",
     "deleteConfirm": "Delete this cast profile?"
+  },
+  "news": {
+    "title": "新功能",
+    "tabNews": "动态",
+    "tabChangelog": "更新日志",
+    "unreleased": "未发布",
+    "empty": "这里还没有内容。",
+    "changelogNote": "更新日志仅提供英文版本。",
+    "releaseNotes": "发布说明",
+    "close": "关闭",
+    "sections": {
+      "added": "新增",
+      "changed": "变更",
+      "fixed": "修复"
+    }
   }
 }

@@ -493,5 +493,20 @@
     "empty": "Library is empty — save a cast from the editor.",
     "delete": "Delete profile",
     "deleteConfirm": "Delete this cast profile?"
+  },
+  "news": {
+    "title": "Novedades",
+    "tabNews": "Noticias",
+    "tabChangelog": "Registro de cambios",
+    "unreleased": "Sin publicar",
+    "empty": "Aún no hay nada.",
+    "changelogNote": "El registro de cambios se mantiene en inglés.",
+    "releaseNotes": "Notas de la versión",
+    "close": "Cerrar",
+    "sections": {
+      "added": "Añadido",
+      "changed": "Cambiado",
+      "fixed": "Corregido"
+    }
   }
 }
