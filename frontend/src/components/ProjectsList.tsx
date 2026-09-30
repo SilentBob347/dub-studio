@@ -11,7 +11,7 @@ import ConfirmDialog from "./ConfirmDialog";
 // Сотни карточек с кадром-превью — сотни запросов к ffmpeg-превью; рисуем пачками.
 const PAGE = 60;
 
-const MODE_KEYS = {
+export const MODE_KEYS = {
   nodub: "comp.audioNone",
   dub: "mode.dub",
   voiceover: "mode.voiceover",

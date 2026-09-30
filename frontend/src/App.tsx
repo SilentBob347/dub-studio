@@ -6,7 +6,7 @@ import { DONATE } from "./lib/links";
 import { OPEN_SETTINGS_EVENT, openSettings } from "./lib/settingsNav";
 import { createLaunchSaver, loadWithMigration } from "./lib/launchDefaults";
 import SettingsModal from "./components/settings/SettingsModal";
-import ProjectsList from "./components/ProjectsList";
+import ProjectsList, { MODE_KEYS } from "./components/ProjectsList";
 import ConfirmDialog from "./components/ConfirmDialog";
 import ServerOffline from "./components/ServerOffline";
 import { motion } from "motion/react";
@@ -1108,7 +1108,7 @@ function DropZone() {
                         <div className="text-[13px] font-medium truncate">{p.video}</div>
                         <div className="mt-0.5 text-[11px] text-[var(--color-muted)] flex items-center gap-1.5">
                           <span className="uppercase font-semibold text-[var(--color-accent-2)]">{p.tgt_lang}</span>
-                          <span>·</span><span className="truncate">{p.mode}</span>
+                          <span>·</span><span className="truncate">{p.mode in MODE_KEYS ? t(MODE_KEYS[p.mode as keyof typeof MODE_KEYS]) : p.mode}</span>
                           <span>·</span><span className="shrink-0">{fmtAgo(p.mtime)}</span>
                           {p.done && <Check size={12} className="text-[var(--color-accent)] shrink-0" />}
                           <JobStateLabel p={p} />
