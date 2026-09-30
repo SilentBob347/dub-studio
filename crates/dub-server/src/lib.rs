@@ -50,6 +50,7 @@ mod subimport;
 mod subs_text;
 mod subtracks;
 mod translate;
+mod tts_trim;
 mod voice_slots;
 mod wavio;
 pub mod process_group;
@@ -828,8 +829,11 @@ async fn record_stop(State(st): State<AppState>) -> Json<Value> {
     Json(json!({ "name": name, "voices": list_voice_names(&st.voices_dir) }))
 }
 
-/// POST /projects/{pid}/speaker-voice {speaker, name} — сделать голос из спикера: вырезать его
-/// длиннейшую реплику из источника → voices/<name>.wav (16k mono, <=12с). Порт «Сделать голос» Higgs.
+/// POST /projects/{pid}/speaker-voice {speaker, name} — сделать голос из спикера: его длиннейшая
+/// реплика (<=12с) чистым вокалом в полной полосе → voices/<name>.wav (render::speaker_voice_clip).
+/// Порт «Сделать голос» Higgs. Отказ — JSON {error, detail}: 400 no_speaker_lines, 409 no_separation (нет ни
+/// вокала проекта, ни движка сепарации той сборки, что выбрана для стадии), 500 separation_failed и
+/// speaker_voice_failed.
 async fn speaker_voice(
     State(st): State<AppState>,
     axum::extract::Path(pid): axum::extract::Path<String>,
@@ -851,49 +855,45 @@ async fn speaker_voice(
         .iter()
         .filter(|s| s.speaker.as_deref().unwrap_or("0") == want)
         .max_by(|a, b| (a.end - a.start).partial_cmp(&(b.end - b.start)).unwrap_or(std::cmp::Ordering::Equal));
-    let Some(cand) = cand else {
-        return (StatusCode::BAD_REQUEST, "у спикера нет реплик").into_response();
+    let refused = |status: StatusCode, code: &str, detail: String| {
+        (status, Json(json!({ "error": code, "detail": detail }))).into_response()
     };
-    let (start, end) = (cand.start, cand.end.min(cand.start + 12.0));
-    let ref_text = cand.src_text.trim().to_string();   // реф-текст = расшифровка реплики (как Higgs build_speaker_reference)
+    let Some(cand) = cand else {
+        return refused(StatusCode::BAD_REQUEST, "no_speaker_lines", want);
+    };
+    let cand = cand.clone();
     let input = std::fs::read_to_string(dir.join("source.txt")).unwrap_or_default();
     let input = if !input.trim().is_empty() { PathBuf::from(input.trim()) } else { dir.join("source.mp4") };
     let out = st.voices_dir.join(format!("{name}.wav"));
     let txt = st.voices_dir.join(format!("{name}.txt"));
     let voices_dir = st.voices_dir.clone();
-    let cli = st.bsroformer_cli.clone();
+    let repo_root = st.repo_root.clone();
+    let models_root = st.models_root.clone();
     let model = st.bsroformer_model.clone();
     let tmp = dir.join("_voicecut");
     let res = tokio::task::spawn_blocking(move || {
-        std::fs::create_dir_all(&voices_dir).ok();
-        std::fs::create_dir_all(&tmp).ok();
-        let raw = tmp.join("cut.wav");
-        media::trim(&input, &raw, start, end, 16_000)?;
-        // очистка голоса: вокал-сепарация (Mel-Band Roformer) убирает фон/музыку из рефа (как voiceclean в
-        // Higgs) — клон цепляется за чистый голос. Движку нужен 44.1к; без установленного движка -> сырой клип.
-        let src_for_ref = if cli.is_file() && model.is_file() {
-            let clip44 = tmp.join("cut44.wav");
-            match media::extract_audio(&raw, &clip44, 44_100, 2)
-                .and_then(|_| dub_sep::separate(&clip44, &tmp.join("stems"), &cli, &model).map_err(|e| e.to_string()))
-            {
-                Ok(sep) => sep.vocals,
-                Err(_) => raw.clone(),
-            }
-        } else {
-            raw.clone()
-        };
-        media::to_16k_mono(&src_for_ref, &out)?;   // реф в 16k mono
-        if !ref_text.is_empty() {
-            let _ = std::fs::write(&txt, &ref_text);   // голос несёт свой ref-текст в библиотеке
+        std::fs::create_dir_all(&voices_dir).map_err(|e| format!("{}: {e}", voices_dir.display()))?;
+        let cli = dub_sep::engine_cli(&repo_root, models::stage_backend(&models_root, "sep_backend"));
+        let made = render::speaker_voice_clip(&cand, 12.0, &dir, &input, (&cli, &model), &tmp, &out);
+        let cleaned =
+            if tmp.exists() { std::fs::remove_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display())) } else { Ok(()) };
+        let text = made?;
+        cleaned?;
+        // Голос несёт в библиотеке текст, который в нём звучит; без него старый текст того же имени убирается.
+        match text {
+            Some(t) => std::fs::write(&txt, t).map_err(|e| format!("{}: {e}", txt.display()))?,
+            None if txt.exists() => std::fs::remove_file(&txt).map_err(|e| format!("{}: {e}", txt.display()))?,
+            None => {}
         }
-        let _ = std::fs::remove_dir_all(&tmp);
-        Ok::<(), String>(())
+        Ok::<(), render::VoiceClipError>(())
     })
     .await;
     match res {
         Ok(Ok(())) => Json(json!({ "ok": true, "name": name, "voices": list_voice_names(&st.voices_dir) })).into_response(),
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(Err(render::VoiceClipError::NoSeparator(missing))) => refused(StatusCode::CONFLICT, "no_separation", missing),
+        Ok(Err(render::VoiceClipError::Separation(e))) => refused(StatusCode::INTERNAL_SERVER_ERROR, "separation_failed", e),
+        Ok(Err(render::VoiceClipError::Io(e))) => refused(StatusCode::INTERNAL_SERVER_ERROR, "speaker_voice_failed", e),
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, "speaker_voice_failed", e.to_string()),
     }
 }
 

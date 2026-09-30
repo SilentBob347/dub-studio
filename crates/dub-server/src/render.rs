@@ -3,7 +3,8 @@
 //!
 //! Конвейер (последовательный, GPU-стадии по очереди — VRAM-инвариант):
 //!   probe -> extract 44.1k -> separate (vocals/instrumental через dub-sep) ->
-//!   per-segment Higgs clone TTS (реф из вокала) -> fit_to_slot (atempo) -> timeline ->
+//!   per-segment Higgs clone TTS (реф из вокала) -> обрезка тишины клипа (tts_trim) ->
+//!   fit_to_slot (atempo) -> timeline ->
 //!   mix (instrumental + dub) -> build ASS (титры/субтитры/sub_style из Project) ->
 //!   burn (blur боксы из project.captions.blur_boxes) -> mux.
 //!
@@ -682,6 +683,9 @@ fn build_dub(
         return Ok(paths.input.clone());
     }
 
+    if media::drop_stale_separation(wd)? {
+        emit(progress, "separate", "стемы посчитаны из звука прежнего извлечения — сепарация заново");
+    }
     // 1) extract 44.1k stereo.
     emit(progress, "extract_audio", "извлечение аудио (ffmpeg 44.1k stereo)");
     let audio_hq = wd.join("audio_hq.wav");
@@ -703,6 +707,7 @@ fn build_dub(
             emit(progress, "separate", "сепарация (Mel-Band Roformer voc_fv6-Q8_0)");
             let sep = dub_sep::separate(&audio_hq, &stems, &paths.bsroformer_cli, &paths.bsroformer_model)
                 .map_err(|e| format!("сепарация: {e}"))?;
+            media::mark_separation(&stems)?;
             (sep.vocals, Some(sep.instrumental))
         } else {
             emit(progress, "separate", "движок сепарации не найден -> без фона (keep_music off)");
@@ -711,12 +716,10 @@ fn build_dub(
     } else {
         (audio_hq.clone(), None)
     };
-
-    // ref_vocals16 -> mono 16k (референсы клона). ОТДЕЛЬНОЕ имя, НЕ vocals16.wav: analyze.rs пишет сырой
-    // vocals16.wav для ASR/диаризации; тут пост-BSRoformer вокал — затирание того же файла давало ложный
-    // extract-cache-hit при ре-analyze (ревью G, analyze.rs:461) → в ASR шёл очищенный звук.
-    let vocals16 = wd.join("ref_vocals16.wav");
-    media::to_16k_mono(&vocals, &vocals16)?;
+    // Рефы клона режутся из вокала в полной полосе, кто бы его ни посчитал (сепарация этого рендера или
+    // анализа): voiceover и рендер без фона сами не сепарируют, их vocals — микс. vocals остаётся дорожкой
+    // оригинальных реплик и микса.
+    let (ref_src, ref_from_mix) = ref_source(wd, &audio_hq);
 
     // 3) клон-референс. voice.mode="voice" -> реф из пака/записи (voices/<name>.wav|mp3) НА КАЖДОГО спикера.
     //    Имя — CSV; позиция = отсортированный спикер (как во фронте: speaker ?? "0", лексикографически),
@@ -753,7 +756,7 @@ fn build_dub(
                     let out = wd.join(format!("ref_pack_{i}.wav"));
                     // реф КАПИТСЯ до paths.ref_secs (дефолт 12с; на слабой RAM юзер уменьшает в настройках —
                     // длинный реф раздувает prefill-граф Higgs -> OOM на 32ГБ).
-                    if media::trim(&src, &out, 0.0, paths.ref_secs, 16_000).is_ok() {
+                    if media::trim_ref(&src, &out, 0.0, paths.ref_secs).is_ok() {
                         map.insert(spk.clone(), out);
                     }
                 }
@@ -764,6 +767,11 @@ fn build_dub(
         std::collections::BTreeMap::new()
     };
     let use_pack = !pack_refs.is_empty();
+    // Облачный TTS (OpenRouter) вместо локального Higgs: клон-рефы ему не нужны.
+    let cloud_tts_on = crate::models::openrouter_stage_on(&paths.models_root, "tts");
+    if mix_ref_noted(ref_from_mix, cloud_tts_on, !use_pack || !clone_slot_spks.is_empty()) {
+        emit(progress, "tts", "реф клона из микса без сепарации: в нём звучит и фон оригинала");
+    }
     // ref_texts: расшифровка реф-клипа НА СПИКЕРА (Higgs клонирует качественнее с ref_text). Клон-режим —
     // src_text выбранного сегмента; пак-режим — АВТОТРАНСКРИПЦИЯ 12с-клипа (как Higgs build_speaker_reference;
     // пак-.txt = полный 3-мин транскрипт, к 12с не подходит). ASR best-effort: сбой -> None (не хуже прежнего).
@@ -779,13 +787,13 @@ fn build_dub(
                 .cloned()
                 .collect();
             let mut asr = crate::models::build_engine(&paths.asr);
-            build_speaker_refs(&segs_clone, &vocals16, wd, paths.ref_secs, asr.as_mut(), progress)?
+            build_speaker_refs(&segs_clone, &ref_src, wd, paths.ref_secs, asr.as_mut(), progress)?
         }
     } else {
-        // Скоринг кандидатов + REF-QC (транскрипт каждого кандидата сверяется с его src_text,
+        // Скоринг кандидатов + REF-QC (транскрипт каждого кандидата сверяется с текстом его окна,
         // брак -> следующий) — ref_text выставляется ВНУТРИ по фактически услышанному.
         let mut asr = crate::models::build_engine(&paths.asr);
-        build_speaker_refs(&segs, &vocals16, wd, paths.ref_secs, asr.as_mut(), progress)?
+        build_speaker_refs(&segs, &ref_src, wd, paths.ref_secs, asr.as_mut(), progress)?
     };
     if use_pack {
         // Реф-транскрипция выбранным движком (Parakeet/Whisper), а НЕ захардкоженным Parakeet — иначе у
@@ -856,17 +864,21 @@ fn build_dub(
             && (s.end - s.start) >= REF_MIN_AFTER_TRIM
             && seg_is_clean(s, s.speaker.as_deref().unwrap_or("0"), &segs)
     };
-    let emo_ref_of = |s: &dub_core::Segment, sid: &str| -> Option<PathBuf> {
+    // Эмоц-реф и его ref_text: текст — ровно то, что звучит в окне (ref_window), либо None.
+    let emo_ref_of = |s: &dub_core::Segment, sid: &str| -> Option<(PathBuf, Option<String>)> {
         if !emo_eligible(s) {
             return None;
         }
         let out = wd.join(format!("emoref_{sid}.wav"));
         // кап длины сверху ref_secs (не раздувать prefill-граф Higgs), как для identity-рефа.
         let cap = paths.ref_secs.min(REF_IDEAL_HI).max(REF_MIN_AFTER_TRIM);
-        let end = s.end.min(s.start + cap);
-        match media::trim(&vocals16, &out, s.start, end.max(s.start + 0.05), 16_000) {
-            Ok(()) => Some(out),
-            Err(_) => None, // сбой обрезки -> тихо на identity-реф
+        let (a, b, text) = ref_window(s, s.start, s.end.min(s.start + cap));
+        match media::trim_ref(&ref_src, &out, a, b.max(a + 0.05)) {
+            Ok(()) => Some((out, text)),
+            Err(e) => {
+                emit(progress, "tts", &format!("сегмент {sid}: эмоц-реф не вырезан ({e}) — identity-реф спикера"));
+                None
+            }
         }
     };
 
@@ -874,7 +886,6 @@ fn build_dub(
     crate::jobs::check_cancelled()?;
     // Облачный TTS (OpenRouter) вместо локального Higgs: тяжёлую DLL + модель НЕ грузим вовсе — в этом и
     // смысл (снять самую тяжёлую часть). engine=None; синтез идёт по облачной ветке ниже.
-    let cloud_tts_on = crate::models::openrouter_stage_on(&paths.models_root, "tts");
     if cloud_tts_on {
         emit(progress, "tts", "TTS через облако (OpenRouter) — локальный Higgs не загружаем");
     }
@@ -954,6 +965,9 @@ fn build_dub(
     let mut fit_total = 0usize;
     let mut fit_over_cap = 0usize;
     let mut drift_escalations = 0usize; // сегменты, где кап atempo эскалирован для догона синка (#116)
+    // Обрезка тишины TTS: фраз с обрезкой, снято секунд (из них паузами), фраз, чьё ускорение вернулось в
+    // кап сегмента только благодаря обрезке.
+    let (mut trim_phrases, mut trim_secs, mut trim_pause_secs, mut trim_into_cap) = (0usize, 0.0f64, 0.0f64, 0usize);
     // Multi-take: генерировать 3 дубля и выбирать лучший по близости к target-длительности.
     let multitake_on = crate::models::load_selection(&paths.models_root)
         .get("multitake")
@@ -996,7 +1010,7 @@ fn build_dub(
         } else {
             let voice = if use_pack { pack_names.get(spk).cloned().unwrap_or_default() } else { "clone".to_string() };
             let reference = if emo_eligible(s) {
-                format!("emo:{}", s.src_text.trim())
+                format!("emo:{}:{}", if ref_from_mix { "mix" } else { "vocals" }, s.src_text.trim())
             } else {
                 let rp = ref_of(s);
                 let tag = ref_tags.borrow_mut().entry(rp.clone()).or_insert_with(|| ref_tag(&rp)).clone();
@@ -1120,26 +1134,17 @@ fn build_dub(
                 }
             }
             } else {
-            // Реф: сначала пробуем per-segment ЭМОЦ-реф (обрезок vocals16 самой этой чистой реплики ≥2.5с)
+            // Реф: сначала пробуем per-segment ЭМОЦ-реф (обрезок вокала самой этой чистой реплики ≥2.5с)
             // — клон наследует эмоцию оригинала в этот момент. Не подошёл (грязная/короткая реплика/пак) ->
-            // стабильный identity-реф спикера. ref_text эмоц-рефа = src_text ЭТОГО сегмента (совпадает с
-            // аудио по построению); для identity-рефа — заранее посчитанный reftext_of. Считаем ТОЛЬКО при
+            // стабильный identity-реф спикера. ref_text эмоц-рефа — текст его окна (ref_window); для
+            // identity-рефа — заранее посчитанный reftext_of. Считаем ТОЛЬКО при
             // синтезе (не тратить ffmpeg-обрезку на закэшированные не-dirty сегменты).
             if engine.is_none() {
                 emit(progress, "tts", "загрузка Higgs");
                 engine = Some(load_higgs(paths)?);
             }
-            let emo_ref = emo_ref_of(s, &sid);
-            let (ref_wav, ref_text): (PathBuf, Option<String>) = match &emo_ref {
-                Some(er) => {
-                    // ref_text ТОЛЬКО если эмоц-аудио НЕ обрезано капом (иначе текст описывает больше,
-                    // чем в клипе → рассинхрон клона; как exact_cover у identity-пути, ревью-находка C).
-                    // Обрезано → None: Higgs клонирует без транскрипта рефа (хуже мисматча).
-                    let cap = paths.ref_secs.min(REF_IDEAL_HI).max(REF_MIN_AFTER_TRIM);
-                    let capped = (s.end - s.start) > cap + 0.05;
-                    let t = s.src_text.trim();
-                    (er.clone(), if capped || t.is_empty() { None } else { Some(t.to_string()) })
-                }
+            let (ref_wav, ref_text): (PathBuf, Option<String>) = match emo_ref_of(s, &sid) {
+                Some(emo) => emo,
                 None => (ref_of(s), reftext_of(s)),
             };
             // Анти-артефактный ретрай: иногда Higgs выдаёт «гудение» (непрерывный гул без речи). Детект
@@ -1289,17 +1294,22 @@ fn build_dub(
 
         // ── MULTI-TAKE: генерируем 2 доп. дубля и выбираем лучший по близости к target-длительности ──
         if multitake_on && need_synth && !kept_original && !cloud_tts_on && engine.is_some() {
-            let raw_dur = media::duration(&raw).unwrap_or(0.0);
             let target = if speech_rate_on { (s.end - s.start).max(0.3) } else { room };
+            // Дубли сравниваются по длине, которая ляжет на таймлайн: после обрезки тишины под этот слот.
+            let placed_secs = |x: &[f32], sr: u32| {
+                crate::tts_trim::tighten(x, sr, target * FIT_NOOP_HI).samples.len() as f64 / sr.max(1) as f64
+            };
+            let raw_dur = {
+                let (x, sr) = wavio::read_mono_f32(&raw)?;
+                placed_secs(&x, sr)
+            };
             let mut best_path = raw.clone();
             let mut best_score = (raw_dur - target).abs();
             let tgt = s.tgt_text.trim();
-            let _spk_key = s.speaker.clone().unwrap_or_else(|| "0".into());
-            let ref_wav_mt = {
-                let emo = emo_ref_of(s, &sid);
-                emo.unwrap_or_else(|| ref_of(s))
+            let (ref_wav_mt, ref_text_mt) = match emo_ref_of(s, &sid) {
+                Some(emo) => emo,
+                None => (ref_of(s), reftext_of(s)),
             };
-            let ref_text_mt = reftext_of(s);
             let tok_cap: u32 = ((((s.end - s.start).max(0.6) * 75.0 * 1.5).ceil() as u32) + 32).clamp(64, 2048);
             for take_i in 1..=2u64 {
                 crate::jobs::check_cancelled()?;
@@ -1316,9 +1326,8 @@ fn build_dub(
                     Ok((samples, sr)) => {
                         if synth_defect(&samples, sr, tgt.chars().filter(|c| c.is_alphanumeric()).count()).is_none() {
                             let wav = AudiocppEngine::encode_wav(&samples, sr, 1);
-                            let _ = std::fs::write(&take_path, &wav);
-                            if let Ok(td) = media::duration(&take_path) {
-                                let score = (td - target).abs();
+                            if std::fs::write(&take_path, &wav).is_ok() {
+                                let score = (placed_secs(&samples, sr as u32) - target).abs();
                                 if score < best_score {
                                     best_score = score;
                                     best_path = take_path.clone();
@@ -1371,7 +1380,23 @@ fn build_dub(
         // на плотном диалоге — фразы всё позже. Если дубль уже отстал (cursor > s.start), эскалируем кап
         // до нужного, чтобы догнать слот (потолок 2.0), ценой временной спешки.
         let drift = (cursor - s.start).max(0.0);
-        let raw_dur = media::duration(&raw).unwrap_or(0.0);
+        // Клип TTS до подгонки темпа теряет тишину по краям, а если и так не влезает — длинные паузы.
+        // Оригинальная реплика (сбой синтеза) остаётся как вырезана.
+        let (clip, raw_dur, untrimmed) = if kept_original {
+            let d = media::duration(&raw).unwrap_or(0.0);
+            (raw.clone(), d, d)
+        } else {
+            let t = tighten_clip(&raw, target_slot, &wd.join(format!("seg_{fi:03}_tight.wav")))?;
+            if t.after < t.before {
+                trim_phrases += 1;
+                trim_secs += t.before - t.after;
+                trim_pause_secs += t.pauses;
+                if trimmed_into_cap(t.before, t.after, target_slot, seg_cap) {
+                    trim_into_cap += 1;
+                }
+            }
+            (t.path, t.after, t.before)
+        };
         let needed = if target_slot > 0.05 { raw_dur / target_slot } else { 1.0 };
         // При включенном тумблере — прямое ускорение атемпо под точный размер субтитра (до 4.0x).
         // При выключенном — дефолтные защитные ограничения (не быстрее 1.25x-1.30x, либо до 2.0x при дрейфе).
@@ -1396,7 +1421,7 @@ fn build_dub(
                 ));
             }
         }
-        let (fit, d) = fit_to_slot(&raw, target_slot, &fitp, eff_cap)?;
+        let (fit, d) = fit_to_slot(&clip, target_slot, &fitp, eff_cap, untrimmed)?;
         cursor = at + d;
         placed.push((at, fit, d));
         // В QC — только реально синтезированное в этом прогоне (кэш уже проверялся в своём прогоне).
@@ -1415,6 +1440,12 @@ fn build_dub(
                 fitp,
             ));
         }
+    }
+    if trim_phrases > 0 {
+        emit(progress, "mix", &format!(
+            "обрезка тишины TTS: снято {trim_secs:.1} с у {trim_phrases} фраз (из них паузы {trim_pause_secs:.1} с); \
+             ускорение ушло в кап благодаря обрезке у {trim_into_cap} фраз"
+        ));
     }
     // Итоговая доля «слишком быстрого текста» (#107) + дрейф-эскалации (#116).
     if fit_total > 0 {
@@ -1487,7 +1518,10 @@ fn build_dub(
                         // пере-fit в тот же слот и подмена в placed (позиция at не меняется, длит. обновляем).
                         // Кап = потолок дрейфа (2.0): основной проход мог дрейф-капнуть этот сегмент выше
                         // seg_cap; пересинтез с seg_cap дал бы более ДЛИННЫЙ дубль и порвал синк (#116 [6]).
-                        if let Ok((nf, nd)) = fit_to_slot(raw, *room, fitp, 2.0) {
+                        let tight = wd.join(format!("seg_{fi:03}_tight.wav"));
+                        let refit = tighten_clip(raw, *room, &tight)
+                            .and_then(|t| fit_to_slot(&t.path, *room, fitp, 2.0, t.before));
+                        if let Ok((nf, nd)) = refit {
                             placed[*pidx].1 = nf;
                             placed[*pidx].2 = nd;
                             fixed = true;
@@ -1731,14 +1765,111 @@ fn seg_is_clean(s: &dub_core::Segment, spk: &str, all: &[(usize, &dub_core::Segm
     })
 }
 
-/// Выбранное окно identity-рефа спикера (координаты vocals16, с ±1с обрезкой и капом ref_secs).
+/// Выбранное окно identity-рефа спикера (координаты дорожки, с ±1с обрезкой и капом ref_secs).
 struct RefWindow {
     start: f64,
     end: f64,
-    /// src_text выбранной реплики.
-    src_text: String,
-    /// true = окно = вся реплика (нет ни ±1с обрезки, ни капа) -> src_text совпадает с аудио.
-    exact_cover: bool,
+    /// Текст, который звучит в окне (ref_window); None — неизвестен.
+    text: Option<String>,
+}
+
+/// Край урезанного окна рефа отступает от слова в паузу не дальше этого (и не дальше середины паузы).
+const REF_WORD_PAD: f64 = 0.25;
+/// Окно рефа после сдвига к словам не короче этого, иначе остаётся несдвинутым.
+const REF_MIN_SNAPPED: f64 = 1.0;
+/// Допуск границ слова относительно окна (словные тайминги ASR с шагом кадра).
+const REF_WORD_EPS: f64 = 0.01;
+
+/// Сдвинуть края окна [a,b] внутрь, в паузы между словами: начало, попавшее в слово, уходит в паузу
+/// после этого слова, конец — в паузу перед своим словом. Возвращает окно и ровно его слова через
+/// пробел; None — внутри нет целого слова или окно стало бы короче REF_MIN_SNAPPED.
+fn snap_to_words(a: f64, b: f64, words: &[(String, f64, f64)]) -> Option<(f64, f64, String)> {
+    let inside = |w: &(String, f64, f64)| w.1 >= a - REF_WORD_EPS && w.2 <= b + REF_WORD_EPS;
+    let fi = words.iter().position(inside)?;
+    let li = words.iter().rposition(inside)?;
+    let (first, last) = (&words[fi], &words[li]);
+    let na = match fi.checked_sub(1).map(|p| &words[p]) {
+        Some(prev) if prev.2 > a => first.1 - ((first.1 - prev.2) / 2.0).clamp(0.0, REF_WORD_PAD),
+        _ => a,
+    }
+    .max(a);
+    let nb = match words.get(li + 1) {
+        Some(next) if next.1 < b => last.2 + ((next.1 - last.2) / 2.0).clamp(0.0, REF_WORD_PAD),
+        _ => b,
+    }
+    .min(b);
+    if nb - na < REF_MIN_SNAPPED {
+        return None;
+    }
+    let text = words[fi..=li]
+        .iter()
+        .map(|w| w.0.trim())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.is_empty()).then_some((na, nb, text))
+}
+
+/// Окно рефа [a,b] из реплики `s` и текст, который в нём звучит. Окно на всю реплику — её src_text;
+/// урезанное — краями в паузы между словами (snap_to_words) и ровно его слова; урезанное окно без словных
+/// таймингов остаётся как есть и без текста.
+fn ref_window(s: &dub_core::Segment, a: f64, b: f64) -> (f64, f64, Option<String>) {
+    if a <= s.start + 1e-3 && b >= s.end - 1e-3 {
+        let src = s.src_text.trim();
+        return (a, b, (!src.is_empty()).then(|| src.to_string()));
+    }
+    match seg_words(s).and_then(|w| snap_to_words(a, b, &w)) {
+        Some((na, nb, text)) => (na, nb, Some(text)),
+        None => (a, b, None),
+    }
+}
+
+/// Почему голос из реплики спикера не сделан. `NoSeparator` пользователь исправляет сам (ставит компонент
+/// сепарации), поэтому это отказ, а не сбой; в нём пути, которых нет.
+#[derive(Debug)]
+pub(crate) enum VoiceClipError {
+    NoSeparator(String),
+    Separation(String),
+    Io(String),
+}
+
+impl From<String> for VoiceClipError {
+    fn from(e: String) -> Self {
+        VoiceClipError::Io(e)
+    }
+}
+
+/// Голос из реплики спикера `s` («Сделать голос»): окно до `cap` с (ref_window) в `out` тем же форматом,
+/// что реф клона (media::trim_ref). Источник — вокал проекта в полной полосе (`wd/stems/vocals.wav`); без
+/// стемов реплика вырезается из `input` в 44.1 кГц стерео и сепарируется в `tmp` движком `sep`. Голос с
+/// музыкой оригинала за очищенный не выдаётся: без движка — отказ до вырезки, сбой сепарации — ошибка.
+/// Возвращает текст окна.
+pub(crate) fn speaker_voice_clip(
+    s: &dub_core::Segment,
+    cap: f64,
+    wd: &Path,
+    input: &Path,
+    sep: (&Path, &Path),
+    tmp: &Path,
+    out: &Path,
+) -> Result<Option<String>, VoiceClipError> {
+    let (a, b, text) = ref_window(s, s.start, s.end.min(s.start + cap));
+    let stem = wd.join("stems").join("vocals.wav");
+    if stem.is_file() && media::stems_current(wd)? {
+        media::trim_ref(&stem, out, a, b)?;
+        return Ok(text);
+    }
+    let missing: Vec<String> = [sep.0, sep.1].iter().filter(|p| !p.is_file()).map(|p| p.display().to_string()).collect();
+    if !missing.is_empty() {
+        return Err(VoiceClipError::NoSeparator(missing.join(", ")));
+    }
+    std::fs::create_dir_all(tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let clip = tmp.join("cut44.wav");
+    media::cut(input, &clip, a, b, 44_100, 2)?;
+    let voc = dub_sep::separate(&clip, &tmp.join("stems"), sep.0, sep.1)
+        .map_err(|e| VoiceClipError::Separation(e.to_string()))?;
+    media::trim_ref(&voc.vocals, out, 0.0, b - a)?;
+    Ok(text)
 }
 
 /// Выбрать окно identity-рефа спикера из его реплик по BORROWINGS #2. None — у спикера нет реплик.
@@ -1792,29 +1923,22 @@ fn pick_ref_window(
     let cap = ref_secs.min(REF_IDEAL_HI).max(REF_MIN_AFTER_TRIM);
     let dur = (best.end - best.start).max(0.0);
     let (mut a, mut b) = (best.start, best.end);
-    let mut trimmed = false;
     if dur - 2.0 * REF_EDGE_TRIM >= REF_MIN_AFTER_TRIM {
         a += REF_EDGE_TRIM;
         b -= REF_EDGE_TRIM;
-        trimmed = true;
     }
     // кап длины сверху (не раздувать prefill-граф Higgs), обрезаем хвост.
-    let mut capped = false;
     if b - a > cap {
         b = a + cap;
-        capped = true;
     }
-    Some(RefWindow {
-        start: a,
-        end: b,
-        src_text: best.src_text.trim().to_string(),
-        exact_cover: !trimmed && !capped,
-    })
+    let (start, end, text) = ref_window(best, a, b);
+    Some(RefWindow { start, end, text })
 }
 
+/// `ref_src` — дорожка, из которой режутся рефы (вокал в полной полосе, без сепарации — микс).
 fn build_speaker_refs(
     segs: &[(usize, &dub_core::Segment)],
-    vocals16: &Path,
+    ref_src: &Path,
     wd: &Path,
     ref_secs: f64,
     asr: &mut dyn dub_asr::AsrEngine,
@@ -1833,10 +1957,10 @@ fn build_speaker_refs(
         for spk in speakers {
             let Some(pick) = pick_ref_window(&spk, segs, ref_secs) else { continue };
             let ref_wav = wd.join(format!("ref_spk{spk}.wav"));
-            media::trim(vocals16, &ref_wav, pick.start, pick.end.max(pick.start + 0.05), 16_000)?;
+            media::trim_ref(ref_src, &ref_wav, pick.start, pick.end.max(pick.start + 0.05))?;
             refs.insert(spk.clone(), ref_wav);
-            if pick.exact_cover && !pick.src_text.is_empty() {
-                texts.insert(spk, pick.src_text);
+            if let Some(t) = pick.text {
+                texts.insert(spk, t);
             }
         }
         return Ok((refs, texts, alts));
@@ -1865,6 +1989,9 @@ fn build_speaker_refs(
     // Топ-3 кандидата на спикера + ОДНА пакетная транскрипция всех кандидатов (Whisper = один
     // сабпроцесс на список; Parakeet in-process и так быстр).
     let mut cand_map: std::collections::BTreeMap<String, Vec<&dub_core::Segment>> = Default::default();
+    // Окно каждого кандидата: (длина, текст, который в нём звучит; без словных таймингов у урезанного
+    // окна — src_text реплики, как было).
+    let mut cand_win: std::collections::BTreeMap<String, Vec<(f64, String)>> = Default::default();
     let mut batch: Vec<PathBuf> = Vec::new();
     let mut batch_pos: std::collections::BTreeMap<String, usize> = Default::default();
     for spk in &speakers {
@@ -1898,14 +2025,18 @@ fn build_speaker_refs(
             }
         }
         batch_pos.insert(spk.clone(), batch.len());
+        let mut wins: Vec<(f64, String)> = Vec::with_capacity(good.len());
         for (i, c) in good.iter().enumerate() {
             let p = wd.join(format!("ref_cand_spk{spk}_{i}.wav"));
-            media::trim(vocals16, &p, c.start, c.end.min(c.start + ref_secs), 16_000)?;
+            let (a, b, text) = ref_window(c, c.start, c.end.min(c.start + ref_secs));
+            media::trim_ref(ref_src, &p, a, b.max(a + 0.05))?;
             batch.push(p);
+            wins.push((b - a, text.unwrap_or_else(|| c.src_text.trim().to_string())));
         }
         cand_map.insert(spk.clone(), good);
+        cand_win.insert(spk.clone(), wins);
     }
-    // REF-QC: транскрипт каждого кандидата сверяем с его src_text — реф обязан ЗВУЧАТЬ как его
+    // REF-QC: транскрипт каждого кандидата сверяем с текстом его окна — реф обязан ЗВУЧАТЬ как его
     // текст (кривой реф = кривой ref_text = каскад брака в клоне). Сбой ASR -> None -> кандидат
     // принимается без сверки (не хуже прежнего поведения).
     let heard: Vec<Option<String>> = asr.transcribe_many(&batch, "auto");
@@ -1914,15 +2045,16 @@ fn build_speaker_refs(
         if cands.is_empty() {
             continue;
         }
+        let wins = &cand_win[spk];
         let base = batch_pos[spk];
         // (кандидат, услышанное, прошёл ли сверку)
-        let verdict: Vec<(usize, Option<&str>, bool)> = cands
+        let verdict: Vec<(usize, Option<&str>, bool)> = wins
             .iter()
             .enumerate()
-            .map(|(i, c)| {
+            .map(|(i, (_, expect))| {
                 let h = heard.get(base + i).and_then(|o| o.as_deref());
                 let ok = match h {
-                    Some(t) => qc_similarity(&c.src_text, t) >= 0.5,
+                    Some(t) => qc_similarity(expect, t) >= 0.5,
                     None => true, // ASR молчит про сбой — доверяем скорингу
                 };
                 (i, h, ok)
@@ -1941,16 +2073,15 @@ fn build_speaker_refs(
                 (0, verdict[0].1)
             }
         };
-        let main_seg = cands[main_i];
         let ref_wav = wd.join(format!("ref_spk{spk}.wav"));
         std::fs::rename(wd.join(format!("ref_cand_spk{spk}_{main_i}.wav")), &ref_wav)
             .map_err(|e| format!("реф спикера {spk}: {e}"))?;
         refs.insert(spk.clone(), ref_wav);
-        // ref_text: прошёл сверку -> УСЛЫШАННОЕ (точно соответствует звуку клипа); иначе src_text.
+        // ref_text: прошёл сверку -> УСЛЫШАННОЕ (точно соответствует звуку клипа); иначе текст окна.
         let t = main_heard
             .filter(|h| !h.trim().is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| main_seg.src_text.trim().to_string());
+            .unwrap_or_else(|| wins[main_i].1.clone());
         if !t.is_empty() {
             texts.insert(spk.clone(), t);
         }
@@ -1967,7 +2098,7 @@ fn build_speaker_refs(
                 let at = ah
                     .filter(|h| !h.trim().is_empty())
                     .map(str::to_string)
-                    .or_else(|| Some(cands[ai].src_text.trim().to_string()).filter(|s| !s.is_empty()));
+                    .or_else(|| Some(wins[ai].1.clone()).filter(|s| !s.is_empty()));
                 alts.insert(spk.clone(), (alt_wav, at));
             }
         }
@@ -1981,7 +2112,7 @@ fn build_speaker_refs(
             &format!(
                 "реф спикера {spk}: «{}» ({:.1}с, {} кандидата, сверка {})",
                 texts.get(spk).map(|s| s.chars().take(50).collect::<String>()).unwrap_or_default(),
-                main_seg.end - main_seg.start,
+                wins[main_i].0,
                 cands.len(),
                 if passed.is_empty() { "⚠ не пройдена" } else { "ok" }
             ),
@@ -2011,23 +2142,90 @@ fn build_speech_blocks(spans: &[(f64, f64)]) -> Vec<media::SpeechBlock> {
 }
 
 /// Ускорить или замедлить дубль под target_dur. factor>1 ускоряет (укорачивает); <1 замедляет
-/// (растягивает). Замедление ограничено MIN_SLOW=0.85 (~15% растяжения), чтобы голос не тянулся
-/// неестественно. `cap` — потолок ускорения (считается у вызова: seg_cap + дрейф-эскалация).
-/// Возвращает путь уложенного файла И его фактическую длительность.
-fn fit_to_slot(seg_wav: &Path, target_dur: f64, work_path: &Path, cap: f64) -> Result<(PathBuf, f64), String> {
+/// (растягивает). `cap` — потолок ускорения (считается у вызова: seg_cap + дрейф-эскалация);
+/// `untrimmed` — длительность клипа до обрезки тишины (fit_factor). Возвращает путь уложенного файла И
+/// его фактическую длительность.
+fn fit_to_slot(
+    seg_wav: &Path,
+    target_dur: f64,
+    work_path: &Path,
+    cap: f64,
+    untrimmed: f64,
+) -> Result<(PathBuf, f64), String> {
     let actual = media::duration(seg_wav)?;
-    if target_dur <= 0.05 || actual <= 0.05 {
+    let Some(factor) = fit_factor(actual, target_dur, cap, untrimmed) else {
         return Ok((seg_wav.to_path_buf(), actual.max(0.0)));
-    }
-    const MIN_SLOW: f64 = 0.85;
-    let mut factor = actual / target_dur;
-    factor = factor.min(cap).max(MIN_SLOW);
-    if (0.98..=1.02).contains(&factor) {
-        return Ok((seg_wav.to_path_buf(), actual));
-    }
+    };
     media::time_stretch(seg_wav, work_path, factor)?;
     let d = media::duration(work_path).unwrap_or(actual / factor);
     Ok((work_path.to_path_buf(), d))
+}
+
+/// Дорожка, из которой режутся рефы клона, и true, когда это микс: вокал проекта в полной полосе, кто бы
+/// его ни посчитал (сепарация этого рендера или анализа); voiceover и рендер без фона сами не
+/// сепарируют, у них рефы из микса.
+fn ref_source(wd: &Path, audio_hq: &Path) -> (PathBuf, bool) {
+    let sep_vocals = wd.join("stems").join("vocals.wav");
+    if sep_vocals.is_file() {
+        (sep_vocals, false)
+    } else {
+        (audio_hq.to_path_buf(), true)
+    }
+}
+
+/// Нужна ли строка в журнал «реф клона из микса»: реф из микса нужен только локальному клону (облачному
+/// TTS рефы не нужны, голоса пака свои).
+fn mix_ref_noted(from_mix: bool, cloud_tts: bool, clones: bool) -> bool {
+    from_mix && !cloud_tts && clones
+}
+
+/// Ушло ли ускорение клипа в кап `cap` только благодаря обрезке тишины.
+fn trimmed_into_cap(before: f64, after: f64, slot: f64, cap: f64) -> bool {
+    slot > 0.05 && before / slot > cap && after / slot <= cap
+}
+
+/// Темп atempo для клипа `actual` в слоте `target`; None — клип остаётся как есть. Замедление не глубже
+/// MIN_SLOW=0.85 (~15% растяжения) и не глубже, чем замедлился бы клип до обрезки тишины (`untrimmed`):
+/// клип, влезавший в слот с тишиной, после обрезки кладётся короче слота, а не растягивается.
+fn fit_factor(actual: f64, target: f64, cap: f64, untrimmed: f64) -> Option<f64> {
+    const MIN_SLOW: f64 = 0.85;
+    if target <= 0.05 || actual <= 0.05 {
+        return None;
+    }
+    let floor = (untrimmed.max(actual) / target).clamp(MIN_SLOW, 1.0);
+    let factor = (actual / target).min(cap).max(floor);
+    (!(FIT_NOOP_LO..=FIT_NOOP_HI).contains(&factor)).then_some(factor)
+}
+
+/// Темп дубля в этих пределах fit_to_slot не трогает: клип до FIT_NOOP_HI × слот ускорять не нужно.
+const FIT_NOOP_LO: f64 = 0.98;
+const FIT_NOOP_HI: f64 = 1.02;
+
+/// Клип TTS, подготовленный к fit_to_slot: файл, длительность до и после обрезки тишины, снято паузами.
+struct TightClip {
+    path: PathBuf,
+    before: f64,
+    after: f64,
+    pauses: f64,
+}
+
+/// Снять тишину с клипа TTS под слот (tts_trim::tighten): паузы сжимаются, только если без этого клип
+/// пришлось бы ускорять. Снятое пишется в `out` без потерь; seg-файл синтеза (кэш) не меняется, поэтому
+/// повторный рендер получает тот же клип.
+fn tighten_clip(raw: &Path, slot: f64, out: &Path) -> Result<TightClip, String> {
+    let (x, sr) = wavio::read_mono_f32(raw)?;
+    let before = x.len() as f64 / sr as f64;
+    let t = crate::tts_trim::tighten(&x, sr, slot * FIT_NOOP_HI);
+    if t.edge_cut == 0 && t.pause_cut == 0 {
+        return Ok(TightClip { path: raw.to_path_buf(), before, after: before, pauses: 0.0 });
+    }
+    dub_core::atomic::write_with(out, |tmp| wavio::write_mono_f32(tmp, &t.samples, sr))?;
+    Ok(TightClip {
+        path: out.to_path_buf(),
+        before,
+        after: t.samples.len() as f64 / sr as f64,
+        pauses: t.pause_cut as f64 / sr as f64,
+    })
 }
 
 /// Генерирует сэмпл мягкого человеческого вдоха (процедурный легкий вдох ~0.20с).
@@ -2880,5 +3078,234 @@ mod tests {
         let l = ass.lines().find(|l| l.starts_with("Dialogue: 1,") && l.contains(&format!(",{style},,"))).unwrap();
         let rest = &l[l.find("\\pos(").unwrap() + 5..];
         rest[..rest.find(')').unwrap()].split(',').nth(1).unwrap().trim().parse().unwrap()
+    }
+
+    fn with_words(mut s: Segment, src: &str, words: &[(&str, f64, f64)]) -> Segment {
+        s.src_text = src.into();
+        s.speaker = Some("0".into());
+        let ws: Vec<Value> = words.iter().map(|(w, a, b)| json!({ "word": w, "start": a, "end": b })).collect();
+        s.extra.insert("words".into(), Value::Array(ws));
+        s
+    }
+
+    #[test]
+    fn cut_ref_window_moves_its_edges_into_pauses_and_carries_exactly_its_words() {
+        let words = [
+            ("Раз,", 0.10, 0.60),
+            ("два", 0.90, 1.60),
+            ("три", 1.80, 2.40),
+            ("четыре", 2.70, 3.50),
+            ("пять", 3.90, 4.80),
+            ("шесть.", 5.00, 5.80),
+        ];
+        let s = with_words(seg("s0", 0.0, 6.0, "x"), "Раз, два три четыре пять шесть.", &words);
+        let (a, b, text) = ref_window(&s, 1.3, 4.6);
+        assert!(a > 1.60 && a < 1.80, "начало в паузе между «два» и «три»: {a}");
+        assert!(b > 3.50 && b < 3.90, "конец в паузе между «четыре» и «пять»: {b}");
+        assert_eq!(text.as_deref(), Some("три четыре"));
+        let (a, b, text) = ref_window(&s, 0.0, 6.0);
+        assert_eq!((a, b), (0.0, 6.0));
+        assert_eq!(text.as_deref(), Some("Раз, два три четыре пять шесть."), "окно на всю реплику — её src_text");
+        let (a, b, text) = ref_window(&s, 0.7, 5.9);
+        assert_eq!((a, b), (0.7, 5.9), "края уже в паузах — окно не двигается");
+        assert_eq!(text.as_deref(), Some("два три четыре пять шесть."));
+    }
+
+    #[test]
+    fn cut_ref_window_without_words_stays_put_and_has_no_text() {
+        let s = seg("s0", 0.0, 10.0, "x");
+        assert_eq!(ref_window(&s, 1.0, 9.0), (1.0, 9.0, None));
+        let short = with_words(seg("s1", 0.0, 3.0, "x"), "да нет", &[("да", 0.1, 1.2), ("нет", 1.3, 2.9)]);
+        assert_eq!(ref_window(&short, 0.5, 2.5), (0.5, 2.5, None), "внутри окна нет целого слова");
+    }
+
+    #[test]
+    fn identity_ref_window_is_trimmed_then_snapped_to_words() {
+        let words: Vec<(String, f64, f64)> =
+            (0..12).map(|k| (format!("w{k}"), k as f64 * 0.8 + 0.05, k as f64 * 0.8 + 0.6)).collect();
+        let wref: Vec<(&str, f64, f64)> = words.iter().map(|(w, a, b)| (w.as_str(), *a, *b)).collect();
+        let s = with_words(seg("s0", 0.0, 10.0, "x"), "whole line", &wref);
+        let segs = vec![(0usize, &s)];
+        let pick = pick_ref_window("0", &segs, 12.0).unwrap();
+        assert!((pick.start - 1.525).abs() < 1e-9, "{}", pick.start);
+        assert!((pick.end - 8.725).abs() < 1e-9, "{}", pick.end);
+        let expected: Vec<String> = (2..=10).map(|k| format!("w{k}")).collect();
+        assert_eq!(pick.text, Some(expected.join(" ")));
+    }
+
+    #[test]
+    fn tightened_clip_is_written_beside_and_the_cached_segment_is_untouched() {
+        let wd = std::env::temp_dir().join(format!("render_tight_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wd);
+        std::fs::create_dir_all(&wd).unwrap();
+        let sr = 24_000usize;
+        let mut x = vec![0.0f32; sr / 2];
+        x.extend((0..sr).map(|i| 0.5 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr as f32).sin()));
+        x.extend(vec![0.0f32; sr * 8 / 10]);
+        let raw = wd.join("seg_s0.wav");
+        std::fs::write(&raw, AudiocppEngine::encode_wav(&x, sr as i32, 1)).unwrap();
+        let raw_bytes = std::fs::read(&raw).unwrap();
+        let out = wd.join("seg_000_tight.wav");
+        let t = tighten_clip(&raw, 10.0, &out).unwrap();
+        assert_eq!(t.path, out);
+        assert!((t.before - 2.3).abs() < 1e-6 && (t.after - 1.12).abs() < 1e-6, "{} -> {}", t.before, t.after);
+        assert_eq!(std::fs::read(&raw).unwrap(), raw_bytes, "кэш синтеза не меняется");
+        let first = std::fs::read(&out).unwrap();
+        tighten_clip(&raw, 10.0, &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), first, "повторный рендер даёт тот же клип");
+        let (y, ysr) = wavio::read_mono_f32(&out).unwrap();
+        assert_eq!((y.len(), ysr), (sr * 112 / 100, sr as u32));
+
+        let full = wd.join("seg_s1.wav");
+        std::fs::write(&full, AudiocppEngine::encode_wav(&x[sr / 2..sr * 3 / 2], sr as i32, 1)).unwrap();
+        let t = tighten_clip(&full, 10.0, &wd.join("seg_001_tight.wav")).unwrap();
+        assert_eq!(t.path, full, "снимать нечего — клип остаётся своим файлом");
+        assert!(!wd.join("seg_001_tight.wav").exists());
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("render_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn clone_refs_come_from_the_project_vocals_and_the_mix_is_said_only_for_a_local_clone() {
+        let wd = scratch("ref_source");
+        let hq = wd.join("audio_hq.wav");
+        assert_eq!(ref_source(&wd, &hq), (hq.clone(), true), "без стемов — микс");
+        std::fs::create_dir_all(wd.join("stems")).unwrap();
+        std::fs::write(wd.join("stems").join("vocals.wav"), b"v").unwrap();
+        assert_eq!(ref_source(&wd, &hq), (wd.join("stems").join("vocals.wav"), false));
+        assert!(mix_ref_noted(true, false, true));
+        assert!(!mix_ref_noted(true, true, true), "облачному TTS рефы не нужны");
+        assert!(!mix_ref_noted(true, false, false), "у всех спикеров голоса пака");
+        assert!(!mix_ref_noted(false, false, true));
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn a_clip_counts_as_brought_into_the_cap_only_by_its_trim() {
+        assert!(trimmed_into_cap(2.8, 2.4, 2.0, 1.25), "1.4 -> 1.2 при капе 1.25");
+        assert!(!trimmed_into_cap(2.4, 2.2, 2.0, 1.25), "и до обрезки влезал в кап");
+        assert!(!trimmed_into_cap(3.0, 2.8, 2.0, 1.25), "и после обрезки выше капа");
+        assert!(!trimmed_into_cap(3.0, 1.0, 0.0, 1.25), "слота нет");
+    }
+
+    #[test]
+    fn trimming_never_slows_a_clip_more_than_its_untrimmed_self() {
+        assert_eq!(fit_factor(1.5, 2.2, 1.25, 1.5), Some(0.85), "необрезанный короткий клип тянется, как раньше");
+        let f = fit_factor(1.7, 2.2, 1.25, 2.0).unwrap();
+        assert!((f - 2.0 / 2.2).abs() < 1e-12, "обрезанный тянется ровно как тянулся бы целиком: {f}");
+        assert_eq!(fit_factor(1.7, 2.2, 1.25, 2.6), None, "целиком его ускоряли бы — обрезанный не замедляется");
+        let f = fit_factor(2.5, 2.2, 1.25, 3.0).unwrap();
+        assert!((f - 2.5 / 2.2).abs() < 1e-12, "ускорение считается по обрезанному: {f}");
+        assert_eq!(fit_factor(4.0, 2.2, 1.25, 4.0), Some(1.25), "кап ускорения");
+        assert_eq!(fit_factor(2.2, 2.2, 1.25, 2.2), None);
+    }
+
+    #[test]
+    fn a_clip_that_fit_with_its_tail_is_not_stretched_after_trimming() {
+        let wd = scratch("fit_tail");
+        let sr = 24_000usize;
+        let mut x: Vec<f32> =
+            (0..sr * 18 / 10).map(|i| 0.5 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr as f32).sin()).collect();
+        x.extend(vec![0.0f32; sr * 4 / 10]);
+        let raw = wd.join("seg_s0.wav");
+        std::fs::write(&raw, AudiocppEngine::encode_wav(&x, sr as i32, 1)).unwrap();
+        let t = tighten_clip(&raw, 2.2, &wd.join("seg_000_tight.wav")).unwrap();
+        assert!((t.before - 2.2).abs() < 1e-6 && (t.after - 1.86).abs() < 1e-6, "{} -> {}", t.before, t.after);
+        assert_eq!(fit_factor(t.before, 2.2, 1.25, t.before), None, "с хвостом клип ложился без atempo");
+        assert_eq!(fit_factor(t.after, 2.2, 1.25, t.after), Some(0.85), "без нижней границы его растянуло бы");
+        let work = wd.join("seg_000_fit.wav");
+        let (placed, d) = fit_to_slot(&t.path, 2.2, &work, 1.25, t.before).unwrap();
+        assert_eq!(placed, t.path);
+        assert!((d - 1.86).abs() < 0.01, "ложится короче слота: {d}");
+        assert!(!work.exists(), "atempo не звался");
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    fn stereo_wav(path: &Path, sr: u32, secs: f64) {
+        let spec = hound::WavSpec { channels: 2, sample_rate: sr, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..(secs * sr as f64) as usize {
+            let v = 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin();
+            w.write_sample(v).unwrap();
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[test]
+    fn speaker_voice_is_cut_from_the_project_vocals_in_full_band() {
+        let wd = scratch("spkvoice_stems");
+        std::fs::create_dir_all(wd.join("stems")).unwrap();
+        stereo_wav(&wd.join("stems").join("vocals.wav"), 44_100, 16.0);
+        media::mark_separation(&wd.join("stems")).unwrap();
+        let no_engine = wd.join("no-engine.exe");
+        let tmp = wd.join("_voicecut");
+        let mut s = seg("s0", 1.0, 4.0, "x");
+        s.src_text = "Одна реплика".into();
+        let out = wd.join("voice.wav");
+        let text = speaker_voice_clip(&s, 12.0, &wd, &wd.join("source.mp4"), (&no_engine, &no_engine), &tmp, &out).unwrap();
+        assert_eq!(text.as_deref(), Some("Одна реплика"), "окно на всю реплику — её текст");
+        let r = hound::WavReader::open(&out).unwrap();
+        let spec = r.spec();
+        assert_eq!(
+            (spec.sample_rate, spec.channels, spec.bits_per_sample, spec.sample_format),
+            (44_100, 1, 16, hound::SampleFormat::Int),
+            "моно PCM16 на частоте вокала"
+        );
+        assert!((r.duration() as f64 / 44_100.0 - 3.0).abs() < 0.01, "{}", r.duration());
+        assert!(!tmp.exists(), "вокал проекта есть — отдельной сепарации нет");
+
+        let long = seg("s1", 0.5, 15.5, "x");
+        let text = speaker_voice_clip(&long, 12.0, &wd, &wd.join("source.mp4"), (&no_engine, &no_engine), &tmp, &out).unwrap();
+        assert_eq!(text, None, "урезанное окно без словных таймингов — без текста");
+        let r = hound::WavReader::open(&out).unwrap();
+        assert!((r.duration() as f64 / 44_100.0 - 12.0).abs() < 0.01, "кап 12 с: {}", r.duration());
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn speaker_voice_without_stems_or_separator_is_refused_before_cutting() {
+        let wd = scratch("spkvoice_noengine");
+        let input = wd.join("source.wav");
+        stereo_wav(&input, 44_100, 5.0);
+        let no_engine = wd.join("no-engine.exe");
+        let model = wd.join("model.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
+        let tmp = wd.join("_voicecut");
+        let out = wd.join("voice.wav");
+        match speaker_voice_clip(&seg("s0", 1.0, 3.0, "x"), 12.0, &wd, &input, (&no_engine, &model), &tmp, &out) {
+            Err(VoiceClipError::NoSeparator(missing)) => assert_eq!(missing, no_engine.display().to_string()),
+            other => panic!("ждали отказ без движка: {other:?}"),
+        }
+        assert!(!out.exists() && !tmp.exists(), "без движка реплика не вырезается и голос не пишется");
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn speaker_voice_without_stems_fails_when_the_line_cannot_be_separated() {
+        let wd = scratch("spkvoice_nosep");
+        let input = wd.join("source.wav");
+        stereo_wav(&input, 44_100, 5.0);
+        let broken = wd.join("broken-cli.exe");
+        std::fs::write(&broken, b"not an executable").unwrap();
+        let model = wd.join("model.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
+        let tmp = wd.join("_voicecut");
+        let out = wd.join("voice.wav");
+        match speaker_voice_clip(&seg("s0", 1.0, 3.0, "x"), 12.0, &wd, &input, (&broken, &model), &tmp, &out) {
+            Err(VoiceClipError::Separation(e)) => assert!(e.contains("запуск движка"), "{e}"),
+            other => panic!("ждали сбой сепарации: {other:?}"),
+        }
+        assert!(!out.exists(), "голос с музыкой оригинала за очищенный не пишется");
+        let r = hound::WavReader::open(tmp.join("cut44.wav")).unwrap();
+        assert_eq!((r.spec().sample_rate, r.spec().channels), (44_100, 2), "на сепарацию реплика идёт в полной полосе");
+        assert!((r.duration() as f64 / 44_100.0 - 2.0).abs() < 0.01, "{}", r.duration());
+        let _ = std::fs::remove_dir_all(&wd);
     }
 }

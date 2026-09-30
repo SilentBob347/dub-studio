@@ -120,7 +120,11 @@
     "addSpeakerDone_many": "{{count}} lignes → nouveau SPK {{spk}}",
     "addSpeakerDone_other": "{{count}} lignes → nouveau SPK {{spk}}",
     "ageTeen": "ado",
-    "ageChild": "enfant"
+    "ageChild": "enfant",
+    "errNoSeparation": "Impossible de créer une voix à partir du locuteur {{spk}} : ce projet n'a pas de voix séparée et le moteur de séparation vocale n'est pas installé, la voix contiendrait donc la musique. Installez-le dans {{settings}} → {{models}} → {{section}}.",
+    "errSeparation": "Impossible de créer une voix à partir du locuteur {{spk}} : la séparation de la voix et de la musique a échoué — {{detail}}",
+    "errNoLines": "Le locuteur {{spk}} n'a aucune réplique pour créer une voix",
+    "errFailed": "Impossible de créer une voix à partir du locuteur {{spk}} : {{detail}}"
   },
   "remix": {
     "title": "Remix",

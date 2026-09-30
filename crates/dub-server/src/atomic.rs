@@ -191,10 +191,14 @@ fn cached(mut found: Value) -> Value {
     found
 }
 
-/// The voice and the background, when both are separated.
-fn stems_of(stems: &Path) -> Option<Value> {
+/// The voice and the background, when both are separated from the audio as it is extracted now.
+fn stems_of(dir: &Path) -> Result<Option<Value>, String> {
+    let stems = dir.join("stems");
     let (vocals, background) = (stems.join("vocals.wav"), stems.join("instrumental.wav"));
-    (vocals.is_file() && background.is_file()).then(|| json!({ "vocals": vocals.to_string_lossy(), "background": background.to_string_lossy() }))
+    if !(vocals.is_file() && background.is_file() && media::stems_current(dir)?) {
+        return Ok(None);
+    }
+    Ok(Some(json!({ "vocals": vocals.to_string_lossy(), "background": background.to_string_lossy() })))
 }
 
 /// POST /projects/{pid}/separate — the voice and the background (music, effects) of the
@@ -210,8 +214,10 @@ pub async fn separate(State(st): State<AppState>, AxPath(pid): AxPath<String>) -
         Ok(input) => input,
         Err(refused) => return refused.into_response(),
     };
-    if let Some(found) = stems_of(&dir.join("stems")) {
-        return Json(cached(found)).into_response();
+    match stems_of(&dir) {
+        Ok(Some(found)) => return Json(cached(found)).into_response(),
+        Ok(None) => {}
+        Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
     }
     let model = models::resolve_sep(&st.models_root, &models::load_selection(&st.models_root));
     if !model.is_file() {
@@ -229,9 +235,10 @@ fn separation(dir: PathBuf, input: PathBuf, cli: PathBuf, model: PathBuf, repo_r
         crate::clean_partials(&dir);
         jobs::check_cancelled()?;
         let stems = dir.join("stems");
-        if let Some(found) = stems_of(&stems) {
+        if let Some(found) = stems_of(&dir)? {
             return Ok(found);
         }
+        media::drop_stale_separation(&dir)?;
         let cb = |ev: Value| progress(ev);
         crate::ensure_job_components(&repo_root, &models_root, false, false, &cb)?;
         jobs::check_cancelled()?;
@@ -246,6 +253,7 @@ fn separation(dir: PathBuf, input: PathBuf, cli: PathBuf, model: PathBuf, repo_r
         }
         cb(json!({ "stage": "separate", "msg": "сепарация (Mel-Band Roformer voc_fv6-Q8_0)" }));
         let split = dub_sep::separate(&audio_hq, &stems, &cli, &model).map_err(|e| format!("сепарация: {e}"))?;
+        media::mark_separation(&stems)?;
         Ok(json!({ "vocals": split.vocals.to_string_lossy(), "background": split.instrumental.to_string_lossy() }))
     })
 }
@@ -440,6 +448,7 @@ mod tests {
         for name in ["vocals.wav", "instrumental.wav"] {
             std::fs::write(stems.join(name), b"w").unwrap();
         }
+        media::mark_separation(&stems).unwrap();
         let job = separation(dir.path().into(), nowhere.clone(), nowhere.clone(), nowhere.clone(), nowhere.clone(), nowhere.clone());
         let split = job(quiet.clone()).expect("the stems are there: no engine is needed");
         assert!(split["vocals"].as_str().unwrap().ends_with("vocals.wav") && split["background"].as_str().unwrap().ends_with("instrumental.wav"), "{split}");
@@ -507,6 +516,7 @@ mod tests {
         let half = listed().await;
         assert!(half["vocals"].as_str().unwrap().ends_with("vocals.wav") && half["background"].is_null(), "{half}");
         std::fs::write(stems.join("instrumental.wav"), b"i").unwrap();
+        crate::media::mark_separation(&stems).unwrap();
         let (status, body) = read(separate(State(st.clone()), AxPath(pid.clone())).await).await;
         assert_eq!(status, StatusCode::OK);
         let body: Value = serde_json::from_str(&body).unwrap();

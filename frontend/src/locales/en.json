@@ -151,7 +151,11 @@
     "addSpeakerDone_one": "{{count}} line → new SPK {{spk}}",
     "addSpeakerDone_other": "{{count}} lines → new SPK {{spk}}",
     "ageTeen": "teen",
-    "ageChild": "child"
+    "ageChild": "child",
+    "errNoSeparation": "Couldn't make a voice from speaker {{spk}}: this project has no separated vocals and the vocal separation engine isn't installed, so the voice would carry the music. Install it in {{settings}} → {{models}} → {{section}}.",
+    "errSeparation": "Couldn't make a voice from speaker {{spk}}: separating the voice from the music failed — {{detail}}",
+    "errNoLines": "Speaker {{spk}} has no lines to make a voice from",
+    "errFailed": "Couldn't make a voice from speaker {{spk}}: {{detail}}"
   },
   "remix": {
     "title": "Remix",

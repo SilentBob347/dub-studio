@@ -422,7 +422,7 @@ fn win_target_sec() -> f64 {
     std::env::var("DUB_WIN_TARGET_SEC").ok().and_then(|v| v.parse().ok()).unwrap_or(600.0)
 }
 
-const EXTRACT_VER: &str = "extract-16kmono-v1";
+const EXTRACT_VER: &str = "extract-16kmono-sync-v2";
 /// В тексте сегмента есть хоть одна буква или цифра: сегмент из одной пунктуации («.») — остаток
 /// ASR на хвосте тишины, переводить и озвучивать его нельзя.
 fn has_speech_text(text: &str) -> bool {
@@ -833,6 +833,9 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     let want_diar = wants_diarization(args);
     crate::jobs::check_cancelled()?;
     bench.stage("separate");
+    if media::drop_stale_separation(&paths.work_dir)? {
+        emit(progress, "separate", "стемы посчитаны из звука прежнего извлечения — сепарация заново");
+    }
     let asr_wav: std::path::PathBuf = if want_diar
         && paths.bsroformer_cli.is_file()
         && paths.bsroformer_model.is_file()
@@ -850,6 +853,7 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
                 emit(progress, "separate", "сепарация вокала (BSRoformer) — чистый голос для диаризации/ASR");
                 dub_sep::separate(&audio_hq, &stems, &paths.bsroformer_cli, &paths.bsroformer_model)
                     .map_err(|e| e.to_string())?;
+                media::mark_separation(&stems)?;
             } else {
                 emit(progress, "separate", "сепарация из кэша (stems уже посчитаны)");
             }
