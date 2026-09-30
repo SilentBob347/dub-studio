@@ -25,11 +25,13 @@ mod hw;
 mod presets;
 mod job_store;
 mod jobs;
+mod mcp;
 mod media;
 mod models;
 mod ocr;
 mod patch;
 mod post_analyze;
+mod project_files;
 mod record;
 mod render;
 mod secrets_api;
@@ -359,7 +361,7 @@ fn clean_partials(dir: &Path) {
 }
 
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let api = Router::new()
         .route("/health", get(service::health))
         .route("/engine/capabilities", get(capabilities))
         .route("/engine/opts", axum::routing::patch(endpoints::set_opts))
@@ -426,6 +428,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{pid}/reveal", post(reveal_file))
         .route("/projects/{pid}/save-text", post(save_text))
         .route("/projects/{pid}/save-output", post(save_output))
+        .route("/projects/{pid}/files", get(project_files::files))
+        .route("/projects/{pid}/export-text", post(project_files::export_text))
         .route("/projects/{pid}/dub-audio", post(dub_audio_project))
         // /original?t= отдаёт ОДИН PNG-кадр оригинала (порт app.py.original -> source_frame),
         // фронт (ComparePane) вставляет его как <img src>. Range-раздача сырого видео — /dub.
@@ -440,10 +444,15 @@ pub fn build_router(state: AppState) -> Router {
         // Видео-аплоад — большие тела. axum по дефолту режет на 2МБ (multipart ломается на
         // реальном ролике). Питон (Starlette) лимита не ставит -> снимаем и мы.
         .layer(axum::extract::DefaultBodyLimit::disable())
+        .with_state(state);
+    // MCP-инструменты зовут те же маршруты внутри процесса. Гард Origin/Host вешается ниже этой точки,
+    // снаружи /mcp и /mcp/status, а не внутри `api`.
+    mcp::install(api.clone());
+    api.route("/mcp", post(mcp::handle))
+        .route("/mcp/status", get(mcp::status))
         .layer(guard::cors())
         // Снаружи всех слоёв: чужой Origin/Host получает 403 раньше CORS, SPA и любой ручки.
         .layer(axum::middleware::from_fn(guard::origin_guard))
-        .with_state(state)
 }
 
 // ─── /engine/capabilities ───────────────────────────────────────────────────

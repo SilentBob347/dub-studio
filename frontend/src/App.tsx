@@ -20,6 +20,7 @@ import CancelJobButton from "./components/CancelJobButton";
 import JobFailurePanel from "./components/JobFailurePanel";
 import ProjectJobBar from "./components/ProjectJobBar";
 import { ContinueJobButton, JobStateLabel } from "./components/RecentJobBadge";
+import AgentPanel from "./components/AgentPanel";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -619,6 +620,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </label>
           <PresetsSection />
           <ModelsSection />
+          <AgentPanel />
         </div>
       </div>
     </div>

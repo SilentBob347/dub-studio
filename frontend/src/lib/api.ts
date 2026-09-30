@@ -83,6 +83,8 @@ const analyzePostQuery = (p: AnalyzePost): string =>
   + (p.subBlur != null ? `&sub_blur=${p.subBlur ? 1 : 0}` : "")
   + (p.keepOriginal ? `&keep_original=1&container=${encodeURIComponent(p.keepOriginal.container)}` : "")
   + (p.voiceSlots ? `&voice_slots=${encodeURIComponent(JSON.stringify(p.voiceSlots))}` : "");
+// Подключённый к MCP-серверу агент: последний вызов и сколько секунд назад. window_open появится с мостом окна.
+export type McpStatus = { agent_connected: boolean; agent_last_call: string | null; agent_seconds_ago: number | null; agent_calls: number; window_open?: boolean };
 export type ModelStack = { asr: string; llm: string; vision: string; tts: string };
 // Выбор active.json: строковые слоты + флаги секретов. Ключ OpenRouter и пароль прокси сервер не отдаёт.
 export type Selection = { [slot: string]: string | boolean | undefined; or_key_set?: boolean; proxy_password_set?: boolean };
@@ -287,6 +289,9 @@ export const api = {
   waitJob: (jobId: string, secs: number) => fetch(`${BASE}/jobs/${jobId}?wait=${secs}`).then((r) => (r.status === 404 ? null : j<JobSnapshot>(r))),
   cancelJob: (jobId: string) => fetch(`${BASE}/jobs/${jobId}/cancel`, { method: "POST" }).then(j<{ id: string; status: string }>),
   resumeProject: (pid: string) => fetch(`${BASE}/projects/${pid}/resume`, { method: "POST" }).then(j<{ job_id: string; kind: string; project_id: string }>),
+  // MCP-сервер студии: адрес для подключения агента и его статус для раздела настроек «Агент (MCP)».
+  mcpUrl: () => `${BASE || window.location.origin}/mcp`,
+  mcpStatus: () => getJson<McpStatus>("/mcp/status"),
   // SSE job progress -> onEvent per message; resolves on done, rejects on error
   // signal: the watcher went away (unmount, project switch) — the stream closes, the promise rejects with AbortError.
   watchJob: (jobId: string, onEvent: (e: JobEvent) => void, signal?: AbortSignal) =>

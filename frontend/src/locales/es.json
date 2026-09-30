@@ -711,6 +711,19 @@
     "frameAlt": "Fotograma de la vista previa",
     "updating": "actualizando…"
   },
+  "agent": {
+    "title": "Agente (MCP)",
+    "intro": "Un agente conectado aquí (Claude Code, Cursor, Codex y otros) maneja todo el estudio: crea proyectos con tus vídeos, los analiza, corrige la traducción línea por línea, asigna las voces, renderiza, exporta a otros idiomas y guarda los resultados. El servidor funciona junto con el estudio; no hay nada que instalar.",
+    "lastCall": "Última llamada del agente: {{call}} · hace {{seconds}} s",
+    "none": "Ningún agente se ha conectado todavía",
+    "windowOn": "La ventana está conectada: el agente la ve",
+    "windowOff": "La ventana no está conectada",
+    "address": "Dirección",
+    "config": "Claude Desktop, Cursor y otros clientes",
+    "copy": "Copiar",
+    "copied": "Copiado",
+    "failed": "No se pudo leer el estado del agente"
+  },
   "jobs": {
     "fromCache": "desde caché",
     "continue": "Continuar",

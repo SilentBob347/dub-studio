@@ -1,0 +1,24 @@
+# Dub Studio
+
+> A Windows desktop studio that dubs videos on the user's own computer: it recognises who speaks and what they say, translates it, and re-voices every speaker with their own cloned voice, or makes a voice-over, translated or original-language subtitles, or a transcript; on-screen text is blurred and translated on the frame. While it is open it serves an MCP server at http://127.0.0.1:8793/mcp that an agent uses to do everything the studio does: projects from video files, analysis, the translation line by line, voices and character casting, subtitle styles, titles and blur boxes, the render, the same video in more languages, SRT and TXT export, the models and the settings.
+
+For an agent given this repository: install the studio from the latest release, start it, connect to its MCP server, and read the skill the server serves (resource `studio://skill`, prompt `studio`) - it names every tool, the ground rules and the recipes. Start every session with the tool `studio_status`.
+
+## Connect
+
+- MCP endpoint: `http://127.0.0.1:8793/mcp` (Streamable HTTP; protocol 2026-07-28 stateless, and 2025-11-25 / 2025-06-18 / 2025-03-26 through `initialize`)
+- Claude Code: `claude mcp add --transport http dub-studio http://127.0.0.1:8793/mcp`
+- Other clients: `{ "mcpServers": { "dub-studio": { "type": "streamable-http", "url": "http://127.0.0.1:8793/mcp" } } }`
+- Only agents on this computer and the studio's own window may connect; there is no key.
+
+## Docs
+
+- [Agent skill](https://raw.githubusercontent.com/timoncool/dub-studio/master/docs/mcp-skill.md): every tool by area, the ground rules, step-by-step recipes (the same text the server serves as `studio://skill`)
+- [README](https://github.com/timoncool/dub-studio#readme): what the studio does, what it needs, how it works
+- [Latest release](https://github.com/timoncool/dub-studio/releases/latest): the installer and the portable archive
+- [Project page](https://timoncool.github.io/dub-studio/)
+
+## Optional
+
+- Install the skill for Claude Code: save [docs/mcp-skill.md](https://raw.githubusercontent.com/timoncool/dub-studio/master/docs/mcp-skill.md) as `~/.claude/skills/dub-studio/SKILL.md`
+- [REST contract](https://github.com/timoncool/dub-studio/blob/master/docs/PORT-CONTRACT.md): the routes the tools call

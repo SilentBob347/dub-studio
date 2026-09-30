@@ -38,6 +38,22 @@ It's a **fully native rewrite**. No embeddable Python, no torch, no CUDA wheels.
 | ![Subtitles, Russian UI](docs/shots/mode-subtitles-ru.png) | ![Full dub, widescreen, French UI](docs/shots/mode-dub-cinema-fr.png) | ![Transcript, Portuguese UI](docs/shots/mode-transcribe-pt.png) |
 | 📝 **Subtitles** · original-lang | 🎬 **Full dub** · widescreen 16:9 | 🔤 **Transcript** · diarized |
 
+## For AI agents
+
+While Dub Studio is open it serves MCP at `http://127.0.0.1:8793/mcp`: an agent such as Claude Code, Claude Desktop, Cursor or Codex does everything the window does, through the same code — makes projects of video files, analyzes them, fixes the translation, timing and speakers line by line, casts the voices, styles the subtitles, adds titles and blur boxes, renders, exports the same video in more languages, writes SRT and TXT, and saves the results to a folder. Settings, **Agent (MCP)** shows whether an agent is connected and what to paste into the client.
+
+Given this repository, an agent can set everything up and drive the studio by itself:
+
+1. Install the studio from the [latest release](https://github.com/timoncool/dub-studio/releases/latest) and start it.
+2. Connect to its MCP server:
+   ```bash
+   claude mcp add --transport http dub-studio http://127.0.0.1:8793/mcp
+   ```
+   Other clients: `{ "mcpServers": { "dub-studio": { "type": "streamable-http", "url": "http://127.0.0.1:8793/mcp" } } }`
+3. Read the skill the server serves (resource `studio://skill`, prompt `studio`), the same text as [docs/mcp-skill.md](docs/mcp-skill.md) — every tool, the ground rules and step-by-step recipes — and start with the tool `studio_status`.
+
+[llms.txt](llms.txt) says the same for tools that look for it. To keep the skill in Claude Code, save [docs/mcp-skill.md](docs/mcp-skill.md) as `~/.claude/skills/dub-studio/SKILL.md`. Only agents on this computer and the studio's own window may connect.
+
 ## Five modes, switchable on the fly
 
 | Mode | What it does |
