@@ -382,6 +382,11 @@ fn resolve_modes(args: &AnalyzeArgs) -> (String, String) {
     (mode, subs)
 }
 
+/// Нужна ли этому анализу диаризация: всё, кроме nodub (только субтитры идут whole-clip, как питон).
+pub fn wants_diarization(args: &AnalyzeArgs) -> bool {
+    args.mode != "nodub"
+}
+
 /// Спикер для импортированной реплики субтитров — по максимальному перекрытию по времени с
 /// диаризацией. Нет перекрытия / нет диаризации -> "0" (тот же single-speaker контракт, что у ASR).
 fn speaker_for(start: f64, end: f64, turns: &[dub_asr::Turn]) -> String {
@@ -425,7 +430,7 @@ fn win_target_sec() -> f64 {
 }
 
 const EXTRACT_VER: &str = "extract-16kmono-v1";
-const DIAR_VER: &str = "sortformer-4spk-v2 · merge_gap=0.8 · min_spk=2.5";
+const DIAR_VER: &str = "nemotron3-diar-v3 · offline · merge_gap=0.8 · min_spk=2.5";
 const ASR_VER: &str = "asr-v1";
 const TRANSLATE_VER: &str = "gemma-ctx-v1";
 const OCR_VER: &str = "ppocr-onnx-v1";
@@ -591,7 +596,7 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     // 2c) СЕПАРАЦИЯ ДО диаризации/ASR (best practices: чистый вокал вместо сырого микса — диаризация
     // не путается на музыке, ASR точнее; приказ 2026-07-17). stems-кэш ОБЩИЙ с рендером (wd/stems) —
     // рендер переиспользует, двойной сепарации нет. Fail-safe: сбой/нет движка -> сырой vocals16.
-    let want_diar = args.mode != "nodub";
+    let want_diar = wants_diarization(args);
     bench.stage("separate");
     let asr_wav: std::path::PathBuf = if want_diar
         && paths.bsroformer_cli.is_file()
@@ -632,7 +637,7 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     bench.stage("diarize");
     // Backend диаризации (onnx CUDA-EP / CPU) — exec_config читает DUB_ASR_BACKEND при создании сессии.
     std::env::set_var("DUB_ASR_BACKEND", crate::models::stage_backend(&paths.models_root, "diar_backend"));
-    emit(progress, "diarize", "диаризация (Sortformer)");
+    emit(progress, "diarize", "диаризация (Nemotron 3 Diarization)");
     let diar = if want_diar && paths.sortformer_onnx.is_file() {
         match dub_asr::turns(&asr_wav, &paths.sortformer_onnx, 0.8, 2.5) {
             Ok(d) => Some(d),
@@ -649,7 +654,7 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         emit(
             progress,
             "diarize",
-            if !want_diar { "субтитры: без диаризации (whole-clip, как питон)" } else { "sortformer-модель не найдена; single-speaker путь" },
+            if !want_diar { "субтитры: без диаризации (whole-clip, как питон)" } else { "модель диаризации не найдена; single-speaker путь" },
         );
         None
     };

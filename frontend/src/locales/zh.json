@@ -493,5 +493,13 @@
     "empty": "Library is empty — save a cast from the editor.",
     "delete": "Delete profile",
     "deleteConfirm": "Delete this cast profile?"
+  },
+  "asrVariant": {
+    "int8": "int8",
+    "int8Hint": "NVIDIA 基础模型，int8 量化——快速轻量（约 0.7 GB）",
+    "fp32": "fp32",
+    "fp32Hint": "NVIDIA 基础模型，完整 fp32 精度（约 2.6 GB）",
+    "ultra": "Ultra · fp32",
+    "ultraHint": "Moondream 在基础模型上微调的版本：识别错误更少，同样支持 25 种语言 · fp32 约 2.6 GB"
   }
 }

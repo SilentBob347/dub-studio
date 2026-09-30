@@ -139,7 +139,8 @@ pub struct AppState {
     pub jobs: JobQueue,
     /// Каталог TDT-модели ASR (analyze). Env DUB_STUDIO_TDT, иначе <models_root>/tdt.
     pub tdt_dir: PathBuf,
-    /// Путь к Sortformer .onnx (диаризация). Env DUB_STUDIO_SORTFORMER, иначе <models_root>/sortformer/…v2.onnx.
+    /// Путь к модели диаризации (Nemotron 3 Diarization .onnx). Env DUB_STUDIO_SORTFORMER, иначе
+    /// <models_root>/nemotron-diar/nemotron3_diar_v3.onnx.
     pub sortformer_onnx: PathBuf,
     /// llama-server(.exe) — сайдкар перевода/vision. Env DUB_STUDIO_LLAMA_BIN, иначе <repo>/tools/llama/llama-server(.exe).
     pub llama_bin: PathBuf,
@@ -232,11 +233,7 @@ impl AppState {
             .unwrap_or_else(|_| mroot.join("tdt"));
         let sortformer_onnx = std::env::var("DUB_STUDIO_SORTFORMER")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                mroot
-                    .join("sortformer")
-                    .join("diar_streaming_sortformer_4spk-v2.onnx")
-            });
+            .unwrap_or_else(|_| mroot.join(dub_asr::DIAR_MODEL_DIR).join(dub_asr::DIAR_MODEL_FILE));
         // llama-server: env-override, иначе <repo>/tools/llama/llama-server(.exe) (негитуемый каталог,
         // кладёт установщик/раунд 3). Существование проверяет сама стадия перевода (fail-safe).
         let llama_bin = dub_llm::resolve_llama_bin(&repo_root.join("tools").join("llama"));
@@ -491,6 +488,7 @@ fn ensure_job_components(
     repo_root: &Path,
     models_root: &Path,
     casting: bool,
+    diarization: bool,
     progress: &setup::ProgressCb,
 ) -> Result<(), String> {
     let manifest = setup::manifest();
@@ -528,12 +526,26 @@ fn ensure_job_components(
     if asr_whisper && models::stage_backend(models_root, "asr_backend") == "gpu" && missing("whisper-cuda") {
         need.push("whisper-cuda".to_string());
     }
-    if need.is_empty() {
+    // Диаризация (дубляж/транскрипт) → модель Nemotron 3 Diarization. Её сбой закачки не валит джобу:
+    // анализ штатно деградирует в single-speaker и пишет об этом в журнал (см. analyze::run).
+    let need_diar = diarization && missing("sortformer");
+    if need.is_empty() && !need_diar {
         return Ok(());
     }
     progress(json!({ "stage": "download", "msg": "Догружаю недостающие модели для этой функции…" }));
     let cancel = || false; // догрузка внутри джобы не отменяется отдельно
-    setup::download_components(repo_root, &need, &cancel, progress).map(|_| ())
+    if !need.is_empty() {
+        setup::download_components(repo_root, &need, &cancel, progress)?;
+    }
+    if need_diar {
+        if let Err(e) = setup::download_components(repo_root, &["sortformer".to_string()], &cancel, progress) {
+            progress(json!({
+                "stage": "download",
+                "msg": format!("Модель диаризации не скачалась ({e}) — анализ пойдёт без разделения спикеров"),
+            }));
+        }
+    }
+    Ok(())
 }
 
 /// GET /hw/snapshot — снимок GPU/VRAM/темп/мощность + RAM для монитора ресурсов.
@@ -1520,7 +1532,7 @@ async fn analyze_project(
         let cb = |ev: Value| progress(ev);
         // On-demand: если для этой функции (кастинг) или backend (GPU) не хватает моделей — тянем их СЕЙЧАС,
         // до анализа. Иначе кастинг «не видел» бы лиц, а GPU-стадии падали бы с ошибкой CUDA.
-        ensure_job_components(&paths.repo_root, &paths.models_root, args.casting, &cb)?;
+        ensure_job_components(&paths.repo_root, &paths.models_root, args.casting, analyze::wants_diarization(&args), &cb)?;
         // Трекинг затрат OpenRouter в ДОЛЛАРАХ (перевод/vision через облако): total_usage до/после.
         let cost_before = openrouter_cli::total_usage_usd(&paths.models_root);
         let proj = analyze::run(&args, &paths, &cb)?;
@@ -1634,7 +1646,7 @@ async fn render_project(State(st): State<AppState>, AxPath(pid): AxPath<String>)
     let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
         let cb = |ev: Value| progress(ev);
         // On-demand: GPU-стадии рендера (Higgs TTS / сепарация на CUDA) без CUDA-стека -> догрузить сейчас.
-        ensure_job_components(&repo_root_for_job, &paths.models_root, false, &cb)?;
+        ensure_job_components(&repo_root_for_job, &paths.models_root, false, false, &cb)?;
         // Загрузить свежий Project (правки могли прийти после enqueue).
         let text = std::fs::read_to_string(&proj_path).map_err(|e| e.to_string())?;
         let proj = Project::from_json(&text).map_err(|e| e.to_string())?;

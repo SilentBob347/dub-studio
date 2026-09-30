@@ -48,6 +48,7 @@ pub fn component_selection(id: &str) -> Vec<(&'static str, String)> {
         "higgs-q4_k_m" => vec![("tts", "q4_k_m".into())],
         "parakeet" => vec![("asr_engine", "parakeet".into()), ("asr", "int8".into())],
         "parakeet-fp32" => vec![("asr_engine", "parakeet".into()), ("asr", "fp32".into())],
+        "parakeet-ultra" => vec![("asr_engine", "parakeet".into()), ("asr", "ultra".into())],
         "whisper-tiny" => vec![("asr_engine", "whisper".into()), ("whisper_model", "tiny".into())],
         "whisper-base" => vec![("asr_engine", "whisper".into()), ("whisper_model", "base".into())],
         "whisper-small" => vec![("asr_engine", "whisper".into()), ("whisper_model", "small".into())],
@@ -433,21 +434,29 @@ pub fn resolve_sep(mroot: &Path, sel: &Value) -> PathBuf {
     f("Q8_0")
 }
 
-/// Parakeet ASR: каталоги tdt (int8) / tdt-fp32. from_pretrained сам различает имена файлов внутри.
-/// Env DUB_STUDIO_TDT имеет приоритет.
+/// Parakeet ASR: каталоги tdt (int8) / tdt-fp32 / tdt-ultra (Parakeet Ultra, fp32). from_pretrained сам
+/// различает имена файлов внутри. Без выбора — int8 (дефолт). Env DUB_STUDIO_TDT имеет приоритет.
 pub fn resolve_asr(mroot: &Path, sel: &Value) -> PathBuf {
     if let Ok(env) = std::env::var("DUB_STUDIO_TDT") {
         return PathBuf::from(env);
     }
+    resolve_asr_dir(mroot, sel)
+}
+
+fn resolve_asr_dir(mroot: &Path, sel: &Value) -> PathBuf {
     let fp32 = mroot.join("tdt-fp32");
     let int8 = mroot.join("tdt");
+    let ultra = mroot.join("tdt-ultra");
     let fp32_ok = fp32.join("encoder-model.onnx").is_file();
     let int8_ok = int8.join("encoder-model.int8.onnx").is_file();
+    let ultra_ok = ultra.join("encoder-model.onnx").is_file();
     match pick(sel, "asr") {
         Some("fp32") if fp32_ok => fp32,
         Some("int8") if int8_ok => int8,
+        Some("ultra") if ultra_ok => ultra,
         _ if int8_ok => int8,
         _ if fp32_ok => fp32,
+        _ if ultra_ok => ultra,
         _ => int8,
     }
 }
@@ -494,6 +503,81 @@ pub fn resolve_mt(mroot: &Path, sel: &Value) -> (PathBuf, PathBuf) {
         mroot.join("mt").join("gemma-4-12b-it-qat-q4_0.gguf"),
         mroot.join("mt").join("mmproj-gemma-4-12b-it-qat-q4_0.gguf"),
     )
+}
+
+#[cfg(test)]
+mod asr_variant_tests {
+    use super::*;
+
+    #[test]
+    fn parakeet_components_map_to_their_asr_slot() {
+        for (id, variant) in [("parakeet", "int8"), ("parakeet-fp32", "fp32"), ("parakeet-ultra", "ultra")] {
+            let sel = component_selection(id);
+            assert_eq!(sel, vec![("asr_engine", "parakeet".to_string()), ("asr", variant.to_string())], "{id}");
+        }
+    }
+
+    struct TmpModels(PathBuf);
+    impl TmpModels {
+        fn new(tag: &str, dirs: &[(&str, &str)]) -> Self {
+            let root = std::env::temp_dir().join(format!("dub-asr-variant-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for (dir, file) in dirs {
+                std::fs::create_dir_all(root.join(dir)).unwrap();
+                std::fs::write(root.join(dir).join(file), b"x").unwrap();
+            }
+            TmpModels(root)
+        }
+    }
+    impl Drop for TmpModels {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const ALL: &[(&str, &str)] = &[
+        ("tdt", "encoder-model.int8.onnx"),
+        ("tdt-fp32", "encoder-model.onnx"),
+        ("tdt-ultra", "encoder-model.onnx"),
+    ];
+
+    fn sel(asr: &str) -> Value {
+        serde_json::json!({ "asr": asr })
+    }
+
+    fn leaf(p: &Path) -> String {
+        p.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn each_selected_variant_resolves_to_its_folder() {
+        let m = TmpModels::new("all", ALL);
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &sel("int8"))), "tdt");
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &sel("fp32"))), "tdt-fp32");
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &sel("ultra"))), "tdt-ultra");
+    }
+
+    #[test]
+    fn default_stays_int8_when_ultra_installed() {
+        let m = TmpModels::new("default", ALL);
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &serde_json::json!({}))), "tdt");
+    }
+
+    #[test]
+    fn ultra_selected_but_missing_falls_to_installed() {
+        let m = TmpModels::new("missing", &ALL[..1]);
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &sel("ultra"))), "tdt");
+    }
+
+    #[test]
+    fn only_ultra_installed_is_used() {
+        let m = TmpModels::new("only", &ALL[2..]);
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &serde_json::json!({}))), "tdt-ultra");
+        assert_eq!(
+            AsrChoice::Parakeet(resolve_asr_dir(&m.0, &sel("ultra"))).describe(),
+            "Parakeet (tdt-ultra)"
+        );
+    }
 }
 
 #[cfg(test)]

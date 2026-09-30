@@ -1,8 +1,9 @@
 //! dub-asr — ASR со словными таймстемпами + диаризация поверх parakeet-rs.
 //!
-//! Движок: Parakeet-TDT-0.6B-v3 (мультиязычный, авто-определение языка) + Sortformer v2 для диаризации,
-//! оба через ONNX Runtime (провайдер CPU по умолчанию). parakeet-rs требует ровно 16 кГц моно —
-//! входной WAV приводится к 16k/mono здесь (даунмикс + линейный ресемпл).
+//! Движок: Parakeet-TDT-0.6B-v3 (или его дообученные варианты той же архитектуры — Parakeet Ultra) +
+//! Nemotron 3 Diarization (Streaming Sortformer v3, до 8 спикеров) для диаризации, оба через ONNX Runtime
+//! (провайдер CPU по умолчанию). parakeet-rs требует ровно 16 кГц моно — входной WAV приводится к
+//! 16k/mono здесь (даунмикс + линейный ресемпл).
 //!
 //! Сегментация словного потока (_segment), transcribe / diarize / transcribe_turns — порт
 //! dubengine/asr.py и dubengine/diarize.py: паузы >0.6с, конец предложения .!?…, макс 8.0с.
@@ -22,10 +23,17 @@ pub use window::{
     detect_active_spans, merge_windows, plan_windows, speech_envelope, Window, WindowConfig,
 };
 
-use parakeet_rs::sortformer::{DiarizationConfig, Sortformer};
+use parakeet_rs::sortformer::{DiarizationConfig, Sortformer, StreamingProfile};
 use parakeet_rs::{ExecutionConfig, ParakeetTDT, TimestampMode, Transcriber};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+/// Максимум одновременно различаемых спикеров модели диаризации (Nemotron 3 Diarization).
+pub const MAX_SPEAKERS: usize = parakeet_rs::sortformer::NUM_SPEAKERS;
+
+/// Каталог модели диаризации внутри корня моделей и имя её файла.
+pub const DIAR_MODEL_DIR: &str = "nemotron-diar";
+pub const DIAR_MODEL_FILE: &str = "nemotron3_diar_v3.onnx";
 
 /// Конфиг исполнения ONNX. КРИТИЧНО: понижаем уровень оптимизации графа до Level1 — на int8-кванте
 /// Parakeet дефолтный Level3 виснет при создании CPU-сессии на минуты (оптимайзер спинит на
@@ -328,20 +336,10 @@ impl Asr {
                 loop {
                     let job = { q.lock().unwrap().pop() };
                     let Some((i, off, w_start, clip)) = job else { break };
+                    let clip_secs = clip.len() as f64 / sr_c as f64;
                     match model.transcribe_samples(clip, sr_c, 1, Some(TimestampMode::Words)) {
                         Ok(r) => {
-                            let end_abs = |v: f64| v;
-                            let mut ws: Vec<Word> = r
-                                .tokens
-                                .into_iter()
-                                .map(|t| Word {
-                                    word: t.text.trim().to_string(),
-                                    start: end_abs(t.start as f64) + off,
-                                    end: (t.end as f64).max(t.start as f64) + off,
-                                })
-                                .filter(|w| !w.word.is_empty())
-                                .collect();
-                            ws.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+                            let ws = words_from_tokens(r.tokens, off, clip_secs);
                             res.lock().unwrap()[i] = Some((w_start, ws));
                         }
                         Err(_) => {
@@ -376,24 +374,7 @@ impl Asr {
         let res = model
             .transcribe_samples(audio.to_vec(), sr, 1, Some(TimestampMode::Words))
             .map_err(|e| AsrError::Parakeet(e.to_string()))?;
-        // parakeet-rs в режиме Words отдаёт .tokens уже как слова (text/start/end в секундах).
-        let audio_end = audio.len() as f64 / sr as f64;
-        Ok(res
-            .tokens
-            .into_iter()
-            .filter_map(|t| {
-                let word = t.text.trim();
-                if word.is_empty() {
-                    return None;
-                }
-                let start = t.start as f64;
-                let mut end = (t.end as f64).max(start);
-                if end <= start {
-                    end = audio_end.max(start);
-                }
-                Some(Word { word: word.to_string(), start, end })
-            })
-            .collect())
+        Ok(words_from_tokens(res.tokens, 0.0, audio.len() as f64 / sr as f64))
     }
 
     /// DIARIZE-FIRST: транскрибировать КАЖДУЮ реплику отдельно (один спикер на сегмент). Порт
@@ -439,38 +420,49 @@ impl AsrEngine for Asr {
     }
 }
 
-/// Диаризация: Sortformer v2 -> реплики [(start,end,speaker)] в секундах, speaker перенумерован 0..k-1.
-/// sortformer_onnx — путь к diar_streaming_sortformer_4spk-v2.onnx.
+/// Диаризация: Nemotron 3 Diarization (Streaming Sortformer v3, до [`MAX_SPEAKERS`] спикеров) -> реплики
+/// [(start,end,speaker)] в секундах, speaker перенумерован 0..k-1. diar_onnx — путь к nemotron3_diar_v3.onnx.
+///
+/// Файл целиком известен заранее, поэтому профиль стриминга — `offline()` (самый длинный контекст модели,
+/// буфер 30.4 с), постобработка — дефолт parakeet-rs, воспроизводящий `diarize()` NeMo для этой модели.
 pub fn diarize(
     wav: impl AsRef<Path>,
-    sortformer_onnx: impl AsRef<Path>,
+    diar_onnx: impl AsRef<Path>,
 ) -> Result<Vec<Turn>, AsrError> {
     ensure_ort_dylib(); // до первого касания ort — иначе дедлок на чужой system32 DLL
     let (audio, sr) = load_wav_16k_mono(wav.as_ref())?;
-    let mut sf = Sortformer::with_config(
-        sortformer_onnx.as_ref(),
-        Some(exec_config()),
-        DiarizationConfig::callhome(),
-    )
-    .map_err(|e| AsrError::Parakeet(e.to_string()))?;
+    let mut sf = Sortformer::with_config(diar_onnx.as_ref(), Some(exec_config()), DiarizationConfig::default())
+        .map_err(|e| AsrError::Parakeet(e.to_string()))?;
+    sf.set_profile(StreamingProfile::offline())
+        .map_err(|e| AsrError::Parakeet(e.to_string()))?;
     // ДЛИННЫЙ файл — оконная диаризация: окна DIAR_WIN с перекрытием, спикеры соседних окон
     // сшиваются по пересечению реплик в оверлапе (страховка от роста памяти/деградации на часах).
     let total = audio.len() as f64 / sr as f64;
-    let mut raw: Vec<Turn> = if total > DIAR_WINDOW_GATE_SECS {
+    let raw: Vec<Turn> = if total > DIAR_WINDOW_GATE_SECS {
         diarize_windowed(&mut sf, &audio, sr)?
     } else {
         let segs = sf
             .diarize(audio, sr, 1)
             .map_err(|e| AsrError::Parakeet(e.to_string()))?;
-        // Sortformer отдаёт start/end в СЕМПЛАХ (при 16 кГц).
-        segs.iter()
-            .map(|s| Turn {
-                start: s.start as f64 / TARGET_SR as f64,
-                end: s.end as f64 / TARGET_SR as f64,
-                speaker: s.speaker_id as i32,
-            })
-            .collect()
+        segments_to_turns(&segs, 0.0)
     };
+    Ok(renumber_turns(raw))
+}
+
+/// Сегменты parakeet-rs (start/end в СЕМПЛАХ при 16 кГц) -> реплики в секундах со сдвигом `offset`.
+fn segments_to_turns(segs: &[parakeet_rs::sortformer::SpeakerSegment], offset: f64) -> Vec<Turn> {
+    segs.iter()
+        .map(|s| Turn {
+            start: offset + s.start as f64 / TARGET_SR as f64,
+            end: offset + s.end as f64 / TARGET_SR as f64,
+            speaker: s.speaker_id as i32,
+        })
+        .collect()
+}
+
+/// Отсортировать реплики по началу и перенумеровать спикеров в плотный ряд 0..k-1 (по возрастанию
+/// исходной метки: модель выдаёт id по порядку первого появления, порядок сохраняется).
+fn renumber_turns(mut raw: Vec<Turn>) -> Vec<Turn> {
     raw.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
     let mut labels: Vec<i32> = raw.iter().map(|t| t.speaker).collect();
     labels.sort_unstable();
@@ -480,7 +472,7 @@ pub fn diarize(
     for t in &mut raw {
         t.speaker = remap[&t.speaker];
     }
-    Ok(raw)
+    raw
 }
 
 /// Гейт оконной диаризации: до 90 мин whole-file ПРОВЕРЕН (L90: 5 мин анализа, RAM 64МБ, спикеры
@@ -491,7 +483,7 @@ const DIAR_WINDOW_GATE_SECS: f64 = 90.0 * 60.0;
 const DIAR_WIN_SECS: f64 = 60.0 * 60.0;
 const DIAR_OVERLAP_SECS: f64 = 120.0;
 
-/// Оконная диаризация: Sortformer по окнам DIAR_WIN с перекрытием DIAR_OVERLAP; спикеры окна i+1
+/// Оконная диаризация: модель по окнам DIAR_WIN с перекрытием DIAR_OVERLAP; спикеры окна i+1
 /// сшиваются со спикерами окна i по максимальному пересечению реплик в зоне оверлапа (стандартный
 /// приём стриминговой диаризации); не сматченные получают новые глобальные id. Реплики из головы
 /// окна, уже покрытые предыдущим (до середины оверлапа), отбрасываются — без дублей на шве.
@@ -515,14 +507,7 @@ fn diarize_windowed(
         let segs = sf
             .diarize(audio[a0..a1].to_vec(), sr, 1)
             .map_err(|e| AsrError::Parakeet(e.to_string()))?;
-        let local: Vec<Turn> = segs
-            .iter()
-            .map(|s| Turn {
-                start: w0 + s.start as f64 / TARGET_SR as f64,
-                end: w0 + s.end as f64 / TARGET_SR as f64,
-                speaker: s.speaker_id as i32,
-            })
-            .collect();
+        let local: Vec<Turn> = segments_to_turns(&segs, w0);
         // Мапа локальный спикер -> глобальный id: по максимальному суммарному пересечению с
         // репликами prev_tail в зоне оверлапа [w0, w0+OVERLAP].
         let mut map: std::collections::HashMap<i32, i32> = Default::default();
@@ -592,16 +577,21 @@ pub struct DiarTurns {
 /// спикеров 0..k-1 и вернуть ref_windows (самая длинная реплика каждого).
 pub fn turns(
     wav: impl AsRef<Path>,
-    sortformer_onnx: impl AsRef<Path>,
+    diar_onnx: impl AsRef<Path>,
     merge_gap: f64,
     min_speaker_dur: f64,
 ) -> Result<DiarTurns, AsrError> {
-    use std::collections::HashMap;
-    let single = |_| DiarTurns { turns: Vec::new(), n_speakers: 1, ref_windows: HashMap::new() };
+    let raw = diarize(wav, diar_onnx)?;
+    Ok(merge_turns(&raw, merge_gap, min_speaker_dur))
+}
 
-    let raw = diarize(wav, sortformer_onnx)?;
+/// Свёртка сырых реплик диаризации (отсортированных по началу) в DiarTurns — логика [`turns`] без модели.
+pub fn merge_turns(raw: &[Turn], merge_gap: f64, min_speaker_dur: f64) -> DiarTurns {
+    use std::collections::HashMap;
+    let single = || DiarTurns { turns: Vec::new(), n_speakers: 1, ref_windows: HashMap::new() };
+
     if raw.is_empty() {
-        return Ok(single(()));
+        return single();
     }
 
     // Слить подряд идущие реплики одного спикера с зазором <= merge_gap.
@@ -623,7 +613,7 @@ pub fn turns(
     let realset: std::collections::HashSet<i32> =
         dur.iter().filter(|(_, &d)| d >= min_speaker_dur).map(|(&s, _)| s).collect();
     if realset.len() < 2 {
-        return Ok(single(())); // реально один голос -> single-speaker путь
+        return single(); // реально один голос -> single-speaker путь
     }
 
     // Крошечную реплику не-настоящего спикера переназначить ближайшей настоящей (по середине).
@@ -665,7 +655,34 @@ pub fn turns(
         .map(|m| Turn { start: m[0], end: m[1], speaker: remap[&(m[2] as i32)] })
         .collect();
     let rw: HashMap<i32, RefWindow> = longest.into_iter().map(|(old, w)| (remap[&old], w)).collect();
-    Ok(DiarTurns { turns: out, n_speakers: labels.len(), ref_windows: rw })
+    DiarTurns { turns: out, n_speakers: labels.len(), ref_windows: rw }
+}
+
+/// Кадр энкодера TDT (8× сабсэмплинг по 10 мс) — временное разрешение токена.
+const TDT_FRAME_SECS: f64 = 0.08;
+
+/// Токены режима `TimestampMode::Words` (уже слова, секунды от начала клипа) -> [`Word`] со сдвигом
+/// `offset`. Конец слова = кадр эмиссии последнего токена + его TDT-длительность; длительность 0
+/// (следующий токен в том же кадре) даёт end == start, и такому слову отдаётся кадр эмиссии, не дальше
+/// конца клипа `clip_secs`.
+fn words_from_tokens(tokens: Vec<parakeet_rs::TimedToken>, offset: f64, clip_secs: f64) -> Vec<Word> {
+    let mut out: Vec<Word> = tokens
+        .into_iter()
+        .filter_map(|t| {
+            let word = t.text.trim();
+            if word.is_empty() {
+                return None;
+            }
+            let start = t.start as f64;
+            let mut end = (t.end as f64).max(start);
+            if end <= start {
+                end = (start + TDT_FRAME_SECS).min(clip_secs).max(start);
+            }
+            Some(Word { word: word.to_string(), start: start + offset, end: end + offset })
+        })
+        .collect();
+    out.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 /// Нормализовать слово для сравнения на шве: lowercase + снять КОНЕЧНУЮ пунктуацию (.,!?…;:).
@@ -895,5 +912,87 @@ mod dedup_tests {
         // внутрисловные апострофы/дефисы НЕ трогаем (различают настоящие слова)
         assert_eq!(norm_word("don't"), "don't");
         assert_eq!(norm_word("well-known"), "well-known");
+    }
+}
+
+#[cfg(test)]
+mod diar_word_tests {
+    use super::*;
+
+    fn tok(text: &str, start: f32, end: f32) -> parakeet_rs::TimedToken {
+        parakeet_rs::TimedToken { text: text.into(), start, end }
+    }
+
+    #[test]
+    fn zero_duration_word_gets_its_frame_not_clip_end() {
+        let ws = words_from_tokens(
+            vec![tok(" Well", 6.0, 6.16), tok(".", 6.24, 6.24), tok(" ", 6.3, 6.3), tok(" Next", 7.0, 7.3)],
+            0.0,
+            22.0,
+        );
+        let got: Vec<(&str, f64, f64)> = ws.iter().map(|w| (w.word.as_str(), w.start, w.end)).collect();
+        assert_eq!(got.len(), 3, "пустой токен отброшен: {got:?}");
+        assert!((ws[1].start - 6.24).abs() < 1e-5);
+        assert!((ws[1].end - (6.24 + TDT_FRAME_SECS)).abs() < 1e-5, "нулевая длительность -> один кадр: {got:?}");
+    }
+
+    #[test]
+    fn zero_duration_word_clamped_to_clip_end_and_offset_applied() {
+        let ws = words_from_tokens(vec![tok("end.", 9.98, 9.98)], 100.0, 10.0);
+        assert!((ws[0].start - 109.98).abs() < 1e-4);
+        assert!((ws[0].end - 110.0).abs() < 1e-4, "кадр не выходит за конец клипа: {:?}", ws[0]);
+    }
+
+    #[test]
+    fn model_supports_eight_speakers() {
+        assert_eq!(MAX_SPEAKERS, 8);
+    }
+
+    fn turn(start: f64, end: f64, speaker: i32) -> Turn {
+        Turn { start, end, speaker }
+    }
+
+    #[test]
+    fn renumber_keeps_all_eight_speakers_dense_and_sorted() {
+        let raw: Vec<Turn> = (0..8).rev().map(|s| turn(s as f64 * 3.0, s as f64 * 3.0 + 2.0, s)).collect();
+        let out = renumber_turns(raw);
+        let ids: Vec<i32> = out.iter().map(|t| t.speaker).collect();
+        assert_eq!(ids, (0..8).collect::<Vec<i32>>());
+        assert!(out.windows(2).all(|p| p[0].start <= p[1].start));
+    }
+
+    #[test]
+    fn renumber_compacts_sparse_ids() {
+        let out = renumber_turns(vec![turn(0.0, 1.0, 7), turn(1.0, 2.0, 2), turn(2.0, 3.0, 5)]);
+        let ids: Vec<i32> = out.iter().map(|t| t.speaker).collect();
+        assert_eq!(ids, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn merge_turns_keeps_eight_real_speakers() {
+        let raw: Vec<Turn> = (0..16).map(|i| turn(i as f64 * 4.0, i as f64 * 4.0 + 3.0, i % 8)).collect();
+        let d = merge_turns(&raw, 0.8, 2.5);
+        assert_eq!(d.n_speakers, 8);
+        assert_eq!(d.ref_windows.len(), 8);
+        let mut ids: Vec<i32> = d.turns.iter().map(|t| t.speaker).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, (0..8).collect::<Vec<i32>>());
+    }
+
+    #[test]
+    fn merge_turns_short_speaker_goes_to_nearest_real() {
+        let raw = vec![turn(0.0, 3.0, 0), turn(3.2, 3.6, 7), turn(4.0, 7.0, 1)];
+        let d = merge_turns(&raw, 0.8, 2.5);
+        assert_eq!(d.n_speakers, 2);
+        assert!(d.turns.iter().all(|t| t.speaker == 0 || t.speaker == 1));
+    }
+
+    #[test]
+    fn merge_turns_single_real_speaker_collapses() {
+        let raw = vec![turn(0.0, 1.0, 0), turn(2.0, 6.0, 1)];
+        let d = merge_turns(&raw, 0.8, 2.5);
+        assert_eq!(d.n_speakers, 1);
+        assert!(d.turns.is_empty());
     }
 }
