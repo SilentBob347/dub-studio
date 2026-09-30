@@ -763,7 +763,8 @@ pub struct ComponentStatus {
     pub space_needed: u64,
     /// Чего не хватает (пути относительно repo_root).
     pub missing: Vec<String>,
-    /// External — видеокарта, драйвер, CUDA и compute capability; ffmpeg — откуда он взят.
+    /// External — видеокарта, драйвер, CUDA и compute capability; ffmpeg — "PATH", если взят оттуда;
+    /// vcruntime — "system", если часть DLL даёт системный каталог.
     pub detail: Option<String>,
     /// URL внешней страницы (драйвер).
     pub external_url: Option<String>,
@@ -802,6 +803,32 @@ fn file_ok(path: &Path, size: u64) -> bool {
 
 fn marker_ok(repo_root: &Path, m: &Marker) -> bool {
     file_ok(&repo_root.join(m.rel), m.expect)
+}
+
+/// Компоненты, чьи DLL годятся и из системного каталога: VC++ Redistributable кладёт их в System32, а
+/// загрузчик ищет зависимости движков там раньше PATH (где models/higgs-engine).
+const FOUND_IN_SYSTEM_DIR: &[&str] = &["vcruntime"];
+
+/// Маркер-DLL лежит в системном каталоге.
+fn in_system_dir(system: &Path, m: &Marker) -> bool {
+    Path::new(m.rel).file_name().is_some_and(|name| file_ok(&system.join(name), m.expect))
+}
+
+#[cfg(windows)]
+fn system_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    let mut buf = [0u16; 1024];
+    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n == 0 || n >= buf.len() {
+        tracing::warn!("GetSystemDirectoryW не ответил ({}) — DLL из системного каталога не засчитываются", std::io::Error::last_os_error());
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])))
+}
+
+#[cfg(not(windows))]
+fn system_dir() -> Option<PathBuf> {
+    None
 }
 
 fn file_len(path: &Path) -> u64 {
@@ -941,6 +968,12 @@ fn file_space_needed(repo_root: &Path, f: &FileSpec) -> u64 {
 
 /// Статус компонента на диске.
 pub fn component_status(repo_root: &Path, c: &Component) -> ComponentStatus {
+    let system = if FOUND_IN_SYSTEM_DIR.contains(&c.id) { system_dir() } else { None };
+    status_with_system_dir(repo_root, c, system.as_deref())
+}
+
+/// `system` — системный каталог, где засчитываются маркеры компонентов FOUND_IN_SYSTEM_DIR.
+fn status_with_system_dir(repo_root: &Path, c: &Component, system: Option<&Path>) -> ComponentStatus {
     let mut missing: Vec<String> = Vec::new();
     let mut bytes_on_disk = 0u64;
     let mut space_needed = 0u64;
@@ -953,8 +986,14 @@ pub fn component_status(repo_root: &Path, c: &Component) -> ComponentStatus {
             space_needed += file_space_needed(repo_root, f);
         }
     }
+    let mut from_system = false;
     for m in c.markers {
-        if !marker_ok(repo_root, m) && !missing.iter().any(|x| x == m.rel) {
+        if marker_ok(repo_root, m) || missing.iter().any(|x| x == m.rel) {
+            continue;
+        }
+        if system.is_some_and(|dir| in_system_dir(dir, m)) {
+            from_system = true;
+        } else {
             missing.push(m.rel.to_string());
         }
     }
@@ -972,7 +1011,7 @@ pub fn component_status(repo_root: &Path, c: &Component) -> ComponentStatus {
             space_needed = 0;
             (true, Some("PATH".to_string()))
         }
-        _ => (missing.is_empty(), None),
+        _ => (missing.is_empty(), from_system.then(|| "system".to_string())),
     };
     ComponentStatus {
         id: c.id.to_string(),
@@ -1103,6 +1142,7 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
 #[cfg(windows)]
 extern "system" {
     fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+    fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
 }
 
 #[cfg(not(windows))]
@@ -2385,6 +2425,68 @@ mod tests {
         sized(&dll, 1);
         assert!(!archive_installed(&root, wheel), "файл из записи изменился");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_vc_runtime_counts_where_the_loader_finds_it() {
+        let root = temp_root("vcrt");
+        let system = temp_root("vcrt-system");
+        let vc = manifest().into_iter().find(|c| c.id == "vcruntime").unwrap();
+        let name = |m: &Marker| Path::new(m.rel).file_name().unwrap().to_owned();
+
+        let st = status_with_system_dir(&root, &vc, Some(&system));
+        assert!(!st.installed);
+        assert_eq!(st.missing.len(), vc.markers.len());
+
+        let (engine, rest) = vc.markers.split_at(2);
+        for m in engine {
+            sized(&root.join(m.rel), 10);
+        }
+        for m in rest {
+            sized(&system.join(name(m)), 10);
+        }
+        let st = status_with_system_dir(&root, &vc, Some(&system));
+        assert!(st.installed, "{:?}", st.missing);
+        assert_eq!(st.detail.as_deref(), Some("system"));
+        assert!(!status_with_system_dir(&root, &vc, None).installed, "без системного каталога — только комплект");
+
+        std::fs::remove_file(system.join(name(&rest[0]))).unwrap();
+        let st = status_with_system_dir(&root, &vc, Some(&system));
+        assert!(!st.installed);
+        assert_eq!(st.missing, vec![rest[0].rel.to_string()]);
+
+        for m in rest {
+            sized(&root.join(m.rel), 10);
+        }
+        let st = status_with_system_dir(&root, &vc, Some(&system));
+        assert!(st.installed);
+        assert_eq!(st.detail, None, "весь комплект рядом с движком");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&system).ok();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn the_system_dir_is_the_one_windows_loads_from() {
+        let dir = system_dir().expect("GetSystemDirectoryW");
+        assert!(dir.join("kernel32.dll").is_file(), "{}", dir.display());
+        assert!(FOUND_IN_SYSTEM_DIR.iter().all(|id| manifest().iter().any(|c| c.id == *id && c.delivery == Delivery::Bundled)));
+    }
+
+    /// Комплект релиза: каждый файл Bundled-компонента лежит в staging установщика (или в распакованном
+    /// портативе) по тому же пути, что после установки. Шаг сборки — desktop/src-tauri/STAGING.md.
+    #[test]
+    #[ignore]
+    fn the_release_staging_carries_every_bundled_file() {
+        let stage = PathBuf::from(std::env::var("DUB_RELEASE_STAGING").expect("DUB_RELEASE_STAGING = каталог staging или портатива"));
+        let absent: Vec<String> = manifest()
+            .iter()
+            .filter(|c| c.delivery == Delivery::Bundled)
+            .flat_map(|c| c.markers.iter().map(move |m| (c.id, m)))
+            .filter(|(_, m)| !marker_ok(&stage, m))
+            .map(|(id, m)| format!("{id}: {}", m.rel))
+            .collect();
+        assert!(absent.is_empty(), "нет в {}: {absent:#?}", stage.display());
     }
 
     #[test]

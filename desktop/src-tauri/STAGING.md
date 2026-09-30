@@ -29,6 +29,15 @@ cp models/ocr/det.onnx models/ocr/cls.onnx \
    "$STAGE/models/ocr/"
 ```
 
+Проверка комплекта по манифесту (все файлы Bundled-компонентов, в том числе пять DLL VC++ runtime, на
+своих местах). Без неё релиз без `MSVCP140_1.dll` запирает на «Первом запуске» всех, у кого нет VC++
+Redistributable в системе: докачать Bundled-компонент нельзя. Тем же тестом проверяется распакованный
+портатив — `DUB_RELEASE_STAGING` указывает на его каталог.
+
+```bash
+DUB_RELEASE_STAGING="$PWD/$STAGE" cargo test -p dub-server --lib setup::tests::the_release_staging_carries_every_bundled_file -- --ignored
+```
+
 Затем `cd desktop && npx tauri build` — NSIS (`-setup.exe`) и MSI (`_en-US.msi`) появятся в
 `desktop/src-tauri/target/release/bundle/{nsis,msi}/`.
 
