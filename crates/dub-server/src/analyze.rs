@@ -898,11 +898,11 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     //    что переводить, поднимаем llama-server (сайдкар Gemma+mmproj), гоним единый ctx-проход
     //    (vision layout/scene + перевод всего транскрипта), заполняем tgt_text/titles/sub_style.
     //    Пайплайн последовательный: TTS в этот момент не загружен (как tts.release() в питоне) —
-    //    Gemma получает всю VRAM. Fail-safe: сбой стадии оставляет tgt пустым (перевод — не блокер analyze).
+    //    Gemma получает всю VRAM. Перевод, который нужен режиму, но не выполнен, — ошибка анализа:
+    //    ролик не должен озвучиться на исходном языке под видом дубляжа.
     // vocals16 уже объявлен выше (стадия ASR) и не перемещался — переиспользуем.
-    // Сигнатуру translate::stage НЕ трогаем — только пишем её param-хэш вокруг вызова (задел под resume).
     bench.stage("translate");
-    crate::translate::stage(args, paths, &mut proj, &asr_wav, meta.height, meta.duration, progress);
+    crate::translate::stage(args, paths, &mut proj, &asr_wav, meta.height, meta.duration, progress)?;
     let translate_key = cache::hash_stage(&[
         TRANSLATE_VER,
         &transcript_fp,

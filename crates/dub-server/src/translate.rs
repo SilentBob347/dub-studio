@@ -54,7 +54,12 @@ pub fn classify_content_type_standalone(
     Some(ct)
 }
 
+/// Доля непустых строк без перевода, начиная с которой перевод считается проваленным: озвучить ролик
+/// на исходном языке под видом дубляжа хуже, чем остановиться с причиной.
+const UNTRANSLATED_FAIL_SHARE: f64 = 0.5;
+
 /// Прогнать стадию. proj уже собран транскрипт-стадией (segments + mode/tgt_lang). vh/total — из probe.
+/// Err — перевод нужен (дубляж, закадр, перевод субтитров, ремикс), но не выполнен.
 pub fn stage(
     args: &AnalyzeArgs,
     paths: &AnalyzePaths,
@@ -63,16 +68,16 @@ pub fn stage(
     vh: i64,
     total: f64,
     progress: &Progress,
-) {
+) -> Result<(), String> {
     // Нет сегментов -> нечего переводить (auto-nodub / музыка). Как ранний return в питоне.
     if proj.segments.is_empty() {
-        return;
+        return Ok(());
     }
     // Импортированы субтитры УЖЕ на языке перевода: tgt заполнен из cues (analyze import-ветка),
     // MT и vision-раскладка не нужны — Даб Студио только озвучивает готовый текст.
     if args.import_translated {
         emit(progress, "translate", "субтитры уже на языке перевода -> без MT (только озвучка)");
-        return;
+        return Ok(());
     }
     let rewrite = if args.rewrite.is_empty() { None } else { Some(args.rewrite.as_str()) };
     let do_translate = wants_translate(proj) || rewrite.is_some();
@@ -80,7 +85,7 @@ pub fn stage(
         // transcribe-режим: tgt = исходный текст, БЕЗ MT (parity с pipeline «transcribe» веткой).
         copy_src_to_tgt(proj);
         emit(progress, "translate", "transcribe: tgt=исходный текст, без перевода");
-        return;
+        return Ok(());
     }
 
     // src == tgt -> оставить исходник, ноль MT (same_lang в питоне). src берём из query (auto -> не знаем
@@ -92,19 +97,15 @@ pub fn stage(
     if same_lang && rewrite.is_none() {
         copy_src_to_tgt(proj);
         emit(progress, "translate", "same-lang -> без MT (tgt=исходник)");
-        return;
+        return Ok(());
     }
 
     // Поднять сайдкар Gemma (+mmproj для vision). Существование бинаря/весов проверяет start().
     if !paths.llama_bin.is_file() {
-        emit(progress, "translate", &format!(
-            "перевод пропущен: llama-server не найден ({})", paths.llama_bin.display()));
-        return;
+        return Err(format!("перевод не выполнен: llama-server не найден ({})", paths.llama_bin.display()));
     }
     if !paths.mt_model.is_file() {
-        emit(progress, "translate", &format!(
-            "перевод пропущен: GGUF Gemma не найден ({})", paths.mt_model.display()));
-        return;
+        return Err(format!("перевод не выполнен: GGUF Gemma не найден ({})", paths.mt_model.display()));
     }
 
     // LLM-провайдер: облако OpenRouter (если включено в настройках + есть ключ) ИЛИ локальный llama-server
@@ -126,10 +127,7 @@ pub fn stage(
             });
             p
         }
-        Err(e) => {
-            emit(progress, "translate", &format!("LLM недоступен: {e}; перевод пропущен"));
-            return;
-        }
+        Err(e) => return Err(format!("перевод не выполнен: LLM недоступен: {e}")),
     };
     let client = prov.client();
 
@@ -189,10 +187,7 @@ pub fn stage(
 
     let extra = match res {
         Ok(r) => r.extra,
-        Err(e) => {
-            emit(progress, "translate", &format!("ctx-перевод не удался: {e}; tgt оставлен пустым"));
-            return;
-        }
+        Err(e) => return Err(format!("перевод не выполнен: {e}")),
     };
 
     // Перенести tgt в сегменты Project. segs строился 1:1 из proj.segments и дальше не используется —
@@ -205,10 +200,25 @@ pub fn stage(
     // как raw_ctx = ce_d в from_artifacts).
     apply_extra(proj, &extra);
 
-    let translated = proj.segments.iter().filter(|s| !s.tgt_text.is_empty()).count();
+    let spoken: Vec<&dub_core::Segment> =
+        proj.segments.iter().filter(|s| !s.src_text.trim().is_empty()).collect();
+    let untranslated = spoken
+        .iter()
+        .filter(|s| looks_untranslated(&s.src_text, &s.tgt_text, &proj.tgt_lang))
+        .count();
+    if rewrite.is_none() && !spoken.is_empty() {
+        let share = untranslated as f64 / spoken.len() as f64;
+        if share >= UNTRANSLATED_FAIL_SHARE {
+            return Err(format!(
+                "перевод не выполнен: {untranslated} из {} строк остались на исходном языке (подробности — в журнале и logs/llama-server.log)",
+                spoken.len()
+            ));
+        }
+    }
     emit(progress, "translate", &format!(
         "перевод готов: {}/{} строк, тайтлов={}",
-        translated, proj.segments.len(), proj.captions.titles.len()));
+        spoken.len() - untranslated, spoken.len(), proj.captions.titles.len()));
+    Ok(())
 }
 
 /// extra (ctx_extra.json) -> типизированные captions.sub_style/sub_y/titles/brands + raw_ctx.
