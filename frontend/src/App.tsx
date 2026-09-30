@@ -10,10 +10,10 @@ import ProjectsList from "./components/ProjectsList";
 import ConfirmDialog from "./components/ConfirmDialog";
 import ServerOffline from "./components/ServerOffline";
 import { motion } from "motion/react";
-import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
+import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders, Scissors, History, Pin } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, llmProviderOf, slot, SetupError, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectListing, type LaunchDefaults, type Character, type DownloadJob } from "./lib/api";
+import { api, llmProviderOf, slot, SetupError, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectListing, type LaunchDefaults, type Character, type DownloadJob, type ShortenResult } from "./lib/api";
 import { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
@@ -38,6 +38,10 @@ import { useSetupStatus } from "./lib/useSetupStatus";
 import { useDownloadErrorText, useGpuReasonText } from "./lib/setupText";
 import { fmtBytes } from "./lib/format";
 import SubsAlignToggle from "./components/SubsAlignToggle";
+import FitBadge from "./components/FitBadge";
+import FitToolbar from "./components/FitToolbar";
+import TakesPanel from "./components/TakesPanel";
+import { fitOver } from "./lib/fit";
 import LlmProviders from "./components/LlmProviders";
 import OpenRouterModelSelect, { OpenRouterCatalogRow } from "./components/OpenRouterModelSelect";
 
@@ -2424,6 +2428,9 @@ function Editor() {
     return () => window.clearInterval(id);
   }, [play]);   // eslint-disable-line react-hooks/exhaustive-deps
   const [regenId, setRegenId] = useState<string | null>(null);        // segment whose TTS is being re-generated
+  const [shortening, setShortening] = useState<string | null>(null);  // строка (или "__all__"), чей перевод сокращается под слот
+  const [onlyOver, setOnlyOver] = useState(false);                    // фильтр списка: только не влезающие в слот
+  const [takesOpen, setTakesOpen] = useState<string | null>(null);    // строка с раскрытой историей дублей
   const [remixText, setRemixText] = useState("");                     // funny-remix theme/instruction for Gemma
   const [remixing, setRemixing] = useState(false);
   const defaultSubStyle = {
@@ -2543,7 +2550,12 @@ function Editor() {
   }
   async function persistSeg(id: string, tgt: string) {               // on blur -> persist to backend + refresh frame
     setRendered(false);
-    try { setProject(await api.patch(pid, { op: "segment", id, tgt_text: tgt })); bump(); }
+    const wasPinned = p.segments.find((x) => x.id === id)?.takes?.pinned != null;
+    try {
+      const fresh = await api.patch(pid, { op: "segment", id, tgt_text: tgt });
+      setProject(fresh); bump();
+      if (wasPinned && fresh.segments.find((x) => x.id === id)?.takes?.pinned == null) pushActivity(t("takes.unpinnedByEdit", { count: 1 }), "work");
+    }
     catch (err) { await surfaceErr(err); }
   }
   async function branch(op: string, extra: Record<string, unknown> = {}) {
@@ -2579,6 +2591,39 @@ function Editor() {
       setProject(await api.getProject(pid)); setRendered(false); bump(); bumpDub(); playSfx("notify");   // refresh preview + reload the re-rendered dub audio
     } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
     finally { setRegenId(null); }
+  }
+  // Сократить перевод под слот (джоба shorten): одной строки или всех, что не влезают. Новый текст — dirty,
+  // озвучивается кнопкой/экспортом; снапшот до джобы — undo возвращает прежний текст.
+  async function doShorten(target: { ids: string[] } | { all_over: true }, tag: string) {
+    if (regenId || shortening) return;
+    pushHistory(p); setShortening(tag); pushActivity(t("fit.shortening"));
+    try {
+      const { job_id } = await enqueueWhenFree(() => api.shorten(pid, target), waitNote);
+      const res = await watchLocal(pid, "shorten", job_id, (e) => { if (e.type === "progress" && e.msg) useStore.getState().pushActivity(e.msg, "work"); }) as ShortenResult;
+      setProject(await api.getProject(pid)); setRendered(false); bump();
+      pushActivity(t("fit.shortened", { count: res.shortened.length }), "done");
+      if (res.rejected.length) pushActivity(t("fit.rejected", { count: res.rejected.length }), "work");
+      if (res.failed.length) pushActivity(t("fit.failed", { count: res.failed.length, error: res.failed[0].error }), "error");
+      if (res.unpinned.length) pushActivity(t("takes.unpinnedByEdit", { count: res.unpinned.length }), "work");
+      playSfx("notify");
+    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("shorten"); else await surfaceErr(e); }
+    finally { setShortening(null); }
+  }
+  // Выбрать дубль из истории фразы: без переозвучки, только пересборка микса. Дубль другого текста возвращает текст (undo — снапшот).
+  async function doTakeSelect(segId: string, n: number) {
+    if (regenId) return;
+    pushHistory(p); setRegenId(segId); setRendered(false); pushActivity(t("takes.selecting"));
+    try {
+      setProject(await api.patch(pid, { op: "take_select", id: segId, take: n })); bump();
+      const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);
+      await watchDub(job_id);
+      setProject(await api.getProject(pid)); bumpDub(); playSfx("notify");
+    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
+    finally { setRegenId(null); }
+  }
+  async function doTakePin(segId: string, pinned: boolean) {
+    try { setProject(await api.patch(pid, { op: "take_pin", id: segId, pinned })); }
+    catch (e) { await surfaceErr(e); }
   }
   // hide/del/keep одной строки: патч проекта (без авто-ре-озвучки; рендер — по кнопке)
   async function segOp(segId: string, op: string) {
@@ -2704,6 +2749,7 @@ function Editor() {
       const { job_id } = await enqueueWhenFree(() => api.render(pid), (kind) => { updateExport(exId, { msg: t("jobs.waitingFor", { kind: t(`jobs.kind.${kind}`) }) }); waitNote(kind); });
       await watchLocal(pid, "render", job_id, (e) => { if (e.type === "progress") { updateExport(exId, { msg: e.msg || "" }); pushActivity(e.msg || "", "work"); } });
       updateExport(exId, { status: "done", msg: "", url: `${api.outputUrl(pid)}?rev=${Date.now()}` });   // bust cache on re-export
+      setProject(await api.getProject(pid));   // рендер мог сократить не влезшие фразы и записал отчёт укладки
       // Раскрыть реальный выход в проводнике: контейнер может быть output.mkv (#113, сохранена ориг. дорожка) —
       // не хардкодим .mp4. Расширение из project.json (keep_original_track + container), иначе .mp4.
       const outName = p.audio.keep_original_track && p.audio.container === "mkv" ? "output.mkv" : "output.mp4";
@@ -2802,6 +2848,8 @@ function Editor() {
                     </label>
                   </div>
                 </div>
+                <FitToolbar segments={p.segments} onlyOver={onlyOver} onToggle={() => setOnlyOver((v) => !v)}
+                  onShortenAll={() => doShorten({ all_over: true }, "__all__")} busy={shortening === "__all__"} disabled={regenId !== null || shortening !== null} />
                 {selSegs.size > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/50 bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)] px-2 py-1.5">
                     <span className="text-[12px] font-medium mr-auto">{t("sel.count", { count: selSegs.size })}</span>
@@ -2818,6 +2866,7 @@ function Editor() {
             );
           })()}
           {p.segments.map((seg, idx) => {
+            if (onlyOver && !fitOver(seg.fit)) return null;
             const on = isActive(seg);
             return (
               <div key={seg.id} ref={on ? activeRef : undefined}
@@ -2843,11 +2892,26 @@ function Editor() {
                       {selSegs.has(seg.id) && <Check size={10} />}</button>
                     {seg.speaker != null && <span className="mono px-1 py-0.5 rounded bg-[var(--color-overlay)] text-[9px] font-semibold text-[var(--color-muted)] shrink-0">SPK {seg.speaker}</span>}
                     <span className={`mono text-[9.5px] px-1 py-0.5 rounded tabnum shrink-0 ${on ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold" : "bg-[var(--color-overlay)] text-[var(--color-muted)]"}`}>{fmtT(seg.start)} → {fmtT(seg.end)}</span>
+                    <FitBadge fit={seg.fit} />
                   </div>
                   <div className="flex items-center gap-0.5 shrink-0 bg-[var(--color-surface)] px-1 py-0.5 rounded-md border border-[var(--color-border)]/60">
                     {seg.dirty && <span className="text-[var(--color-accent)] text-[10px] mx-0.5" title={t("seg.edited")}>●</span>}
                     <button onClick={(e) => { e.stopPropagation(); playSeg(seg); }} title={t("seg.play")}
                       className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] transition-colors"><Play size={13} /></button>
+                    {seg.fit && (
+                      <button onClick={(e) => { e.stopPropagation(); doShorten({ ids: [seg.id] }, seg.id); }} title={t("fit.shortenTip")}
+                        disabled={regenId !== null || shortening !== null || (!seg.fit.over && seg.fit.verdict === "fits")}
+                        className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] disabled:opacity-40 transition-colors">
+                        {shortening === seg.id ? <Loader2 size={13} className="animate-spin" /> : <Scissors size={13} />}
+                      </button>
+                    )}
+                    {(seg.takes?.count ?? 0) > 0 && (
+                      <button onClick={(e) => { e.stopPropagation(); setTakesOpen((cur) => (cur === seg.id ? null : seg.id)); }}
+                        title={t("takes.toggle", { count: seg.takes?.count ?? 0 })} aria-pressed={takesOpen === seg.id}
+                        className={`p-0.5 inline-flex items-center gap-0.5 transition-colors ${takesOpen === seg.id || seg.takes?.pinned != null ? "text-[var(--color-accent)]" : "text-[var(--color-muted)] hover:text-[var(--color-accent)]"}`}>
+                        {seg.takes?.pinned != null ? <Pin size={12} /> : <History size={13} />}<span className="mono text-[9.5px] tabnum">{seg.takes?.count}</span>
+                      </button>
+                    )}
                     <button onClick={(e) => { e.stopPropagation(); doRegen(seg.id); }} disabled={regenId !== null} title={t("seg.regen")}
                       className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] disabled:opacity-40 transition-colors">
                       {regenId === seg.id ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
@@ -2866,6 +2930,10 @@ function Editor() {
                   onClick={(e) => e.stopPropagation()}                       // editing text must not re-seek on every click
                   onBlur={(e) => { burstRef.current = null; persistSeg(seg.id, e.target.value); }}   // end the edit burst
                   className="w-full mt-1.5 bg-[var(--color-bg)]/60 border border-[var(--color-border)] rounded-lg p-1.5 text-[13px] leading-snug resize-none overflow-hidden focus:border-[var(--color-accent)] focus:outline-none transition-colors" />
+                {takesOpen === seg.id && (
+                  <TakesPanel pid={pid} seg={seg} disabled={regenId !== null}
+                    onSelect={(n) => doTakeSelect(seg.id, n)} onPin={(pinned) => doTakePin(seg.id, pinned)} />
+                )}
                 {on && (
                   <div className="flex items-center gap-1.5 mt-1.5" onClick={(e) => e.stopPropagation()} title={t("seg.timingHint")}>
                     <Clock size={11} className="text-[var(--color-muted)] shrink-0" />
@@ -4396,6 +4464,7 @@ function TranscriptView() {
                 className={`flex gap-2 items-start cursor-pointer rounded px-1.5 -mx-1.5 py-0.5 transition-colors ${active ? "bg-[color-mix(in_oklab,var(--color-accent)_16%,transparent)]" : "hover:bg-[var(--color-surface-2)]"}`}>
                 <span className="mono text-[9px] px-1.5 py-px rounded shrink-0" style={{ background: colorOf(spk), color: "#0b0c0e" }}>SPK {spk}</span>
                 <span className="mono text-[9px] text-[var(--color-muted)] pt-0.5 shrink-0 w-8">{fmt(s.start)}</span>
+                <FitBadge fit={s.fit} />
                 <span className="text-[13px] leading-snug">
                   {active && words.length > 0
                     ? words.map((w, i) => (

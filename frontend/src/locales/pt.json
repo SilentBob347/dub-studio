@@ -861,6 +861,11 @@
       "tip": "Insere automaticamente respirações suaves e naturais nas pausas entre as falas",
       "label": "Respirações entre as frases",
       "hint": "insere respirações suaves e naturais nas pausas para deixar a fala mais viva"
+    },
+    "autoShorten": {
+      "tip": "Se uma fala dublada precisar de mais aceleração que o limite natural, o modelo de tradução a reescreve mais curta uma vez e só essa fala é dublada de novo",
+      "label": "Encurtar falas que não cabem",
+      "hint": "reescrever mais curta a tradução das falas que não cabem e dublá-las de novo"
     }
   },
   "manual": {
@@ -964,7 +969,8 @@
       "export_lang": "Exportação para outro idioma",
       "align": "Alinhar com a fala",
       "download": "Download de modelos",
-      "voices_pack": "Download de vozes"
+      "voices_pack": "Download de vozes",
+      "shorten": "Encurtar para o espaço"
     },
     "error": {
       "failed": "A tarefa terminou com erro",
@@ -975,5 +981,64 @@
     "busy": "O projeto está ocupado: {{kind}} em andamento",
     "waitingFor": "Aguardando {{kind}} deste projeto terminar",
     "cancelledKind": "{{kind}}: cancelado"
+  },
+  "fit": {
+    "fits": "cabe",
+    "tight": "no limite",
+    "impossible": "não cabe",
+    "renderedOver": "não coube ×{{x}}",
+    "renderedTip": "Áudio de {{raw}} s para um espaço de {{slot}} s: é preciso acelerar ×{{needed}}, o limite natural é ×{{cap}}",
+    "predictTip": "Cerca de {{est}} s de fala para um espaço de {{slot}} s (×{{ratio}}; limite natural ×{{cap}}). {{pace}}",
+    "paceVoice": "Ritmo de {{cps}} caracteres por segundo, medido nesta voz",
+    "paceLang": "Ritmo de {{cps}} caracteres por segundo, comum no idioma (medido na voz após 3 falas dubladas)",
+    "overCount_one": "{{count}} fala não cabe",
+    "overCount_many": "{{count}} falas não cabem",
+    "overCount_other": "{{count}} falas não cabem",
+    "onlyOver": "Não cabem",
+    "onlyOverTip": "Mostrar só as falas que não cabem no seu espaço",
+    "shortenAll": "Encurtar todas que não cabem",
+    "shortenAllTip": "Reescrever mais curta a tradução de cada fala que não cabe no seu espaço, mantendo o sentido",
+    "shortenTip": "Encurtar para o espaço: reescrever a tradução mais curta mantendo o sentido, os nomes e os termos",
+    "shortening": "Encurtando a tradução para caber nos espaços",
+    "shortened_one": "{{count}} fala encurtada",
+    "shortened_many": "{{count}} falas encurtadas",
+    "shortened_other": "{{count}} falas encurtadas",
+    "rejected_one": "{{count}} resposta recusada (outro alfabeto, não mais curta ou cópia do original)",
+    "rejected_many": "{{count}} respostas recusadas (outro alfabeto, não mais curtas ou cópias do original)",
+    "rejected_other": "{{count}} respostas recusadas (outro alfabeto, não mais curtas ou cópias do original)",
+    "failed_one": "O modelo de tradução não respondeu a {{count}} fala: {{error}}",
+    "failed_many": "O modelo de tradução não respondeu a {{count}} falas: {{error}}",
+    "failed_other": "O modelo de tradução não respondeu a {{count}} falas: {{error}}"
+  },
+  "takes": {
+    "toggle_one": "Tomadas da fala: {{count}}",
+    "toggle_many": "Tomadas da fala: {{count}}",
+    "toggle_other": "Tomadas da fala: {{count}}",
+    "loading": "Carregando tomadas…",
+    "loadFailed": "As tomadas não carregaram: {{error}}",
+    "empty": "Ainda não há tomadas: duble a fala primeiro",
+    "listen": "Ouvir",
+    "dur": "{{sec}} s",
+    "qc": "concordância ASR {{pct}}%",
+    "source": {
+      "synth": "dublagem",
+      "multitake": "multitomada",
+      "qc": "redublagem QC",
+      "shorten": "encurtada"
+    },
+    "active": "ativa",
+    "pinned": "fixada",
+    "pin": "Fixar",
+    "unpin": "Soltar",
+    "pinTip": "Fixar esta tomada: nem a regeneração nem o QC a substituirão até o texto da fala mudar",
+    "unpinTip": "Soltar: o próximo render pode dublar a fala de novo",
+    "use": "Usar",
+    "useTip": "Fazer esta tomada tocar na mixagem (sem redublar, só a mixagem é refeita)",
+    "rollback": "Voltar",
+    "rollbackTip": "Voltar a esta tomada e ao seu texto (desfazer traz a atual de volta)",
+    "selecting": "Trocando a tomada e refazendo a mixagem",
+    "unpinnedByEdit_one": "O texto mudou em {{count}} fala: a tomada fixada foi solta",
+    "unpinnedByEdit_many": "O texto mudou em {{count}} falas: as tomadas fixadas foram soltas",
+    "unpinnedByEdit_other": "O texto mudou em {{count}} falas: as tomadas fixadas foram soltas"
   }
 }

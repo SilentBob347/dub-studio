@@ -861,6 +861,11 @@
       "tip": "Insère automatiquement de douces respirations naturelles dans les pauses entre les répliques",
       "label": "Respirations entre les phrases",
       "hint": "insère de douces respirations naturelles dans les pauses pour rendre la parole plus vivante"
+    },
+    "autoShorten": {
+      "tip": "Si une réplique doublée demande plus d'accélération que la limite naturelle, le modèle de traduction la réécrit plus court une fois et seule cette réplique est redoublée",
+      "label": "Raccourcir les répliques qui ne tiennent pas",
+      "hint": "réécrire plus court la traduction des répliques qui ne tiennent pas et les redoubler"
     }
   },
   "manual": {
@@ -964,7 +969,8 @@
       "export_lang": "Export dans une autre langue",
       "align": "Alignement sur la voix",
       "download": "Téléchargement des modèles",
-      "voices_pack": "Téléchargement des voix"
+      "voices_pack": "Téléchargement des voix",
+      "shorten": "Raccourcissement au créneau"
     },
     "error": {
       "failed": "La tâche a échoué",
@@ -975,5 +981,64 @@
     "busy": "Le projet est occupé : {{kind}} en cours",
     "waitingFor": "En attente de la fin de {{kind}} sur ce projet",
     "cancelledKind": "{{kind}} : annulé"
+  },
+  "fit": {
+    "fits": "tient",
+    "tight": "juste",
+    "impossible": "ne tient pas",
+    "renderedOver": "n'a pas tenu ×{{x}}",
+    "renderedTip": "Voix de {{raw}} s pour un créneau de {{slot}} s : il faut accélérer ×{{needed}}, la limite naturelle est ×{{cap}}",
+    "predictTip": "Environ {{est}} s de parole pour un créneau de {{slot}} s (×{{ratio}} ; limite naturelle ×{{cap}}). {{pace}}",
+    "paceVoice": "Débit de {{cps}} caractères par seconde, mesuré sur cette voix",
+    "paceLang": "Débit de {{cps}} caractères par seconde, habituel pour la langue (mesuré sur la voix après 3 répliques doublées)",
+    "overCount_one": "{{count}} réplique ne tient pas",
+    "overCount_many": "{{count}} répliques ne tiennent pas",
+    "overCount_other": "{{count}} répliques ne tiennent pas",
+    "onlyOver": "Ne tiennent pas",
+    "onlyOverTip": "N'afficher que les répliques qui ne tiennent pas dans leur créneau",
+    "shortenAll": "Raccourcir toutes celles qui ne tiennent pas",
+    "shortenAllTip": "Réécrire plus court la traduction de chaque réplique qui ne tient pas dans son créneau, en gardant le sens",
+    "shortenTip": "Raccourcir au créneau : réécrire la traduction plus court en gardant le sens, les noms et les termes",
+    "shortening": "Raccourcissement de la traduction pour tenir dans les créneaux",
+    "shortened_one": "{{count}} réplique raccourcie",
+    "shortened_many": "{{count}} répliques raccourcies",
+    "shortened_other": "{{count}} répliques raccourcies",
+    "rejected_one": "{{count}} réponse refusée (autre alphabet, pas plus courte ou copie de l'original)",
+    "rejected_many": "{{count}} réponses refusées (autre alphabet, pas plus courtes ou copies de l'original)",
+    "rejected_other": "{{count}} réponses refusées (autre alphabet, pas plus courtes ou copies de l'original)",
+    "failed_one": "Le modèle de traduction n'a pas répondu pour {{count}} réplique : {{error}}",
+    "failed_many": "Le modèle de traduction n'a pas répondu pour {{count}} répliques : {{error}}",
+    "failed_other": "Le modèle de traduction n'a pas répondu pour {{count}} répliques : {{error}}"
+  },
+  "takes": {
+    "toggle_one": "Prises de la réplique : {{count}}",
+    "toggle_many": "Prises de la réplique : {{count}}",
+    "toggle_other": "Prises de la réplique : {{count}}",
+    "loading": "Chargement des prises…",
+    "loadFailed": "Prises non chargées : {{error}}",
+    "empty": "Pas encore de prise : doublez d'abord la réplique",
+    "listen": "Écouter",
+    "dur": "{{sec}} s",
+    "qc": "concordance ASR {{pct}} %",
+    "source": {
+      "synth": "doublage",
+      "multitake": "multi-prise",
+      "qc": "redoublage QC",
+      "shorten": "raccourcie"
+    },
+    "active": "utilisée",
+    "pinned": "épinglée",
+    "pin": "Épingler",
+    "unpin": "Désépingler",
+    "pinTip": "Épingler cette prise : ni la régénération ni le QC ne la remplaceront tant que le texte de la réplique ne change pas",
+    "unpinTip": "Désépingler : le prochain rendu pourra redoubler la réplique",
+    "use": "Utiliser",
+    "useTip": "Faire entendre cette prise dans le mixage (sans redoublage, seul le mixage est refait)",
+    "rollback": "Revenir",
+    "rollbackTip": "Revenir à cette prise et à son texte (annuler rétablit l'actuel)",
+    "selecting": "Changement de prise et reconstruction du mixage",
+    "unpinnedByEdit_one": "Texte modifié dans {{count}} réplique : sa prise épinglée est libérée",
+    "unpinnedByEdit_many": "Texte modifié dans {{count}} répliques : leurs prises épinglées sont libérées",
+    "unpinnedByEdit_other": "Texte modifié dans {{count}} répliques : leurs prises épinglées sont libérées"
   }
 }

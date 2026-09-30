@@ -861,6 +861,11 @@
       "tip": "Inserta automáticamente respiraciones suaves y naturales en las pausas entre líneas",
       "label": "Respiraciones entre frases",
       "hint": "inserta respiraciones suaves y naturales en las pausas para dar vida al habla"
+    },
+    "autoShorten": {
+      "tip": "Si una frase doblada necesita más aceleración que el límite natural, el modelo de traducción la reescribe más corta una vez y solo esa frase se vuelve a doblar",
+      "label": "Acortar las frases que no caben",
+      "hint": "reescribir más corta la traducción de las frases que no caben y volver a doblarlas"
     }
   },
   "manual": {
@@ -964,7 +969,8 @@
       "export_lang": "Exportación a otro idioma",
       "align": "Alinear con el habla",
       "download": "Descarga de modelos",
-      "voices_pack": "Descarga de voces"
+      "voices_pack": "Descarga de voces",
+      "shorten": "Acortar al hueco"
     },
     "error": {
       "failed": "La tarea terminó con un error",
@@ -975,5 +981,64 @@
     "busy": "El proyecto está ocupado: {{kind}} en curso",
     "waitingFor": "Esperando a que termine {{kind}} en este proyecto",
     "cancelledKind": "{{kind}}: cancelado"
+  },
+  "fit": {
+    "fits": "cabe",
+    "tight": "justo",
+    "impossible": "no cabe",
+    "renderedOver": "no cupo ×{{x}}",
+    "renderedTip": "Audio de {{raw}} s para un hueco de {{slot}} s: hay que acelerar ×{{needed}}, el límite natural es ×{{cap}}",
+    "predictTip": "Unos {{est}} s de habla para un hueco de {{slot}} s (×{{ratio}}; el límite natural es ×{{cap}}). {{pace}}",
+    "paceVoice": "Ritmo de {{cps}} caracteres por segundo, medido con esta voz",
+    "paceLang": "Ritmo de {{cps}} caracteres por segundo, habitual en el idioma (se mide con la voz tras 3 frases dobladas)",
+    "overCount_one": "{{count}} frase no cabe",
+    "overCount_many": "{{count}} frases no caben",
+    "overCount_other": "{{count}} frases no caben",
+    "onlyOver": "No caben",
+    "onlyOverTip": "Mostrar solo las frases que no caben en su hueco",
+    "shortenAll": "Acortar todas las que no caben",
+    "shortenAllTip": "Reescribir más corta la traducción de cada frase que no cabe en su hueco, conservando el sentido",
+    "shortenTip": "Acortar al hueco: reescribir la traducción más corta conservando el sentido, los nombres y los términos",
+    "shortening": "Acortando la traducción para que quepa en los huecos",
+    "shortened_one": "{{count}} frase acortada",
+    "shortened_many": "{{count}} frases acortadas",
+    "shortened_other": "{{count}} frases acortadas",
+    "rejected_one": "{{count}} respuesta rechazada (otro alfabeto, no más corta o copia del original)",
+    "rejected_many": "{{count}} respuestas rechazadas (otro alfabeto, no más cortas o copias del original)",
+    "rejected_other": "{{count}} respuestas rechazadas (otro alfabeto, no más cortas o copias del original)",
+    "failed_one": "El modelo de traducción no respondió a {{count}} frase: {{error}}",
+    "failed_many": "El modelo de traducción no respondió a {{count}} frases: {{error}}",
+    "failed_other": "El modelo de traducción no respondió a {{count}} frases: {{error}}"
+  },
+  "takes": {
+    "toggle_one": "Tomas de la frase: {{count}}",
+    "toggle_many": "Tomas de la frase: {{count}}",
+    "toggle_other": "Tomas de la frase: {{count}}",
+    "loading": "Cargando tomas…",
+    "loadFailed": "No se cargaron las tomas: {{error}}",
+    "empty": "Aún no hay tomas: dobla la frase primero",
+    "listen": "Escuchar",
+    "dur": "{{sec}} s",
+    "qc": "coincidencia ASR {{pct}}%",
+    "source": {
+      "synth": "doblaje",
+      "multitake": "multitoma",
+      "qc": "redoblaje QC",
+      "shorten": "acortada"
+    },
+    "active": "activa",
+    "pinned": "fijada",
+    "pin": "Fijar",
+    "unpin": "Soltar",
+    "pinTip": "Fijar esta toma: ni la regeneración ni el QC la reemplazarán hasta que cambie el texto de la frase",
+    "unpinTip": "Soltar: el próximo render puede volver a doblar la frase",
+    "use": "Usar",
+    "useTip": "Hacer que esta toma suene en la mezcla (sin redoblar, solo se rehace la mezcla)",
+    "rollback": "Volver",
+    "rollbackTip": "Volver a esta toma y a su texto (deshacer recupera el actual)",
+    "selecting": "Cambiando la toma y rehaciendo la mezcla",
+    "unpinnedByEdit_one": "El texto cambió en {{count}} frase: su toma fijada se soltó",
+    "unpinnedByEdit_many": "El texto cambió en {{count}} frases: sus tomas fijadas se soltaron",
+    "unpinnedByEdit_other": "El texto cambió en {{count}} frases: sus tomas fijadas se soltaron"
   }
 }
