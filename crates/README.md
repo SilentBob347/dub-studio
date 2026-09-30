@@ -13,7 +13,7 @@
 | `dub-core` | Типы `Project` (serde, extra="allow" round-trip) и `EngineOpts`. | `dubengine/project.py`, `opts.py` |
 | `dub-sep` | Вокал/инструментал сепарация — Mel-Band Roformer voc_fv6-Q8_0 через BSRoformer.cpp (сайдкар). Инструментал = mix−vocals. | `dubengine/separate.py` (движок ЗАМЕНЁН приказом юзера) |
 | `dub-captions` | ASS-субтитры (build: титры+дублированные субтитры, 26 пресетов) + ffmpeg/libass burn (gblur+оверлей, NVENC). Метрики — ab_glyph. | `dubengine/captions.py` |
-| `dub-ocr` | Экранный OCR (PP-OCR DBNet det + CRNN rec ONNX) → блюр-боксы вшитого текста + субтитр-полоса. Свой ort-пайплайн (rc.12 load-dynamic). | `dubengine/text_detect.py`, `compose.py` |
+| `dub-ocr` | Экранный OCR (PP-OCR DBNet det + CRNN rec ONNX) → блюр-боксы вшитого текста + субтитр-полоса. Свой ort-пайплайн (rc.13 load-dynamic). | `dubengine/text_detect.py`, `compose.py` |
 | `dub-server` | axum: SPA, capabilities, upload, SSE-джобы, **analyze** (ASR+диар+перевод+vision+OCR), **render** (сепарация→TTS→сведение→burn→mux), output/original/dub, PATCH. | `backend/app.py`, `dubengine/pipeline.py` |
 
 ## Сборка
@@ -31,10 +31,10 @@ cargo build --workspace --examples
 ## Модели и рантайм (не коммитятся, лежат в `models/`)
 
 - **onnxruntime.dll** — `dub-asr` собран с `ort/load-dynamic`: onnxruntime грузится в рантайме.
-  Указывается через `ORT_DYLIB_PATH=<...>\onnxruntime.dll`. **КРИТИЧНО: строго onnxruntime 1.24.x**
-  (ort 2.0-rc.12 собран под 1.24.2). DLL версий 1.22/1.23 вызывают ДЕДЛОК в `commit_from_file`
+  Указывается через `ORT_DYLIB_PATH=<...>\onnxruntime.dll`. **КРИТИЧНО: строго onnxruntime 1.28.x**
+  (ort 2.0-rc.13 с api-28 собран под 1.28.2). DLL с другим OrtApi вызывает ДЕДЛОК в `commit_from_file`
   (рассинхрон OrtApi, поток блокируется наглухо, без ошибки). Официальный билд:
-  github.com/microsoft/onnxruntime releases → `onnxruntime-win-x64-1.24.2.zip` → `lib/onnxruntime.dll`.
+  github.com/microsoft/onnxruntime releases → `onnxruntime-win-x64-1.28.2.zip` → `lib/onnxruntime.dll`.
 - **Parakeet-TDT-0.6b-v3 (ONNX), int8** — дефолт Higgs-Ultimate `tdt-0.6b-v3-int8` (★ recommended,
   ~670МБ). HF `istupakov/parakeet-tdt-0.6b-v3-onnx`, файлы:
   `encoder-model.int8.onnx`, `decoder_joint-model.int8.onnx`, `vocab.txt` (+`config.json`, `nemo128.onnx`).
@@ -79,7 +79,7 @@ GPU-провайдер (`--features cuda` + CUDA EP) снимает это ог�
 
 ### Сервер
 ```bash
-DUB_STUDIO_ROOT=<repo> ORT_DYLIB_PATH=<...>/onnxruntime-1.24.dll ./target/release/dub-server
+DUB_STUDIO_ROOT=<repo> ORT_DYLIB_PATH=<...>/onnxruntime-1.28.dll ./target/release/dub-server
 #   слушает 127.0.0.1:8765 (порт: env DUB_STUDIO_PORT). Раздаёт SPA (frontend/dist) + API.
 ```
 

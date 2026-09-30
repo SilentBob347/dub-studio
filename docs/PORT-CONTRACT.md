@@ -108,8 +108,8 @@ app.py контейнит отдачу web-root: `f.is_file() and (f == WEB_R or
   + оверлей ASS, NVENC). Метрики глифов — ab_glyph (замена PIL). Шрифты в `fonts/`.
 - `crates/dub-ocr` — экранный OCR (PP-OCR DBNet det + CRNN rec + cls, `models/ocr/`) для блюр-боксов
   вшитого текста. Порт `text_detect.py` (detect_regions: семплинг→det+(cls)+rec→merge→IoU-трекинг) +
-  `compose.py` (analyze_layout: субтитр-полоса vs титры). Свой ort-пайплайн (rc.12 load-dynamic api-24,
-  как dub-asr — один OrtApi; БЕЗ download-binaries, ndarray 0.16 — единый набор фич по воркспейсу).
+  `compose.py` (analyze_layout: субтитр-полоса vs титры). Свой ort-пайплайн (rc.13 load-dynamic api-28,
+  как dub-asr — один OrtApi; БЕЗ download-binaries, ndarray 0.17 — единый набор фич по воркспейсу).
   Детекция — полный DBPostProcess: connected-components → min-area-rect → box_score_fast → **unclip
   истинным edge-normal offset** (равномерно растит тонкие широкие боксы сабов по высоте; радиальный
   сдвиг от центроида резал глифы по высоте → rec шумел). Словарь rec — из **метадаты ONNX** (ключ

@@ -1,4 +1,4 @@
-//! ONNX-движки кастинга через ort (load-dynamic, та же 1.24.2, что dub-asr/dub-ocr). SCRFD (детект лиц,
+//! ONNX-движки кастинга через ort (load-dynamic, та же 1.28.2, что dub-asr/dub-ocr). SCRFD (детект лиц,
 //! 9 выходов) + LVFace-L (эмбеддинг лица, [1,512]). ensure_ort_dylib() — копия паттерна dub-ocr: без
 //! явного ORT_DYLIB_PATH ort цепляет чужую system32\onnxruntime.dll (1.17) -> ДЕДЛОК при создании сессии.
 
@@ -8,7 +8,7 @@ use ort::value::TensorRef;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
-/// Гарантировать правильную onnxruntime.dll (1.24.2). Порт dub_ocr::ensure_ort_dylib (тот же поиск).
+/// Гарантировать правильную onnxruntime.dll (1.28.2). Порт dub_ocr::ensure_ort_dylib (тот же поиск).
 pub fn ensure_ort_dylib() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -42,10 +42,10 @@ pub fn ensure_ort_dylib() {
             roots.push(cwd.join("models"));
         }
         for r in &roots {
-            cands.push(r.join("runtime").join("onnxruntime-1.24.dll"));
+            cands.push(r.join("runtime").join("onnxruntime-1.28.dll"));
             cands.push(
                 r.join("runtime")
-                    .join("onnxruntime-win-x64-1.24.2")
+                    .join("onnxruntime-win-x64-1.28.2")
                     .join("lib")
                     .join("onnxruntime.dll"),
             );
@@ -113,7 +113,7 @@ impl OnnxModel {
     /// Прогнать [N,3,H,W] f32 -> ВСЕ выходы в ПОЗИЦИОННОМ порядке модели [(shape, данные), …].
     /// SCRFD: outputs[0..2]=scores, [3..5]=bbox, [6..8]=kps (фиксированный порядок InsightFace).
     pub fn run(&mut self, input: Array4<f32>) -> Result<Vec<(Vec<usize>, Vec<f32>)>, String> {
-        // (shape, &data)-форма конструктора тензора — стабильна в rc.12 (ArrayView-бонд капризен).
+        // (shape, &data)-форма конструктора тензора (ArrayView-бонд капризен).
         let shape: Vec<i64> = input.shape().iter().map(|&d| d as i64).collect();
         let (data, _) = input.into_raw_vec_and_offset();
         let tensor = TensorRef::from_array_view((shape, data.as_slice()))

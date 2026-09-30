@@ -12,9 +12,10 @@
 //! Higgs voiceclean.rs):
 //!   • модели — прямые файлы HF (higgs-q8_0/*, gemma-4 + mmproj, parakeet-tdt int8, sortformer, roformer
 //!     voc_fv6-Q8_0);
-//!   • сайдкары/движки — zip-релизы GitHub (BSRoformer.cpp, llama.cpp win-cuda-13.3, onnxruntime 1.24.2,
-//!     ffmpeg BtbN) + audiocpp_engine.dll (HF);
-//!   • CUDA-runtime — PyPI-wheel'ы NVIDIA (cudart 13.3.29 / cublas 13.6.0.2), распаковка *.dll плоско;
+//!   • сайдкары/движки — zip-релизы GitHub (BSRoformer.cpp v0.1.0, llama.cpp b11146 win-cuda-13.4,
+//!     onnxruntime 1.28.2, ffmpeg BtbN) + audiocpp_engine.dll (HF);
+//!   • CUDA-runtime — PyPI-wheel'ы NVIDIA (cudart 13.4.92 / cublas 13.8.0.4 / cuDNN 9.27.0.42) + redist cuFFT
+//!     12.4.0.43, распаковка *.dll плоско;
 //!   • VC++ runtime + OCR-модели — БАНДЛ (кладутся в релиз рядом с exe, как VC++ в Higgs); не качаются,
 //!     но статус показываем;
 //!   • драйвер NVIDIA — детект (nvcuda.dll), «скачивание» = открыть сайт (кнопка во фронте).
@@ -53,7 +54,7 @@ pub enum Extract {
     /// zip: отобрать конкретные файлы по имени листа (ffmpeg.exe/ffprobe.exe) и положить плоско в каталог.
     ZipPick,
     /// zip: распаковать ВЕСЬ архив с сохранением поддерева в каталог. Для onnxruntime — чтобы получить
-    /// `onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll` ровно там, где его ищет dub-asr::ensure_ort_dylib.
+    /// `onnxruntime-win-x64-1.28.2/lib/onnxruntime.dll` ровно там, где его ищет dub-asr::ensure_ort_dylib.
     ZipTree,
     /// wheel (zip): достать все *.dll плоско в каталог, затем удалить архив (CUDA runtime).
     WheelDlls,
@@ -128,31 +129,34 @@ const GH_BSROFORMER_ENGINE: &str =
 // но полная функция. Статический exe 671КБ; MSVC-рантайм уже вшит компонентом vcruntime.
 const GH_BSROFORMER_ENGINE_CPU: &str =
     "https://github.com/chenmozhijin/BSRoformer.cpp/releases/download/v0.1.0/BSRoformer-windows-x64-msvc.zip";
-// GitHub: llama.cpp win-cuda-13.3 (ggml-org/llama.cpp; пин на стабильный билд + cudart-компаньон).
-const GH_LLAMA_BUILD: &str = "b9966";
+// GitHub: llama.cpp win-cuda-13.4 (ggml-org/llama.cpp; пин на стабильный релиз v0.5.0 = билд b11146).
+// ggml-cuda.dll импортирует cublas64_13.dll (ставит cuda-runtime), cudart слинкован статически.
+const GH_LLAMA_BUILD: &str = "b11146";
 const GH_LLAMA: &str =
-    "https://github.com/ggml-org/llama.cpp/releases/download/b9966/llama-b9966-bin-win-cuda-13.3-x64.zip";
-// GitHub: onnxruntime 1.24.2 win-x64 (microsoft/onnxruntime) — строго 1.24.2 (rc.12 ABI; иначе дедлок).
+    "https://github.com/ggml-org/llama.cpp/releases/download/b11146/llama-b11146-bin-win-cuda-13.4-x64.zip";
+// GitHub: onnxruntime 1.28.2 win-x64 (microsoft/onnxruntime) — строго 1.28.x (ort rc.13 api-28; иначе дедлок).
 const GH_ORT: &str =
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip";
-// GitHub: onnxruntime 1.24.2 GPU-сборка под CUDA 13 (gpu_cuda13) — CUDA-EP для Parakeet/Sortformer на
-// GPU. Вариант cuda13 переиспользует наши _13-DLL (cudart/cublas), нужен только cuDNN 9 (WHEEL_CUDNN).
+    "https://github.com/microsoft/onnxruntime/releases/download/v1.28.2/onnxruntime-win-x64-1.28.2.zip";
+// GitHub: onnxruntime 1.28.2 GPU-сборка под CUDA 13 (gpu_cuda13) — CUDA-EP для Parakeet/Sortformer на
+// GPU. onnxruntime_providers_cuda.dll грузит cudart64_13/cublas64_13/cublasLt64_13 (cuda-runtime),
+// cudnn64_9 (WHEEL_CUDNN) и cufft64_12 (REDIST_CUFFT).
 // Содержит onnxruntime.dll(GPU) + onnxruntime_providers_cuda.dll + onnxruntime_providers_shared.dll.
 const GH_ORT_GPU: &str =
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-gpu_cuda13-1.24.2.zip";
+    "https://github.com/microsoft/onnxruntime/releases/download/v1.28.2/onnxruntime-win-x64-gpu_cuda13-1.28.2.zip";
 // GitHub: ffmpeg static win64 GPL (BtbN/FFmpeg-Builds) — тот же источник, что install.bat.
 const GH_FFMPEG: &str =
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
-// PyPI-wheel'ы NVIDIA CUDA 13 runtime (те же, что Higgs envdeps.rs — байт-в-байт с локальным CUDA 13.3).
-const WHEEL_CUDART: &str = "https://files.pythonhosted.org/packages/d2/27/b53a5e0397842a5c11f0e1a39d4e5b2f22638a4126e83b3c4e196f62c969/nvidia_cuda_runtime-13.3.29-py3-none-win_amd64.whl";
-const WHEEL_CUBLAS: &str = "https://files.pythonhosted.org/packages/08/8f/890a96ea1ff615100296977cce23296052dcb8c114d4e451201ec39df9bf/nvidia_cublas-13.6.0.2-py3-none-win_amd64.whl";
-// PyPI: cuDNN 9 под CUDA 13 (nvidia-cudnn-cu13) — нужен для CUDA-EP onnxruntime (Parakeet/Sortformer на
-// GPU). Даёт cudnn64_9.dll + split-либы. ≈389 МБ. cudart/cublas _13 уже есть (cuda-runtime выше).
-const WHEEL_CUDNN: &str = "https://files.pythonhosted.org/packages/18/d4/c09b11336981836c3183f28a6ca309e08ad080311edb6ff6c28cecdb5f24/nvidia_cudnn_cu13-9.25.0.15-py3-none-win_amd64.whl";
-// NVIDIA CUDA-13 redist (официальный): cuFFT 12.0.0.61 → даёт cufft64_12.dll. onnxruntime_providers_cuda.dll
-// (сборка cuda13) импортит именно cufft64_12.dll — без него CUDA-EP не грузится («CUDA not enabled»). cudart/
-// cublas _13 у нас уже есть (cuda-runtime), cuFFT сохраняет soname 12 даже в CUDA 13. Извлекается как *.dll плоско.
-const REDIST_CUFFT: &str = "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-12.0.0.61-archive.zip";
+// PyPI-wheel'ы NVIDIA CUDA 13 runtime (CUDA 13.4 Update 2: cudart 13.4.92, cuBLAS 13.8.0.4).
+// Дают cudart64_13.dll, cublas64_13.dll, cublasLt64_13.dll.
+const WHEEL_CUDART: &str = "https://files.pythonhosted.org/packages/86/00/d5436004268f049214193659ebc36550b5ef3925c3d13b4cc980e13be6f5/nvidia_cuda_runtime-13.4.92-py3-none-win_amd64.whl";
+const WHEEL_CUBLAS: &str = "https://files.pythonhosted.org/packages/a3/df/f1246959833e2c437db8be3e5b477f66b87f8817821ed40de6c7561c9a36/nvidia_cublas-13.8.0.4-py3-none-win_amd64.whl";
+// PyPI: cuDNN 9 под CUDA 13 (nvidia-cudnn-cu13 9.27.0.42) — нужен для CUDA-EP onnxruntime (Parakeet/
+// Sortformer на GPU). Даёт cudnn64_9.dll + split-либы. ≈416 МБ. cudart/cublas _13 уже есть (cuda-runtime выше).
+const WHEEL_CUDNN: &str = "https://files.pythonhosted.org/packages/87/6a/e55ff0ac26a5c6e2b21f41c9d04ad096b4ed6da593fba7e25845c61b0532/nvidia_cudnn_cu13-9.27.0.42-py3-none-win_amd64.whl";
+// NVIDIA CUDA-13 redist (официальный, CUDA 13.4 Update 2): cuFFT 12.4.0.43 → даёт cufft64_12.dll.
+// onnxruntime_providers_cuda.dll (сборка cuda13) грузит именно cufft64_12.dll — без него CUDA-EP не
+// грузится («CUDA not enabled»). cuFFT сохраняет soname 12 даже в CUDA 13. Извлекается как *.dll плоско.
+const REDIST_CUFFT: &str = "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-12.4.0.43-archive.zip";
 // CUDA-либы для whisper-faster r192.3 (CTranslate2, собран под CUDA 11!): нужны РЯДОМ с exe
 // (cublas64_11 + cudnn64_8), иначе GPU-режим Whisper падает «cublas64_11.dll not found» -> откат на CPU.
 // ВАЖНО: не-XXL сборка = CUDA 11 (cublas64_11), XXL = CUDA 12 (cublas64_12) — РАЗНЫЕ. Версии те, что
@@ -592,43 +596,43 @@ pub fn manifest() -> Vec<Component> {
         },
         Component {
             id: "llama",
-            name: "llama.cpp сервер (CUDA 13.3)",
+            name: "llama.cpp сервер (CUDA 13.4)",
             purpose: "Сайдкар-сервер для Gemma (перевод/vision)",
             requirement: Requirement::Required,
             delivery: Delivery::Download,
-            // Размер сжатого zip (для прогресса закачки); распакованный footprint ~683 МБ.
-            size: 162_331_298,
+            // Размер сжатого zip (для прогресса закачки); распакованный footprint ~183 МБ.
+            size: 149_758_833,
             files: &[
-                FileSpec { url: GH_LLAMA, dest_rel: "tools/llama/_llama.zip", size: 0, extract: Extract::ZipFlat },
+                FileSpec { url: GH_LLAMA, dest_rel: "tools/llama/_llama.zip", size: 149_758_833, extract: Extract::ZipFlat },
             ],
             markers: &[Marker { rel: "tools/llama/llama-server.exe", expect: 0 }],
             external_url: None,
         },
         Component {
             id: "onnxruntime",
-            name: "ONNX Runtime 1.24.2",
-            purpose: "Рантайм ASR/OCR/диаризации (строго 1.24.2)",
+            name: "ONNX Runtime 1.28.2",
+            purpose: "Рантайм ASR/OCR/диаризации (строго 1.28.x)",
             requirement: Requirement::Required,
             delivery: Delivery::Download,
-            size: 74_075_355,
+            size: 78_620_837,
             files: &[
-                FileSpec { url: GH_ORT, dest_rel: "models/runtime/_ort.zip", size: 74_075_355, extract: Extract::ZipTree },
+                FileSpec { url: GH_ORT, dest_rel: "models/runtime/_ort.zip", size: 78_620_837, extract: Extract::ZipTree },
             ],
             // dub-asr::ensure_ort_dylib ищет ровно этот путь под models/runtime.
-            markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll", expect: 0 }],
+            markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-1.28.2/lib/onnxruntime.dll", expect: 0 }],
             external_url: None,
         },
         Component {
             id: "onnxruntime-gpu",
-            name: "ONNX Runtime 1.24.2 GPU (CUDA)",
+            name: "ONNX Runtime 1.28.2 GPU (CUDA)",
             purpose: "CUDA-провайдер для диаризации/Parakeet на GPU (режим local_backend=gpu)",
             requirement: Requirement::Recommended,
             delivery: Delivery::Download,
-            size: 288_348_147,
+            size: 365_562_963,
             files: &[
-                FileSpec { url: GH_ORT_GPU, dest_rel: "models/runtime/_ort_gpu.zip", size: 288_348_147, extract: Extract::ZipTree },
+                FileSpec { url: GH_ORT_GPU, dest_rel: "models/runtime/_ort_gpu.zip", size: 365_562_963, extract: Extract::ZipTree },
             ],
-            markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-gpu-1.24.2/lib/onnxruntime.dll", expect: 0 }],
+            markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-gpu_cuda13-1.28.2/lib/onnxruntime.dll", expect: 0 }],
             external_url: None,
         },
         Component {
@@ -651,12 +655,12 @@ pub fn manifest() -> Vec<Component> {
             purpose: "Редистрибутивные CUDA-DLL для движков и CUDA-EP onnxruntime (без CUDA Toolkit)",
             requirement: Requirement::Required,
             delivery: Delivery::Download,
-            size: 628_433_797,
+            size: 585_648_133,
             files: &[
-                FileSpec { url: WHEEL_CUDART, dest_rel: "models/higgs-engine/_cudart.whl", size: 0, extract: Extract::WheelDlls },
-                FileSpec { url: WHEEL_CUBLAS, dest_rel: "models/higgs-engine/_cublas.whl", size: 0, extract: Extract::WheelDlls },
+                FileSpec { url: WHEEL_CUDART, dest_rel: "models/higgs-engine/_cudart.whl", size: 2_778_543, extract: Extract::WheelDlls },
+                FileSpec { url: WHEEL_CUBLAS, dest_rel: "models/higgs-engine/_cublas.whl", size: 423_266_897, extract: Extract::WheelDlls },
                 // cuFFT (cufft64_12.dll) — обязателен для CUDA-EP onnxruntime (диаризация/Parakeet на GPU).
-                FileSpec { url: REDIST_CUFFT, dest_rel: "models/higgs-engine/_cufft.zip", size: 0, extract: Extract::WheelDlls },
+                FileSpec { url: REDIST_CUFFT, dest_rel: "models/higgs-engine/_cufft.zip", size: 159_602_693, extract: Extract::WheelDlls },
             ],
             markers: &[
                 Marker { rel: "models/higgs-engine/cudart64_13.dll", expect: 0 },
@@ -672,9 +676,9 @@ pub fn manifest() -> Vec<Component> {
             purpose: "Нужен CUDA-провайдеру onnxruntime для диаризации/Parakeet на GPU",
             requirement: Requirement::Recommended,
             delivery: Delivery::Download,
-            size: 408_000_000,
+            size: 436_469_905,
             files: &[
-                FileSpec { url: WHEEL_CUDNN, dest_rel: "models/higgs-engine/_cudnn.whl", size: 0, extract: Extract::WheelDlls },
+                FileSpec { url: WHEEL_CUDNN, dest_rel: "models/higgs-engine/_cudnn.whl", size: 436_469_905, extract: Extract::WheelDlls },
             ],
             markers: &[Marker { rel: "models/higgs-engine/cudnn64_9.dll", expect: 0 }],
             external_url: None,
@@ -1586,7 +1590,7 @@ fn extract_zip_flat(zip_path: &Path, dir: &Path) -> Result<(), String> {
 }
 
 /// zip: отобрать нужные файлы (onnxruntime.dll, ffmpeg.exe/ffprobe.exe) и положить плоско в dir.
-/// onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll -> dir/onnxruntime.dll ; ffmpeg .../bin/*.exe -> dir/*.exe.
+/// onnxruntime-win-x64-1.28.2/lib/onnxruntime.dll -> dir/onnxruntime.dll ; ffmpeg .../bin/*.exe -> dir/*.exe.
 fn extract_zip_pick(zip_path: &Path, dir: &Path) -> Result<(), String> {
     let file = std::fs::File::open(zip_path).map_err(|e| format!("открыть {}: {e}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("не zip: {e}"))?;
