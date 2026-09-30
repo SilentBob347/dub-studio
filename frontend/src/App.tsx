@@ -1,15 +1,23 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
+import { FolderOpen } from "lucide-react";
+import { DONATE } from "./lib/links";
+import { OPEN_SETTINGS_EVENT, openSettings } from "./lib/settingsNav";
+import { createLaunchSaver, loadWithMigration } from "./lib/launchDefaults";
+import SettingsModal from "./components/settings/SettingsModal";
+import ProjectsList from "./components/ProjectsList";
+import ConfirmDialog from "./components/ConfirmDialog";
+import ServerOffline from "./components/ServerOffline";
 import { motion } from "motion/react";
 import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, slot, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
+import { api, slot, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectListing, type LaunchDefaults, type Character } from "./lib/api";
 import i18n, { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
-import { playSfx, sfxEnabled, setSfxEnabled } from "./lib/sfx";
+import { playSfx } from "./lib/sfx";
 import ResourceMonitor from "./components/ResourceMonitor";
 import { GENDER_LABEL_KEY, genderKey } from "./lib/gender";
 import OpenRouterKey from "./components/OpenRouterKey";
@@ -95,7 +103,8 @@ const PARAKEET_LANGS = new Set([
 ]);
 
 // Модели и компоненты в настройках: список из /setup/status с кнопками скачки/докачки и прогрессом.
-function ModelsSection() {
+// part="cloud" — раздел «Облако» (ключ OpenRouter и потоки) на том же состоянии выбора.
+function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [prog, setProg] = useState<{ id: string; pct: number } | null>(null);
@@ -152,6 +161,27 @@ function ModelsSection() {
       <FolderDown size={12} />
     </button>
   );
+  if (part === "cloud") return (
+    <div className="max-w-2xl space-y-2">
+      <div data-settings-part="key"><OpenRouterKey onSaved={loadCap} /></div>
+      {hasOrKey && (
+        <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
+          <div className="flex items-center gap-2.5">
+            <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[var(--color-muted)]" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[12px] font-medium truncate">{t("cloud.threads")}</div>
+              <div className="mono text-[10px] text-[var(--color-muted)] truncate">{t("cloud.threadsHint")}</div>
+            </div>
+            <select value={selv("or_concurrency") || "6"} onChange={(e) => setSel("or_concurrency", e.target.value)}
+              className="shrink-0 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[11px] mono focus:border-[var(--color-accent)] focus:outline-none">
+              {["1", "2", "4", "6", "8", "12", "16"].map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   if (!status) return <div className="mono text-[11px] text-[var(--color-muted)]">…</div>;
   const byId = Object.fromEntries(status.components.map((c) => [c.id, c]));
   const get = (id: string) => byId[id] as SetupComponent | undefined;
@@ -246,8 +276,8 @@ function ModelsSection() {
   const EngineTabs = ({ cloud, onLocal, onCloud, localLabel }: { cloud: boolean; onLocal: () => void; onCloud: () => void; localLabel: string }) => (
     <div className="flex gap-1 mb-1.5">
       <button onClick={onLocal} className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${!cloud ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>{localLabel}</button>
-      <button onClick={onCloud} disabled={!hasOrKey} title={hasOrKey ? "" : t("cloud.needKey")}
-        className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${cloud ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`}>OpenRouter</button>
+      <button onClick={hasOrKey ? onCloud : () => openSettings("cloud:key")} title={hasOrKey ? "" : t("cloud.needKey")}
+        className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${cloud ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} ${hasOrKey ? "" : "opacity-50"}`}>OpenRouter</button>
     </div>
   );
   // На чём считать стадию (устройство): Авто / GPU (CUDA) / CPU — свои табы в каждом разделе, по
@@ -326,9 +356,9 @@ function ModelsSection() {
             const active = e.cloud ? asrCloud : (!asrCloud && asrEngine === e.id);
             const dis = e.cloud && !hasOrKey;
             return (
-              <button key={e.id} disabled={dis} title={dis ? t("cloud.needKey") : ""}
-                onClick={() => { if (e.cloud) { setSel("or_asr_on", "1"); } else { setSel("or_asr_on", "0"); setAsrEngine(e.id); api.setSelection("asr_engine", e.id).catch(() => {}); } }}
-                className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${active ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`}>
+              <button key={e.id} title={dis ? t("cloud.needKey") : ""}
+                onClick={() => { if (dis) { openSettings("cloud:key"); } else if (e.cloud) { setSel("or_asr_on", "1"); } else { setSel("or_asr_on", "0"); setAsrEngine(e.id); api.setSelection("asr_engine", e.id).catch(() => {}); } }}
+                className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${active ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} ${dis ? "opacity-50" : ""}`}>
                 {e.label}
               </button>
             );
@@ -421,36 +451,6 @@ function ModelsSection() {
           );
         })}
       </Group>
-      {/* Облачные настройки OpenRouter — В КОНЦЕ: фишка приложения локальная/портативная, облако вторично
-          (опция для слабых ПК/скорости). Ключ + число параллельных потоков; сам выбор облачного движка —
-          в группах выше рядом с локальным (Higgs|OpenRouter и т.д.). */}
-      <div className="mt-2 pt-3 border-t border-[var(--color-border)]">
-        <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)] mb-1.5">{t("cloud.title")}</div>
-        <div className="space-y-2">
-          <OpenRouterKey onSaved={loadCap} />
-          {hasOrKey && (
-            <div className={orRowCls}>
-              <div className="flex items-center gap-2.5">
-                <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[var(--color-muted)]" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-[12px] font-medium truncate">{t("cloud.threads")}</div>
-                  <div className="mono text-[10px] text-[var(--color-muted)] truncate">{t("cloud.threadsHint")}</div>
-                </div>
-                <select value={selv("or_concurrency") || "6"} onChange={(e) => setSel("or_concurrency", e.target.value)}
-                  className="shrink-0 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[11px] mono focus:border-[var(--color-accent)] focus:outline-none">
-                  {["1", "2", "4", "6", "8", "12", "16"].map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-      {/* Прокси — В САМОМ КОНЦЕ: нужен только тем, у кого закрыт прямой доступ к HF/OpenRouter. Весь исходящий
-          трафик приложения (закачка моделей + облако) через свой прокси. */}
-      <div className="mt-2 pt-3 border-t border-[var(--color-border)]">
-        <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)] mb-1.5">{t("proxy.title")}</div>
-        <ProxySection />
-      </div>
     </div>
   );
 }
@@ -490,153 +490,6 @@ function PresetsSection({ onApplied }: { onApplied?: () => void }) {
     </div>
   );
 }
-
-function SettingsModal({ onClose }: { onClose: () => void }) {
-  const { t } = useTranslation();
-  const [sfx, setSfx] = useState(sfxEnabled());
-  // Пер-стадийный бенчмарк (bench.json + ⏱ в журнале) — ВЫКЛ по умолчанию, состояние на бэке (active.json).
-  const [bench, setBench] = useState(false);
-  const [qcAsr, setQcAsr] = useState(false);
-  const [qcDur, setQcDur] = useState(true);
-  const [multitake, setMultitake] = useState(false);
-  const [breathOn, setBreathOn] = useState(false);
-  const [speechRateOn, setSpeechRateOn] = useState(true);
-  const [emoRefOn, setEmoRefOn] = useState(true);
-  useEffect(() => {
-    api.capabilities().then((c) => {
-      setBench(c.selection?.bench === "1");
-      setQcAsr(c.selection?.qc_asr === "1");
-      setQcDur(c.selection?.qc_duration !== "0");
-      setMultitake(c.selection?.multitake === "1");
-      setBreathOn(c.selection?.breath_on === "1");
-      setSpeechRateOn(c.selection?.speech_rate_on !== "0");
-      setEmoRefOn(c.selection?.emo_ref_on !== "0");
-    }).catch(() => {});
-  }, []);
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center glass-scrim anim-fade" onClick={onClose}>
-      <div className="w-[min(92vw,600px)] max-h-[86vh] flex flex-col rounded-xl glass-panel anim-pop p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-1">
-          <span className="font-semibold">{t("settings.title")}</span>
-          <button onClick={onClose} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={16} /></button>
-        </div>
-        <div className="overflow-y-auto flex-1 -mr-2 pr-2 space-y-1">
-          <label className="flex items-center justify-between gap-3 mb-2.5">
-            <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2"><Music size={14} className="text-[var(--color-muted)]" />{t("settings.sounds")}</span>
-            <button onClick={() => { const v = !sfx; setSfx(v); setSfxEnabled(v); if (v) playSfx("notify"); }} title={t("settings.sounds")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${sfx ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${sfx ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Проверка текста ASR */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title={t("qc.asr.tip")}>
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Captions size={14} className="text-[var(--color-accent-2)]" />
-                {t("qc.asr.label")}
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">{t("qc.asr.hint")}</span>
-            </div>
-            <button onClick={() => { const v = !qcAsr; setQcAsr(v); api.setSelection("qc_asr", v ? "1" : "0").catch(() => {}); }} title={t("qc.asr.label")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${qcAsr ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${qcAsr ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Контроль длительности фраз */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title={t("qc.duration.tip")}>
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Clock size={14} className="text-[var(--color-accent-2)]" />
-                {t("qc.duration.label")}
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">{t("qc.duration.hint")}</span>
-            </div>
-            <button onClick={() => { const v = !qcDur; setQcDur(v); api.setSelection("qc_duration", v ? "1" : "0").catch(() => {}); }} title={t("qc.duration.label")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${qcDur ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${qcDur ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Multi-take отбор (3 дубля) */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title={t("qc.multitake.tip")}>
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Star size={14} className="text-[var(--color-accent-2)]" />
-                {t("qc.multitake.label")}
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">{t("qc.multitake.hint")}</span>
-            </div>
-            <button onClick={() => { const v = !multitake; setMultitake(v); api.setSelection("multitake", v ? "1" : "0").catch(() => {}); }} title={t("qc.multitake.label")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${multitake ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${multitake ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Динамический темп речи TTS */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title={t("qc.speechRate.tip")}>
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Sparkles size={14} className="text-[var(--color-accent-2)]" />
-                {t("qc.speechRate.label")}
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">{t("qc.speechRate.hint")}</span>
-            </div>
-            <button onClick={() => { const v = !speechRateOn; setSpeechRateOn(v); api.setSelection("speech_rate_on", v ? "1" : "0").catch(() => {}); }} title={t("qc.speechRate.label")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${speechRateOn ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${speechRateOn ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Эмоциональный референс сцены (Emo-Ref) */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title={t("qc.emoRef.tip")}>
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Mic2 size={14} className="text-[var(--color-accent-2)]" />
-                {t("qc.emoRef.label")}
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">{t("qc.emoRef.hint")}</span>
-            </div>
-            <button onClick={() => { const v = !emoRefOn; setEmoRefOn(v); api.setSelection("emo_ref_on", v ? "1" : "0").catch(() => {}); }} title={t("qc.emoRef.label")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${emoRefOn ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${emoRefOn ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Вставка легких дыханий */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title={t("qc.breath.tip")}>
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <AudioLines size={14} className="text-[var(--color-accent-2)]" />
-                {t("qc.breath.label")}
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">{t("qc.breath.hint")}</span>
-            </div>
-            <button onClick={() => { const v = !breathOn; setBreathOn(v); api.setSelection("breath_on", v ? "1" : "0").catch(() => {}); }} title={t("qc.breath.label")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${breathOn ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${breathOn ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          <label className="flex items-center justify-between gap-3 mb-3 pb-3 border-b border-[var(--color-border)]" title={t("settings.benchHint")}>
-            <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2"><Clock size={14} className="text-[var(--color-muted)]" />{t("settings.bench")}</span>
-            <button onClick={() => { const v = !bench; setBench(v); api.setSelection("bench", v ? "1" : "0").catch(() => {}); }} title={t("settings.benchHint")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${bench ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${bench ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          <PresetsSection />
-          <ModelsSection />
-          <AgentPanel />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const DONATE = {
-  boosty: "https://boosty.to/neuro_art",
-  dalink: "https://dalink.to/nerual_dreming",
-  github: "https://github.com/timoncool/dub-studio",
-  telegram: "https://t.me/nerual_dreming",
-  crypto: [["BTC", "1E7dHL22RpyhJGVpcvKdbyZgksSYkYeEBC"],
-           ["ETH · ERC20", "0xb5db65adf478983186d4897ba92fe2c25c594a0c"],
-           ["USDT · TRC20", "TQST9Lp2TjK6FiVkn4fwfGUee7NmkxEE7C"]] as const,
-};
 
 function HelpSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -771,10 +624,19 @@ function StatusBar() {
   );
 }
 
+const settingsRequest = (target: string) => (cur: { request: number } | null) => ({ target, request: (cur?.request ?? 0) + 1 });
+
 function TopBar() {
   const { t } = useTranslation();
-  const [settings, setSettings] = useState(false);
+  // Открытые настройки: цель «раздел[:часть]» и номер запроса — повторный запрос той же цели снова ведёт к ней.
+  const [settings, setSettings] = useState<{ target: string; request: number } | null>(null);
   const [help, setHelp] = useState(false);
+  const openSettingsAt = (target: string) => setSettings(settingsRequest(target));
+  useEffect(() => {
+    const open = (e: Event) => setSettings(settingsRequest((e as CustomEvent<string>).detail));
+    window.addEventListener(OPEN_SETTINGS_EVENT, open);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, open);
+  }, []);
   const setStage = useStore((s) => s.setStage);
   const setPid = useStore((s) => s.setPid);
   const setProject = useStore((s) => s.setProject);
@@ -807,12 +669,15 @@ function TopBar() {
         <WhatsNew />
         <button onClick={() => setHelp(true)} title={t("help.title")}
           className="p-1.5 rounded-md text-[var(--color-muted)] hover:text-[var(--color-text)] transition-colors"><HelpCircle size={18} /></button>
-        <button onClick={() => setSettings(true)} title={t("settings.title")}
+        <button onClick={() => openSettingsAt("models")} title={t("prefs.title")} aria-label={t("prefs.title")}
           className="p-1.5 rounded-md text-[var(--color-muted)] hover:text-[var(--color-text)] transition-colors"><Settings size={18} /></button>
         <LanguageSwitcher />
       </div>
       {help && <HelpModal onClose={() => setHelp(false)} />}
-      {settings && <SettingsModal onClose={() => setSettings(false)} />}
+      {settings !== null && (
+        <SettingsModal target={settings.target} request={settings.request} onClose={() => setSettings(null)}
+          panes={{ models: <><PresetsSection /><ModelsSection /></>, cloud: <ModelsSection part="cloud" />, network: <ProxySection />, agent: <AgentPanel /> }} />
+      )}
     </header>
   );
 }
@@ -849,6 +714,7 @@ const TR_STYLE_PRESETS: Record<string, string> = {
   literary: "Literary register: natural expressive language, idiomatic phrasing, preserve tone and imagery.",
   casual: "Casual conversational register: everyday spoken language, contractions, simple words.",
 };
+const TR_STYLE_IDS = ["", "technical", "literary", "casual", "custom"] as const;
 // Итоговый текст стиля на бэк: пресет -> его текст; "custom" -> свой текст (обрезанный).
 function resolveTrStyle(choice: string, custom: string): string {
   return choice === "custom" ? custom.trim() : (TR_STYLE_PRESETS[choice] ?? "");
@@ -931,8 +797,16 @@ function DropZone() {
   const inputRef = useRef<HTMLInputElement>(null);
   const batchRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
+  // Дефолты запуска хранит сервис (GET/PATCH /settings/launch): поля формы ниже — их рабочая копия,
+  // каждое изменение уходит на сервер, а с сервера форма заполняется при открытии.
+  const [launch] = useState(() => createLaunchSaver(api.saveLaunchDefaults,
+    (e) => useStore.getState().pushActivity(t("launch.saveFailed", { error: e instanceof Error ? e.message : String(e) }), "error")));
+  const saveLaunch = (patch: Partial<LaunchDefaults>) => launch.queue(patch);
+  useEffect(() => () => { void launch.flush(); }, [launch]);
   const [tgt, setTgt] = useState<string>((i18n.language as string) || "ru");   // translate TO (default = UI lang)
   const [src, setSrc] = useState("auto");                                       // translate FROM (auto-detect)
+  const chooseTgt = (lang: string) => { setTgt(lang); saveLaunch({ tgt_lang: lang }); };
+  const chooseSrc = (lang: string) => { pickSrc(lang); saveLaunch({ src_lang: lang }); };
   const [asrNote, setAsrNote] = useState<string | null>(null);                  // «Parakeet не знает язык → переключили на Whisper»
   // Выбор источника: если язык вне 25 европейских Parakeet — авто-переключаем ASR на Whisper (99 языков)
   // с уведомлением. Текущий движок спрашиваем у бэкенда В МОМЕНТ выбора (не кэш с маунта): юзер мог
@@ -963,59 +837,77 @@ function DropZone() {
   const [subsTranslated, setSubsTranslated] = useState(false);                  // сабы уже на языке перевода -> tgt из них, MT пропустить (Даб Студио только озвучивает)
   // Композируемые опции обработки (независимы, любые комбинации). audio = аудио-выход; subs = содержимое
   // субтитров; burn = вжигать ли их на видео; funnyOn+funny = шуточный ремикс (сочетается с дубляжом/голосом).
-  const [audio, setAudio] = useState<"nodub" | "dub" | "voiceover" | "transcribe">("dub");
-  const [subs, setSubs] = useState<"none" | "transcribe" | "translate">("translate");
+  const [audio, setAudio] = useState<LaunchDefaults["audio"]>("dub");
+  const [subs, setSubs] = useState<LaunchDefaults["subs"]>("translate");
   const [burn, setBurn] = useState(true);
+  const chooseAudio = (v: LaunchDefaults["audio"]) => { setAudio(v); saveLaunch({ audio: v }); };
+  const chooseSubs = (v: LaunchDefaults["subs"]) => { setSubs(v); saveLaunch({ subs: v }); };
+  const chooseBurn = (v: boolean) => { setBurn(v); saveLaunch({ burn: v }); };
   const [detectText, setDetectText] = useState(false);                          // OCR-детекция вшитого текста (блюр/локализация титров). Дорогая на 4K -> ПО УМОЛЧАНИЮ ВЫКЛ (юзеры жаловались, что дубляж без сабов всё равно сканирует кадры); кто хочет блюр вшитых субтитров — включает галочкой.
+  const chooseDetect = (v: boolean) => { setDetectText(v); saveLaunch({ detect_text: v }); };
   // Кастинг персонажей (#115): доп. проход по кадрам (детект лиц + эмбеддинги + active-speaker) -> база
-  // персонажей с аватарами/голосами. Опционально, дорого на длинном видео -> ПО УМОЛЧАНИЮ ВЫКЛ. Персист.
-  const [castingOn, setCastingOn] = useState<boolean>(() => localStorage.getItem("dub-casting") === "1");
-  const setCastingSaved = (v: boolean) => { setCastingOn(v); localStorage.setItem("dub-casting", v ? "1" : "0"); };
+  // персонажей с аватарами/голосами. Опционально, дорого на длинном видео -> ПО УМОЛЧАНИЮ ВЫКЛ.
+  const [castingOn, setCastingOn] = useState(false);
+  const setCastingSaved = (v: boolean) => { setCastingOn(v); saveLaunch({ casting: v }); };
   // Готовый кастинг из библиотеки (#115): slug профиля -> уходит в analyze(casting_ref=). Пусто = не применять.
-  // Персист как глобальный дефолт (как стиль перевода/громкость) — чтобы серию роликов дубить одним кастингом.
-  const [castingRef, setCastingRef] = useState<string>(() => localStorage.getItem("dub-casting-ref") ?? "");
-  const setCastingRefSaved = (v: string) => { setCastingRef(v); localStorage.setItem("dub-casting-ref", v); };
-  // Тип контента кастинга (#115): real (SCRFD+LVFace) | anime (детектор рисованных лиц + CCIP). Персист.
-  const [contentType, setContentType] = useState<string>(() => localStorage.getItem("dub-content-type") ?? "auto");
-  const setContentTypeSaved = (v: string) => { setContentType(v); localStorage.setItem("dub-content-type", v); };
+  // Глобальный дефолт (как стиль перевода/громкость) — чтобы серию роликов дубить одним кастингом.
+  const [castingRef, setCastingRef] = useState("");
+  const setCastingRefSaved = (v: string) => { setCastingRef(v); saveLaunch({ casting_ref: v }); };
+  // Тип контента кастинга (#115): real (SCRFD+LVFace) | anime (детектор рисованных лиц + CCIP).
+  const [contentType, setContentType] = useState<LaunchDefaults["content_type"]>("auto");
+  const setContentTypeSaved = (v: LaunchDefaults["content_type"]) => { setContentType(v); saveLaunch({ content_type: v }); };
   // Список профилей библиотеки — грузим лениво, когда галка кастинга включена (не засорять UI при выкл.).
   const [castLib, setCastLib] = useState<{ slug: string; name: string; char_count: number }[]>([]);
   const refreshCastLib = () => api.castingLibrary().then((r) => setCastLib(r.casts)).catch(() => {});
   useEffect(() => { if (castingOn) refreshCastLib(); }, [castingOn]);
   const [funnyOn, setFunnyOn] = useState(false);
   const [funny, setFunny] = useState("");                                       // Gemma rewrite instruction (тема ремикса)
-  // Громкость оригинала под переводом (voiceover), стартовый выбор -> применяется ко всем создаваемым проектам.
-  // Хранится в localStorage как глобальный дефолт для будущих запусков (фолбэк -12 dB, broadcast-практика).
-  const [voGain, setVoGain] = useState<number>(() => {
-    const v = parseFloat(localStorage.getItem("dub-vo-gain") ?? "");
-    return Number.isFinite(v) ? v : -12;
-  });
-  const setVoGainSaved = (v: number) => { setVoGain(v); localStorage.setItem("dub-vo-gain", String(v)); };
-  // Стиль перевода (#112): выбор пресета + свой текст. Персистятся как глобальный дефолт для будущих запусков.
-  const [trStyle, setTrStyle] = useState<string>(() => localStorage.getItem("dub-tr-style-choice") ?? "");
-  const [trStyleCustom, setTrStyleCustom] = useState<string>(() => localStorage.getItem("dub-tr-style-custom") ?? "");
-  const setTrStyleSaved = (v: string) => { setTrStyle(v); localStorage.setItem("dub-tr-style-choice", v); };
-  const setTrStyleCustomSaved = (v: string) => { setTrStyleCustom(v); localStorage.setItem("dub-tr-style-custom", v); };
+  // Громкость оригинала под переводом (voiceover), стартовый выбор -> применяется ко всем создаваемым проектам
+  // (дефолт -12 dB, broadcast-практика).
+  const [voGain, setVoGain] = useState(-12);
+  const setVoGainSaved = (v: number) => { setVoGain(v); saveLaunch({ vo_gain_db: v }); };
+  // Стиль перевода (#112): выбор пресета + свой текст — глобальный дефолт для будущих запусков.
+  const [trStyle, setTrStyle] = useState<LaunchDefaults["tr_style"]>("");
+  const [trStyleCustom, setTrStyleCustom] = useState("");
+  const setTrStyleSaved = (v: LaunchDefaults["tr_style"]) => { setTrStyle(v); saveLaunch({ tr_style: v }); };
+  const setTrStyleCustomSaved = (v: string) => { setTrStyleCustom(v); saveLaunch({ tr_style_custom: v }); };
   // Сохранить оригинальную дорожку (#113): 2-я аудиодорожка + контейнер вывода (mp4|mkv). Персист.
   // Дакинг фона под дубляжом — опция дубляжа (active.json duck_on), ВЫКЛ по умолчанию (не всем нужен).
   const [duckOn, setDuckOn] = useState(false);
   useEffect(() => { api.capabilities().then((c) => setDuckOn(c.selection?.duck_on === "1")).catch(() => {}); }, []);
   const setDuckSaved = (v: boolean) => { setDuckOn(v); api.setSelection("duck_on", v ? "1" : "0").catch(() => {}); };
   // Блюр-подложка под сожжёнными субтитрами — опция (не всем нужна), дефолт ВКЛ; патчится в проект после analyze.
-  const [subBlur, setSubBlur] = useState<boolean>(() => localStorage.getItem("dub-sub-blur") !== "0");
-  const setSubBlurSaved = (v: boolean) => { setSubBlur(v); localStorage.setItem("dub-sub-blur", v ? "1" : "0"); };
-  const [keepOrig, setKeepOrig] = useState<boolean>(() => localStorage.getItem("dub-keep-orig") === "1");
-  const [container, setContainer] = useState<"mp4" | "mkv">(() => (localStorage.getItem("dub-container") === "mkv" ? "mkv" : "mp4"));
-  const setKeepOrigSaved = (v: boolean) => { setKeepOrig(v); localStorage.setItem("dub-keep-orig", v ? "1" : "0"); };
-  const setContainerSaved = (v: "mp4" | "mkv") => { setContainer(v); localStorage.setItem("dub-container", v); };
-  // Голоса из библиотеки (#114): режим клон|library + два списка слотов (порядок = приоритет). Персист.
-  const [voiceSrc, setVoiceSrc] = useState<"clone" | "library">(() => (localStorage.getItem("dub-voice-src") === "library" ? "library" : "clone"));
-  // JSON.parse может вернуть валидный не-массив (число/объект) — фильтруем до string[], иначе .map упадёт.
-  const [slotsM, setSlotsM] = useState<string[]>(() => { try { const p = JSON.parse(localStorage.getItem("dub-voice-slots-m") ?? "[]"); return Array.isArray(p) ? p.filter((x) => typeof x === "string") : []; } catch { return []; } });
-  const [slotsF, setSlotsF] = useState<string[]>(() => { try { const p = JSON.parse(localStorage.getItem("dub-voice-slots-f") ?? "[]"); return Array.isArray(p) ? p.filter((x) => typeof x === "string") : []; } catch { return []; } });
-  const setVoiceSrcSaved = (v: "clone" | "library") => { setVoiceSrc(v); localStorage.setItem("dub-voice-src", v); };
-  const setSlotsMSaved = (v: string[]) => { setSlotsM(v); localStorage.setItem("dub-voice-slots-m", JSON.stringify(v)); };
-  const setSlotsFSaved = (v: string[]) => { setSlotsF(v); localStorage.setItem("dub-voice-slots-f", JSON.stringify(v)); };
+  const [subBlur, setSubBlur] = useState(true);
+  const setSubBlurSaved = (v: boolean) => { setSubBlur(v); saveLaunch({ sub_blur: v }); };
+  const [keepOrig, setKeepOrig] = useState(false);
+  const [container, setContainer] = useState<LaunchDefaults["container"]>("mp4");
+  const setKeepOrigSaved = (v: boolean) => { setKeepOrig(v); saveLaunch({ keep_orig: v }); };
+  const setContainerSaved = (v: LaunchDefaults["container"]) => { setContainer(v); saveLaunch({ container: v }); };
+  // Голоса из библиотеки (#114): режим клон|library + два списка слотов (порядок = приоритет).
+  const [voiceSrc, setVoiceSrc] = useState<LaunchDefaults["voice_src"]>("clone");
+  const [slotsM, setSlotsM] = useState<string[]>([]);
+  const [slotsF, setSlotsF] = useState<string[]>([]);
+  const setVoiceSrcSaved = (v: LaunchDefaults["voice_src"]) => { setVoiceSrc(v); saveLaunch({ voice_src: v }); };
+  const setSlotsMSaved = (v: string[]) => { setSlotsM(v); saveLaunch({ voice_slots_m: v }); };
+  const setSlotsFSaved = (v: string[]) => { setSlotsF(v); saveLaunch({ voice_slots_f: v }); };
+  // Сохранённый выбор с сервера (старый выбор окна переносится туда один раз). Не прочитался — форма
+  // остаётся на встроенных дефолтах, и журнал говорит почему.
+  useEffect(() => {
+    let alive = true;
+    loadWithMigration({ load: api.launchDefaults, save: api.saveLaunchDefaults }, localStorage)
+      .then(({ defaults: d }) => {
+        if (!alive) return;
+        setAudio(d.audio); setSubs(d.subs); setBurn(d.burn); setDetectText(d.detect_text);
+        if (d.tgt_lang) setTgt(d.tgt_lang);
+        pickSrc(d.src_lang);
+        setCastingOn(d.casting); setCastingRef(d.casting_ref); setContentType(d.content_type);
+        setVoGain(d.vo_gain_db); setTrStyle(d.tr_style); setTrStyleCustom(d.tr_style_custom);
+        setSubBlur(d.sub_blur); setKeepOrig(d.keep_orig); setContainer(d.container);
+        setVoiceSrc(d.voice_src); setSlotsM(d.voice_slots_m); setSlotsF(d.voice_slots_f);
+      })
+      .catch((e: unknown) => useStore.getState().pushActivity(t("launch.loadFailed", { error: e instanceof Error ? e.message : String(e) }), "error"));
+    return () => { alive = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [voiceLib, setVoiceLib] = useState<string[]>([]);                        // имена голосов из GET /voices (для селектов слотов)
   useEffect(() => { api.voices().then((r) => setVoiceLib(r.voices)).catch(() => {}); }, []);
   const [preview, setPreview] = useState<string | null>(null);                  // objectURL превью выбранного видео (первый кадр)
@@ -1029,15 +921,22 @@ function DropZone() {
 
   // «Недавние проекты»: всё уже автосохранено в workspace/<pid>/ (каждая правка = PATCH). Здесь тянем
   // список и даём открыть прошлый проект в один клик. Автообновление URL (?pid=) — чтобы перезагрузка держала.
-  const [recent, setRecent] = useState<ProjectSummary[]>([]);
-  useEffect(() => { api.listProjects().then((r) => setRecent(r.projects)).catch(() => {}); }, []);
-  // Удалить проект из «Недавних»: подтверждаем, оптимистично убираем из списка, реально стираем на бэке
-  // (DELETE /projects/<pid> -> rm -rf workspace/<pid>). Если бэк не смог — вернётся при следующей загрузке.
-  const deleteRecent = async (e: React.MouseEvent, pid: string, video: string) => {
-    e.stopPropagation();
-    if (!window.confirm(t("recent.deleteConfirm", { video }))) return;
+  const [recent, setRecent] = useState<ProjectListing[]>([]);
+  const [allProjects, setAllProjects] = useState(false);                        // экран «Все проекты»
+  const [deleting, setDeleting] = useState<{ pid: string; video: string } | null>(null);   // проект в диалоге удаления
+  useEffect(() => {
+    api.listProjects().then((r) => setRecent(r.projects))
+      .catch((e: unknown) => useStore.getState().pushActivity(t("projects.loadFailed", { error: e instanceof Error ? e.message : String(e) }), "error"));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Удалить проект: DELETE /projects/<pid> стирает workspace/<pid>; из списка убираем только после ответа
+  // сервера, ошибка остаётся в диалоге подтверждения.
+  const deleteProject = async (pid: string) => {
+    await api.deleteProject(pid);
     setRecent((r) => r.filter((x) => x.pid !== pid));
-    try { await api.deleteProject(pid); } catch { api.listProjects().then((r) => setRecent(r.projects)).catch(() => {}); }
+  };
+  const deleteRecent = (e: React.MouseEvent, pid: string, video: string) => {
+    e.stopPropagation();
+    setDeleting({ pid, video });
   };
   const rtf = new Intl.RelativeTimeFormat((i18n.language as string) || "en", { numeric: "auto" });
   function fmtAgo(sec: number) {
@@ -1053,7 +952,10 @@ function DropZone() {
       s.setStage("editor");                                                     // TranscriptView vs Editor выбирается по projMode при рендере
       window.history.pushState(null, "", `?pid=${pid}`);                        // перезагрузка/боот вернёт этот проект
       playSfx("success");
-    } catch { /* проект удалён на диске — молча пропускаем */ }
+    } catch (e) {
+      useStore.getState().pushActivity(t("projects.openFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
+      playSfx("error");
+    }
   }
 
   async function runManual() {
@@ -1198,6 +1100,10 @@ function DropZone() {
                   </div>
                 ))}
               </div>
+              <button type="button" onClick={() => setAllProjects(true)}
+                className="mt-2 inline-flex items-center gap-1.5 text-[12px] text-[var(--color-accent-2)] hover:text-[var(--color-accent)] transition-colors">
+                <FolderOpen size={13} />{t("projects.all", { n: recent.length })}
+              </button>
             </div>
           )}
         </div>
@@ -1249,11 +1155,11 @@ function DropZone() {
           </div>
           <div className="mt-3.5 flex items-center justify-center gap-2 text-[12px]">
             <Languages size={14} className="text-[var(--color-accent-2)]" />
-            <Combobox value={src} onChange={pickSrc}
+            <Combobox value={src} onChange={chooseSrc}
               options={langOptions(DUB_LANGS, i18n.language, [{ value: "auto", label: t("settings.auto"), search: "auto" }])}
               placeholder={t("voice.langSearch")} noResults={t("voice.noMatch")} size="sm" className="w-[130px]" />
             <ArrowRight size={12} className="text-[var(--color-muted)]" />
-            <Combobox value={tgt} onChange={setTgt}
+            <Combobox value={tgt} onChange={chooseTgt}
               options={langOptions(DUB_LANGS, i18n.language)}
               placeholder={t("voice.langSearch")} noResults={t("voice.noMatch")} size="sm" className="w-[130px]" />
           </div>
@@ -1284,7 +1190,7 @@ function DropZone() {
           <div className="mt-3 flex items-center gap-1.5 text-[11px] uppercase tracking-[0.1em] text-[var(--color-muted)] mb-1">{t("comp.audioLabel")}<span title={t("comp.optionsHelp")} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span></div>
           <div className="grid grid-cols-2 gap-1.5">
             {([["nodub", Captions, "comp.audioNone", "comp.audioNoneHint"], ["dub", AudioLines, "comp.audioDub", "comp.audioDubHint"], ["voiceover", Mic2, "comp.audioVoiceover", "comp.audioVoiceoverHint"], ["transcribe", FileText, "mode.transcribe", "comp.audioTranscribeHint"]] as const).map(([a, Icon, key, hint]) => (
-              <button key={a} onClick={() => setAudio(a)} title={t(hint)}
+              <button key={a} onClick={() => chooseAudio(a)} title={t(hint)}
                 className={`flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg border text-[12px] font-medium transition-colors ${audio === a ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_12%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
                 <Icon size={14} />{t(key)}</button>
             ))}
@@ -1336,14 +1242,14 @@ function DropZone() {
                   <Accordion title={t("accordion.subs")} subtitle={subsStatus}>
                     <div className="grid grid-cols-3 gap-1.5">
                       {([["none", "comp.subsNone", "comp.subsNoneHint"], ["transcribe", "comp.subsOriginal", "comp.subsOriginalHint"], ["translate", "comp.subsTranslate", "comp.subsTranslateHint"]] as const).map(([sv, key, hint]) => (
-                        <button key={sv} onClick={() => setSubs(sv)} title={t(hint)}
+                        <button key={sv} onClick={() => chooseSubs(sv)} title={t(hint)}
                           className={`px-2 py-1.5 rounded-lg border text-[11px] font-medium transition-colors ${subs === sv ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_12%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
                           {t(key)}</button>
                       ))}
                     </div>
                     {subs !== "none" && (
                       <label className="mt-1.5 flex items-center gap-2 text-[12px] cursor-pointer select-none w-fit">
-                        <input type="checkbox" checked={burn} onChange={(e) => setBurn(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
+                        <input type="checkbox" checked={burn} onChange={(e) => chooseBurn(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
                         {t("comp.burn")}
                         <span title={t("comp.burnHint")} onClick={(e) => e.preventDefault()} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span>
                       </label>
@@ -1357,7 +1263,7 @@ function DropZone() {
                     {showTrStyle && (
                       <div>
                         <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.1em] text-[var(--color-muted)] mb-1">{t("trStyle.label")}</div>
-                        <select value={trStyle} onChange={(e) => setTrStyleSaved(e.target.value)}
+                        <select value={trStyle} onChange={(e) => { const v = TR_STYLE_IDS.find((id) => id === e.target.value); if (v !== undefined) setTrStyleSaved(v); }}
                           className="w-full bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-lg px-2.5 py-1.5 text-[12px] focus:border-[var(--color-accent)] focus:outline-none">
                           <option value="">{t("trStyle.normal")}</option>
                           <option value="technical">{t("trStyle.technical")}</option>
@@ -1402,7 +1308,7 @@ function DropZone() {
                     {/* ДЕТЕКЦИЯ ВШИТОГО ТЕКСТА (OCR). */}
                     {showDetect && (
                       <label className="mt-1.5 flex items-center gap-2 text-[12px] cursor-pointer select-none w-fit">
-                        <input type="checkbox" checked={detectText} onChange={(e) => setDetectText(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
+                        <input type="checkbox" checked={detectText} onChange={(e) => chooseDetect(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
                         {t("comp.detect")}
                         <span title={t("comp.detectHint")} onClick={(e) => e.preventDefault()} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span>
                       </label>
@@ -1513,6 +1419,15 @@ function DropZone() {
           </div>
         </motion.div>
       </motion.div>
+      {allProjects && (
+        <ProjectsList projects={recent} onOpen={(pid) => { setAllProjects(false); void openProject(pid); }}
+          onDelete={deleteProject} onClose={() => setAllProjects(false)} />
+      )}
+      {deleting && (
+        <ConfirmDialog danger title={t("recent.delete")} message={t("recent.deleteConfirm", { video: deleting.video })} confirmLabel={t("projects.deleteConfirm")}
+          onCancel={() => setDeleting(null)}
+          onConfirm={async () => { await deleteProject(deleting.pid); setDeleting(null); }} />
+      )}
       <input ref={inputRef} type="file" accept={MEDIA_ACCEPT} className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f) setFile(f); }} />
       <input ref={batchRef} type="file" multiple accept={MEDIA_ACCEPT} className="hidden"
@@ -4529,17 +4444,21 @@ export default function App() {
     setCap(parts.join(" · "));
   }).catch(() => setCapOffline(true)); }, []);
   // boot: resume ?pid=… project, else gate on /setup/status — missing required components -> «first run».
+  // Сетевая ошибка (fetch отклонён TypeError) = сервиса нет на порту -> экран «сервер не отвечает»; HTTP-ошибка
+  // значит, что сервис ответил, и ведёт на главный экран.
   useEffect(() => {
+    const unreachable = (e: unknown) => e instanceof TypeError;
     const pid = new URLSearchParams(location.search).get("pid");
-    if (pid) { api.getProject(pid).then((p) => { setPid(pid); setProject(p); setStage("editor"); }).catch(() => setStage("empty")); return; }
+    if (pid) { api.getProject(pid).then((p) => { setPid(pid); setProject(p); setStage("editor"); }).catch((e: unknown) => setStage(unreachable(e) ? "offline" : "empty")); return; }
     api.setupStatus()
       .then((s) => setStage(s.ready ? "empty" : "setup"))
-      .catch(() => setStage("empty"));   // backend offline / older server without /setup -> fall through to hero
+      .catch((e: unknown) => setStage(unreachable(e) ? "offline" : "empty"));   // older server without /setup -> fall through to hero
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="h-full flex flex-col">
       <TopBar />
       {stage === "boot" && <div className="flex-1 grid place-items-center"><Loader2 size={22} className="animate-spin text-[var(--color-muted)]" /></div>}
+      {stage === "offline" && <ServerOffline />}
       {stage === "setup" && <FirstRun />}
       {stage === "empty" && <DropZone />}
       {stage === "analyzing" && <AnalyzeProgress />}

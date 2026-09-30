@@ -815,6 +815,27 @@ fn tools() -> &'static [Tool] {
                 call: |_| get("/engine/capabilities".into()),
             },
             Tool {
+                name: "launch_defaults_get",
+                description: "What the start screen's dubbing form opens with, shared by every window: audio (nodub, dub, voiceover, transcribe), subs (none, transcribe, translate), burn, detect_text, src_lang, tgt_lang (null: the window's language), casting, casting_ref, content_type, vo_gain_db (-24..0), tr_style, tr_style_custom, sub_blur, keep_orig, container (mp4, mkv), voice_src (clone, library), voice_slots_m, voice_slots_f; saved says whether they were ever changed.",
+                schema: nothing,
+                call: |_| get("/settings/launch".into()),
+            },
+            Tool {
+                name: "launch_defaults_set",
+                description: "Change some of the start screen's defaults (fields as launch_defaults_get names them); an unknown field or a wrong value changes nothing and says why.",
+                schema: || object(json!({ "defaults": { "type": "object", "description": "the fields to change and their values" } }), &["defaults"]),
+                call: |args| match args.get("defaults") {
+                    Some(Value::Object(fields)) => send(Method::PATCH, "/settings/launch".into(), Value::Object(fields.clone())),
+                    _ => Err("'defaults' is required: an object of the fields to change".into()),
+                },
+            },
+            Tool {
+                name: "studio_paths",
+                description: "Where the studio keeps its data on this computer: data_dir, projects_dir (a folder per project), models_dir.",
+                schema: nothing,
+                call: |_| get("/app/paths".into()),
+            },
+            Tool {
                 name: "settings_set",
                 description: "Change one setting (a key settings_get lists) to a text value: \"1\" or \"0\" for a switch. Applies from the next job. The OpenRouter key is set with openrouter_set_key, the proxy's address with proxy_settings_set.",
                 schema: || object(json!({ "key": { "type": "string" }, "value": { "type": "string" } }), &["key", "value"]),

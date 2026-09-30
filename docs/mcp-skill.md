@@ -157,7 +157,8 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
   `models_import` (files already on disk), `models_select` (a quantisation or a recogniser).
 - **settings**: `settings_get`, `settings_set`, `engine_presets_get`,
   `engine_preset_apply`, `proxy_test`, `proxy_settings_get`, `proxy_settings_set`,
-  `fonts_list`, `caption_presets_list`.
+  `fonts_list`, `caption_presets_list`, `launch_defaults_get`, `launch_defaults_set` (what the start
+  screen's form opens with), `studio_paths` (where the data, projects and models are).
 - **openrouter**: `openrouter_status`, `openrouter_set_key`, `openrouter_delete_key`,
   `openrouter_verify`, `openrouter_models`, `openrouter_voices`.
 - **project**: `projects_list` (query, since, until), `project_create`, `project_get`,

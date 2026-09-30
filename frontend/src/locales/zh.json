@@ -181,6 +181,91 @@
     "delete": "删除项目",
     "deleteConfirm": "删除项目「{{video}}」？其文件将被永久删除。"
   },
+  "prefs": {
+    "title": "设置",
+    "close": "关闭",
+    "done": "完成",
+    "sections": {
+      "models": "模型",
+      "modelsHint": "本地引擎、量化与硬件预设",
+      "cloud": "云端",
+      "cloudHint": "OpenRouter 密钥与并行请求",
+      "quality": "质量",
+      "qualityHint": "配音检查、多次生成与诊断",
+      "network": "网络",
+      "networkHint": "用于下载模型和云端的代理",
+      "interface": "语言与声音",
+      "interfaceHint": "界面语言与通知音效",
+      "agent": "智能体 (MCP)",
+      "agentHint": "将 AI 智能体连接到工作室",
+      "about": "关于",
+      "aboutHint": "版本、链接与数据文件夹"
+    },
+    "voiceGroup": "语音生成",
+    "diagnostics": "诊断",
+    "loadFailed": "无法读取设置：{{error}}",
+    "saveFailed": "无法保存设置：{{error}}",
+    "uiLanguage": "界面语言",
+    "uiLanguageHint": "工作室的按钮、提示和消息",
+    "soundsHint": "任务完成或失败时播放简短提示音",
+    "links": "常用链接",
+    "repo": "源代码",
+    "issues": "报告问题",
+    "releases": "版本发布",
+    "license": "许可证 (MIT)",
+    "modelLicenses": "模型许可证",
+    "dataTitle": "数据文件夹",
+    "dataHint": "工作室的项目、模型和设置都保存在这里",
+    "dataDir": "工作室文件夹",
+    "projectsDir": "项目",
+    "modelsDir": "模型与设置",
+    "copyPath": "复制路径",
+    "copied": "已复制",
+    "pathsFailed": "无法获取数据文件夹：{{error}}"
+  },
+  "projects": {
+    "title": "全部项目",
+    "all": "全部项目（{{n}}）",
+    "count_other": "{{count}} 个项目",
+    "countFiltered": "{{shown}} / {{total}}",
+    "search": "按名称、语言或模式搜索",
+    "empty": "还没有项目",
+    "noMatch": "没有符合搜索和筛选条件的项目",
+    "created": "创建于 {{date}}",
+    "edited": "修改于 {{ago}}",
+    "more_other": "再显示 {{count}} 个",
+    "deleteConfirm": "删除",
+    "loadFailed": "无法加载项目列表：{{error}}",
+    "openFailed": "无法打开项目：{{error}}",
+    "sort": {
+      "label": "排序：{{order}}",
+      "title": "排序方式",
+      "newest": "最新优先",
+      "oldest": "最早优先",
+      "edited": "最近修改",
+      "nameAsc": "名称 A–Z",
+      "nameDesc": "名称 Z–A",
+      "longest": "最长优先",
+      "shortest": "最短优先"
+    },
+    "filter": {
+      "status": "按状态筛选",
+      "all": "全部",
+      "done": "已完成",
+      "pending": "未完成",
+      "reset": "重置筛选"
+    }
+  },
+  "offline": {
+    "title": "工作室服务没有响应",
+    "body": "此窗口无法连接到本机上的 Dub Studio 服务。如果你关闭了应用，请重新启动；如果它自行停止，请重启它。服务一有响应，页面就会自动恢复。",
+    "retrying": "每 2 秒检查一次 · {{seconds}} 秒",
+    "retry": "立即检查"
+  },
+  "launch": {
+    "loadFailed": "无法读取已保存的启动设置，表单显示内置默认值：{{error}}",
+    "saveFailed": "无法保存启动设置：{{error}}"
+  },
   "multilang": {
     "title": "多种语言",
     "exportTitle": "导出到其他语言",
@@ -578,7 +663,7 @@
     "b": "B"
   },
   "cloud": {
-    "needKey": "请在下方输入 OpenRouter 密钥（云端设置）",
+    "needKey": "需要 OpenRouter 密钥——点击打开“云端”分区",
     "ttsNoRussian": "⚠ 该模型不支持俄语——请为俄语配音选择其他模型。",
     "autocast": "自动分配声音",
     "beta": "测试版",
