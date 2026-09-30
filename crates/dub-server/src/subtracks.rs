@@ -171,7 +171,7 @@ mod tests {
         let mut timing = DubTiming::default();
         timing.segments.insert(
             "s0".into(),
-            crate::dub_timing::SegTiming { text: "Привет".into(), seg_start: 1.0, seg_end: 2.0, at: 1.25, dur: 1.5, words: vec![] },
+            crate::dub_timing::SegTiming { text: "Привет".into(), seg_start: 1.0, seg_end: 2.0, at: 1.25, dur: 1.5, words: vec![], fit: None },
         );
         let t = tracks(&proj, Some(&timing), "Русский", "English");
         assert_eq!(t[0].srt, "1\n00:00:01,250 --> 00:00:02,750\nПривет\n");

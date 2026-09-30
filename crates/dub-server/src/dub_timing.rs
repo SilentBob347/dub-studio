@@ -28,6 +28,29 @@ pub struct SegTiming {
     /// распознавались (пресет без пословной подсветки) или распознавание не удалось.
     #[serde(default)]
     pub words: Vec<(String, f64, f64)>,
+    /// Как фраза уложилась в слот: отчёт «не влезло» и выборка для калибровки темпа голоса.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit: Option<FitRecord>,
+}
+
+/// Укладка озвученной фразы: сырой клип TTS до подгонки темпа против её слота.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FitRecord {
+    /// Длительность сырого клипа TTS, сек.
+    pub raw: f64,
+    /// Слот, в который фраза укладывалась (dub_core::fit::Slot::target), сек.
+    pub slot: f64,
+    /// Во сколько раз клип длиннее слота.
+    pub needed: f64,
+    /// Штатный предел ускорения слота.
+    pub cap: f64,
+    /// Предел, с которым рендер подогнал клип (с эскалацией).
+    pub eff_cap: f64,
+    pub speaker: String,
+    /// Голос: clone, имя голоса из библиотеки или облачный голос.
+    pub voice: String,
+    /// Язык озвучки.
+    pub lang: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -89,6 +112,7 @@ pub struct Laid<'a> {
     pub seg: &'a dub_core::Segment,
     pub file: &'a Path,
     pub span: (f64, f64),
+    pub fit: Option<FitRecord>,
 }
 
 /// Записать dub_timing.json. `track_sf` — во сколько раз сжата вся дорожка tempo-fit'ом (1.0 — нет).
@@ -162,6 +186,7 @@ pub fn record(
                 at: a / sf,
                 dur: (b - a).max(0.0) / sf,
                 words,
+                fit: l.fit.clone(),
             },
         );
     }
@@ -196,7 +221,7 @@ mod tests {
         let f = d.join("seg_000_fit.wav");
         std::fs::write(&f, b"x").unwrap();
         let seg = dub_core::Segment { id: "s0".into(), start: 1.0, end: 2.0, tgt_text: " Привет ".into(), ..Default::default() };
-        let laid = [Laid { seg: &seg, file: &f, span: (2.2, 3.4) }];
+        let laid = [Laid { seg: &seg, file: &f, span: (2.2, 3.4), fit: None }];
         let t = record(&d, &laid, 1.2, None, &|_| {}).unwrap();
         let st = &t.segments["s0"];
         assert!((st.at - 2.2 / 1.2).abs() < 1e-9 && (st.dur - 1.0).abs() < 1e-9, "{st:?}");

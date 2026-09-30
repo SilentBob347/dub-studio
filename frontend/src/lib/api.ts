@@ -43,9 +43,29 @@ export type SubStyle = {
   font?: string | null; scene_color?: string | null; scene_flat: boolean;
   n_lines?: number | null; align: string; size_px?: number | null; outline_w?: number | null; shadow_dir?: number | null;
 };
+// Укладка перевода в слот (вычисляет сервер): прогноз по темпу голоса и отчёт последнего рендера этого текста.
+export type FitVerdict = "fits" | "tight" | "impossible";
+export type FitRendered = { needed: number; cap: number; eff_cap: number; raw: number; slot: number; dur: number | null; over: boolean };
+export type Fit = {
+  est: number; slot: number; ratio: number; verdict: FitVerdict; calibrated: boolean; cps: number; cap: number;
+  eff_cap: number; over: boolean; rendered: FitRendered | null;
+};
+// История дублей фразы: сводка у реплики и полный список (GET /segments/{id}/takes).
+export type TakesSummary = { count: number; active: number | null; pinned: number | null };
+export type TakeSource = "synth" | "multitake" | "qc" | "shorten";
+export type Take = {
+  n: number; text: string; text_matches: boolean; dur: number; qc: number | null; source: TakeSource;
+  voice: string; reference: string; params: string; created: number; file: string;
+};
+export type Takes = { id: string; active: number | null; pinned: number | null; takes: Take[] };
+export type ShortenResult = {
+  shortened: { id: string; from: string; to: string }[]; rejected: { id: string; reason: string }[];
+  failed: { id: string; error: string }[]; unpinned: string[];
+};
 export type Segment = {
   id: string; start: number; end: number; speaker?: string | null;
   src_text: string; tgt_text: string; voice?: string | null; dirty: boolean; hidden?: boolean; keep_original?: boolean;
+  fit?: Fit | null; takes?: TakesSummary | null; shortened?: { from: string; to: string } | null;
 };
 // Двуязычные субтитры (subs.mode = bilingual): порядок строк и вид второй строки (null — как у основной).
 export type Bilingual = {
@@ -427,6 +447,10 @@ export const api = {
   // #122: смена режима из транскрипта — перевод готовых сегментов на lang + смена режима, БЕЗ повторного ASR.
   retranslate: (pid: string, lang: string, mode: string) => fetch(`${BASE}/projects/${pid}/retranslate?lang=${encodeURIComponent(lang)}&mode=${encodeURIComponent(mode)}`, { method: "POST" }).then(j<{ job_id: string; project_id: string }>),
   dubAudio: (pid: string) => fetch(`${BASE}/projects/${pid}/dub-audio`, { method: "POST" }).then(j<{ job_id: string }>),   // сгенерить только озвучку (без сборки видео) — слушать дуб в редакторе
+  // Сократить перевод реплик под слот (джоба shorten): названные строки или все, что не влезают.
+  shorten: (pid: string, target: { ids: string[] } | { all_over: true }) => postJson<{ job_id: string }>(`/projects/${pid}/shorten`, target),
+  takes: (pid: string, id: string) => getJson<Takes>(`/projects/${pid}/segments/${encodeURIComponent(id)}/takes`),
+  takeAudioUrl: (pid: string, id: string, n: number) => `${BASE}/projects/${pid}/segments/${encodeURIComponent(id)}/takes/${n}/audio`,
   remix: (pid: string, instruction: string) =>
     fetch(`${BASE}/projects/${pid}/remix?instruction=${encodeURIComponent(instruction)}`, { method: "POST" }).then(j<{ job_id: string }>),
   previewUrl: (pid: string, t: number, rev = 0, lowres = false) => `${BASE}/projects/${pid}/preview?t=${t}&rev=${rev}${lowres ? "&lr=1" : ""}`,   // lr=1 при плее -> низкое разрешение на больших видео (быстрее)

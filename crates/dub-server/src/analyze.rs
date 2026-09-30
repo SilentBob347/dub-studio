@@ -1414,6 +1414,9 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         emit(progress, "casting", "аудио-режим: без видео, кастинг персонажей не нужен");
     }
 
+    // Реплики новые: истории дублей прежних реплик к ним не относятся.
+    crate::takes::drop_all(&paths.work_dir)?;
+
     // 8) финализация кэша: зеркалим param-ключи крупных стадий в project.stage_ckpts (resume работает
     //    даже при потере work_dir/cache.json, т.к. project.json автосейвится), и атомарно пишем cache.json.
     for (stage, entry) in &cache.stages {

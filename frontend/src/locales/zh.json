@@ -859,6 +859,11 @@
       "tip": "在台词之间的停顿处自动加入轻柔自然的呼吸声",
       "label": "语句之间插入呼吸声",
       "hint": "在停顿处加入自然轻柔的呼吸声，让语音更生动"
+    },
+    "autoShorten": {
+      "tip": "若配音后的句子需要超过渲染所用上限的加速（动态语速下最多 ×4），翻译模型会将其改短一次，并只为该句重新配音",
+      "label": "句子放不下时缩短译文",
+      "hint": "改短放不进时段的句子的译文并重新配音"
     }
   },
   "manual": {
@@ -1028,6 +1033,7 @@
       "align": "按语音对齐",
       "download": "下载模型",
       "voices_pack": "下载声音",
+      "shorten": "按时段缩短",
       "separate": "分离人声与背景",
       "detect_text": "识别画面文字"
     },
@@ -1040,6 +1046,54 @@
     "busy": "项目忙碌中：正在进行{{kind}}",
     "waitingFor": "正在等待此项目的{{kind}}完成",
     "cancelledKind": "{{kind}}：已取消"
+  },
+  "fit": {
+    "fits": "放得下",
+    "tight": "偏紧",
+    "impossible": "放不下",
+    "renderedOver": "未放下 ×{{x}}",
+    "renderedTip": "配音 {{raw}} 秒，时段 {{slot}} 秒：需加速 ×{{needed}}；自然上限 ×{{cap}}，渲染最多加速 ×{{max}}",
+    "predictTip": "约 {{est}} 秒语音，时段 {{slot}} 秒（×{{ratio}}；自然上限 ×{{cap}}，渲染最多加速 ×{{max}}）。{{pace}}",
+    "paceVoice": "语速每秒 {{cps}} 个字符，按此声音实测",
+    "paceLang": "语速每秒 {{cps}} 个字符，为该语言的常见语速（配音 3 句后按声音实测）",
+    "overCount_other": "{{count}} 句放不下",
+    "onlyOver": "放不下的",
+    "onlyOverTip": "只显示放不进各自时段的句子",
+    "shortenAll": "缩短所有放不下的",
+    "shortenAllTip": "在保留原意的前提下，改短所有放不进时段的句子的译文",
+    "shortenTip": "按时段缩短：保留原意、人名和术语，改短译文",
+    "shortening": "正在按时段缩短译文",
+    "shortened_other": "已缩短 {{count}} 句",
+    "rejected_other": "{{count}} 个回答未采纳（文字不对、没有变短或照抄原文）",
+    "failed_other": "翻译模型未回答 {{count}} 句：{{error}}"
+  },
+  "takes": {
+    "toggle_other": "本句的配音版本：{{count}}",
+    "loading": "正在加载配音版本…",
+    "loadFailed": "配音版本未能加载：{{error}}",
+    "empty": "还没有配音版本——请先为本句配音",
+    "listen": "试听",
+    "dur": "{{sec}} 秒",
+    "qc": "ASR 吻合 {{pct}}%",
+    "source": {
+      "synth": "配音",
+      "multitake": "多次生成",
+      "qc": "质检重配",
+      "shorten": "已缩短"
+    },
+    "active": "当前",
+    "pinned": "已固定",
+    "pin": "固定",
+    "unpin": "取消固定",
+    "pinTip": "固定此版本：在句子文本改变前，重新生成和质检都不会替换它",
+    "unpinTip": "取消固定：下次渲染可能重新为本句配音",
+    "use": "使用",
+    "useTip": "让此版本进入混音（不重新配音，只重建混音）",
+    "unpinFirst": "已固定另一个版本：取消固定后才能选择此版本",
+    "rollback": "回退",
+    "rollbackTip": "回到此版本及其文本（撤销可恢复当前版本）",
+    "selecting": "正在切换配音版本并重建混音",
+    "unpinnedByEdit_other": "{{count}} 句的文本已更改——已取消其固定版本"
   },
   "url": {
     "placeholder": "粘贴视频链接",

@@ -22,6 +22,7 @@ mod dll_imports;
 mod downloads;
 mod dub_timing;
 mod endpoints;
+mod fitplan;
 mod guard;
 mod llm_provider;
 mod openrouter;
@@ -43,12 +44,14 @@ mod record;
 mod render;
 mod secrets_api;
 mod setup;
+mod shorten;
 mod spa;
 mod studio_settings;
 mod subalign;
 mod subimport;
 mod subs_text;
 mod subtracks;
+mod takes;
 mod translate;
 mod tts_trim;
 mod url_import;
@@ -497,6 +500,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{pid}/dub-audio", post(dub_audio_project))
         .route("/projects/{pid}/separate", post(atomic::separate))
         .route("/projects/{pid}/detect-text", post(atomic::detect_text))
+        .route("/projects/{pid}/shorten", post(shorten::shorten_project))
+        .route("/projects/{pid}/segments/{id}/takes", get(takes::list))
+        .route("/projects/{pid}/segments/{id}/takes/{n}/audio", get(takes::audio))
         // /original?t= отдаёт ОДИН PNG-кадр оригинала (порт app.py.original -> source_frame),
         // фронт (ComparePane) вставляет его как <img src>. Range-раздача сырого видео — /dub.
         .route("/projects/{pid}/original", get(endpoints::original_frame))
@@ -1655,12 +1661,22 @@ async fn list_projects(State(st): State<AppState>) -> Response {
 // ─── GET /projects/{pid} ────────────────────────────────────────────────────
 
 async fn get_project(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> Response {
+    let dir = match st.proj_dir(&pid) {
+        Ok(d) => d,
+        Err(resp) => return resp,
+    };
     match st.load_project(&pid) {
-        Ok(p) => match p.to_json() {
-            Ok(s) => ([("content-type", "application/json")], s).into_response(),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        },
+        Ok(p) => project_response(&st, &dir, &p),
         Err(resp) => resp,
+    }
+}
+
+/// Проект в ответе ручки: с вычисленными у реплик прогнозом укладки (`fit`) и сводкой дублей (`takes`).
+pub(crate) fn project_response(st: &AppState, dir: &Path, proj: &Project) -> Response {
+    let rules = fitplan::rules(&st.models_root, st.opts.max_stretch as f64);
+    match fitplan::decorate(dir, proj, &rules) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }
 
@@ -1834,32 +1850,66 @@ async fn patch_project(
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    if let Err((code, msg)) = patch::apply(&mut proj, &edit) {
-        let status = StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST);
-        return (status, msg).into_response();
+    let refused = |(code, msg): (u16, String)| (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg).into_response();
+    // Правки дублей знают историю фразы на диске: take_select берёт из неё текст и ключ дубля.
+    let take_op = edit.get("op").and_then(Value::as_str).is_some_and(takes::is_take_op);
+    let edit = if take_op {
+        match takes::resolve(&dir, &proj, &edit) {
+            Ok(e) => e,
+            Err(r) => return refused(r),
+        }
+    } else {
+        edit
+    };
+    if let Err(r) = patch::apply(&mut proj, &edit) {
+        return refused(r);
     }
     if let Err(e) = save_project_atomic(&dir, &proj) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
-    match proj.to_json() {
-        Ok(s) => ([("content-type", "application/json")], s).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    if take_op {
+        if let Err(e) = takes::commit(&dir, &proj, &edit) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+        }
     }
+    // Новый текст реплики снимает закрепление дубля с прежним текстом.
+    if let (Some(id), Some(_)) = (edit.get("id").and_then(Value::as_str), edit.get("tgt_text").or(edit.get("take_text"))) {
+        let seg = proj.segments.iter().find(|s| s.id == id);
+        if let (Some(seg), Some(sid)) = (seg, render::seg_file_id(id)) {
+            if let Err(e) = takes::unpin_if_stale(&dir, &sid, &seg.tgt_text) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+            }
+        }
+    }
+    project_response(&st, &dir, &proj)
 }
 
 // ─── POST /projects/{pid}/render ────────────────────────────────────────────
 
-/// Хвост рендера/озвучки: сбросить dirty у сегментов, чьи правки запечены (при regen), и перенести ключи
-/// синтеза из seg_ckpt.json в Segment.ckpt. project.json перечитывается с диска (а не пишется
-/// захваченный proj), чтобы не затереть правки, пришедшие во время джобы.
-fn bake_render_state(proj: &Project, proj_path: &Path, dir_for_job: &Path, regen: bool) -> Result<(), String> {
-    let baked: std::collections::HashMap<&str, &str> =
-        proj.segments.iter().map(|s| (s.id.as_str(), s.tgt_text.as_str())).collect();
+/// Хвост рендера/озвучки: сбросить dirty у сегментов, чьи правки запечены, и перенести ключи синтеза из
+/// seg_ckpt.json в Segment.ckpt. Запечены все правки при regen и реплики, переписанные циклом сокращения
+/// (`shortened` — проект после него): второй проход озвучивает их и без regen. project.json перечитывается
+/// с диска (а не пишется захваченный proj), чтобы не затереть правки, пришедшие во время джобы.
+fn bake_render_state(
+    start: &Project,
+    shortened: Option<&Project>,
+    proj_path: &Path,
+    dir_for_job: &Path,
+    regen: bool,
+) -> Result<(), String> {
+    fn texts(p: &Project) -> HashMap<&str, &str> {
+        p.segments.iter().map(|s| (s.id.as_str(), s.tgt_text.as_str())).collect()
+    }
+    let before = texts(start);
+    let after = shortened.map(texts);
+    let baked = after.as_ref().unwrap_or(&before);
     let ckpts = render::SegCkpts::load(dir_for_job)?;
     let t2 = std::fs::read_to_string(proj_path).map_err(|e| format!("чтение {}: {e}", proj_path.display()))?;
     let mut cur = Project::from_json(&t2).map_err(|e| format!("разбор {}: {e}", proj_path.display()))?;
     for s in &mut cur.segments {
-        if regen && baked.get(s.id.as_str()).copied() == Some(s.tgt_text.as_str()) {
+        let id = s.id.as_str();
+        let voiced = regen || baked.get(id) != before.get(id);
+        if voiced && baked.get(id).copied() == Some(s.tgt_text.as_str()) {
             s.dirty = false;
         }
         if let Some(sid) = render::seg_file_id(&s.id) {
@@ -1871,6 +1921,55 @@ fn bake_render_state(proj: &Project, proj_path: &Path, dir_for_job: &Path, regen
         }
     }
     save_project_atomic(dir_for_job, &cur)
+}
+
+#[cfg(test)]
+mod bake_tests {
+    use super::*;
+
+    fn seg(id: &str, tgt: &str) -> dub_core::Segment {
+        let mut s: dub_core::Segment = serde_json::from_value(json!({ "id": id, "start": 0.0, "end": 1.0, "src_text": "x", "tgt_text": tgt })).unwrap();
+        s.dirty = false;
+        s
+    }
+
+    fn load(d: &Path) -> Project {
+        Project::from_json(&std::fs::read_to_string(d.join("project.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn lines_the_render_loop_shortened_are_baked_without_regen() {
+        let d = std::env::temp_dir().join(format!("dub_bake_{}_{}", std::process::id(), uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&d).unwrap();
+        let start = Project {
+            segments: vec![seg("s1", "Нам прямо сейчас уже пора идти"), seg("s2", "Да"), seg("s3", "Эта фраза тоже длинная")],
+            ..Default::default()
+        };
+        let mut after = start.clone();
+        for (i, to) in [(0, "Нам пора"), (2, "Фраза длинная")] {
+            let c = shorten::Change { id: after.segments[i].id.clone(), from: after.segments[i].tgt_text.clone(), to: to.into() };
+            shorten::mark(&mut after.segments[i], &c);
+        }
+        let mut disk = after.clone();
+        disk.segments[1].dirty = true;
+        disk.segments[2].tgt_text = "Правка во время рендера".into();
+        save_project_atomic(&d, &disk).unwrap();
+
+        bake_render_state(&start, Some(&after), &d.join("project.json"), &d, false).unwrap();
+        let back = load(&d);
+        assert!(!back.segments[0].dirty, "the second pass voiced the shortened line");
+        assert_eq!(back.segments[0].tgt_text, "Нам пора");
+        assert!(back.segments[1].dirty, "an edit made during the job is not in this render");
+        assert!(back.segments[2].dirty, "the line was edited after it was shortened");
+
+        bake_render_state(&start, None, &d.join("project.json"), &d, false).unwrap();
+        assert!(load(&d).segments[1].dirty, "without regen and without shortening nothing is baked");
+
+        bake_render_state(&after, None, &d.join("project.json"), &d, true).unwrap();
+        let back = load(&d);
+        assert!(!back.segments[1].dirty && back.segments[2].dirty);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }
 
 async fn render_project(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> Response {
@@ -1906,6 +2005,8 @@ fn render_paths(st: &AppState, dir: &Path, input: PathBuf) -> render::RenderPath
         asr: models::resolve_asr_choice(&st.repo_root, &st.models_root, &sel),
         ref_secs: models::higgs_ref_secs(&st.models_root),
         models_root: st.models_root.clone(),
+        llama_bin: st.llama_bin.clone(),
+        mt_model: models::resolve_mt(&st.models_root, &sel).0,
     }
 }
 
@@ -1941,14 +2042,14 @@ async fn render_enqueue(st: &AppState, pid: &str) -> Result<String, Box<Response
         let regen = proj.segments.iter().any(|s| s.dirty);
         // Трекинг затрат OpenRouter в ДОЛЛАРАХ: total_usage до/после (None -> облако не использовалось).
         let cost_before = openrouter::total_usage_usd(&paths.models_root);
-        render::run(&proj, &paths, regen, &cb)?;
+        let done = render::run(&proj, &paths, regen, &cb)?;
         if let (Some(b), Some(a)) = (cost_before, openrouter::total_usage_usd(&paths.models_root)) {
             let spent = (a - b).max(0.0);
             if spent > 0.0 {
                 cb(json!({ "stage": "cost", "msg": format!("OpenRouter: потрачено ${spent:.4} за прогон (всего использовано ${a:.2})") }));
             }
         }
-        bake_render_state(&proj, &proj_path, &dir_for_job, regen)?;
+        bake_render_state(&proj, done.project.as_ref(), &proj_path, &dir_for_job, regen)?;
         Ok(json!({ "output": out_for_result.to_string_lossy() }))
     });
     st.jobs
@@ -2113,8 +2214,8 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
         jobs::check_cancelled()?;
         let cb = |ev: Value| progress(ev);
         let regen = p.segments.iter().any(|s| s.dirty);
-        render::run(&p, &paths, regen, &cb)?;
-        bake_render_state(&p, &pj, &dst_for_job, regen)?;
+        let done = render::run(&p, &paths, regen, &cb)?;
+        bake_render_state(&p, done.project.as_ref(), &pj, &dst_for_job, regen)?;
         Ok(json!({ "output": out_res.to_string_lossy(), "project_id": new_pid_res }))
     });
     st.jobs
@@ -2270,10 +2371,10 @@ async fn dub_audio_enqueue(st: &AppState, pid: &str) -> Result<String, Box<Respo
         let text = std::fs::read_to_string(&proj_path).map_err(|e| e.to_string())?;
         let proj = Project::from_json(&text).map_err(|e| e.to_string())?;
         let regen = proj.segments.iter().any(|s| s.dirty);
-        let out = render::dub_audio(&proj, &paths, regen, &cb)?;
+        let (out, shortened) = render::dub_audio(&proj, &paths, regen, &cb)?;
         // Правки запечены в озвучку (seg_XXX.wav) -> сбросить dirty, как делает render_project. Иначе
         // последующий Экспорт (render видит dirty) РЕ-РОЛЛИТ уже одобренный дубляж — регресс «скидывается».
-        bake_render_state(&proj, &proj_path, &dir_for_job, regen)?;
+        bake_render_state(&proj, shortened.as_ref(), &proj_path, &dir_for_job, regen)?;
         Ok(json!({ "audio": out.to_string_lossy() }))
     });
     st.jobs
@@ -2648,6 +2749,7 @@ async fn resume_project(State(st): State<AppState>, AxPath(pid): AxPath<String>)
         jobs::JobKind::Remix => endpoints::remix_enqueue(&st, &pid, &rec.args).await,
         jobs::JobKind::ExportLang => export_lang_enqueue(&st, &pid, &rec.args).await,
         jobs::JobKind::Align => align_enqueue(&st, &pid).await,
+        jobs::JobKind::Shorten => shorten::shorten_enqueue(&st, &pid, &rec.args).await,
         other => {
             return (StatusCode::CONFLICT, format!("джоба {} не продолжается", other.as_str())).into_response();
         }

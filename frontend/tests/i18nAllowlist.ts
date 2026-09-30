@@ -27,15 +27,18 @@ export const SAME_AS_EN: Record<"*" | "ru" | "zh" | "es" | "pt" | "fr", string[]
     "settings.auto", "settings.sec", "common.error", "setup.error", "batch.error", "transcribe.sec",
     "comp.audioLabel", "comp.subsOriginal", "trStyle.normal", "casting.contentAuto",
     "units.gb", "units.mb", "units.kb", "units.b", "units.watt", "cloud.beta", "proxy.title", "hwPreset.ram", "secrets.proxyTitle",
+    "takes.dur",
   ],
   pt: [
     "voice.g_female", "voice.g_male", "remix.title", "jobs.kind.remix", "compare.original", "multilang.openEditor",
     "settings.auto", "settings.sec", "transcribe.sec", "comp.subsOriginal", "trStyle.normal", "casting.contentAuto",
     "units.gb", "units.mb", "units.kb", "units.b", "units.watt", "cloud.beta", "proxy.title", "hwPreset.ram", "secrets.proxyTitle",
+    "takes.dur",
   ],
   fr: [
     "editor.style", "voice.recordStop", "voice.g_female", "remix.title", "jobs.kind.remix", "compare.original", "settings.vision",
     "settings.auto", "settings.sec", "help.sectionsTitle", "common.pause", "comp.audioLabel", "comp.subsOriginal",
     "trStyle.normal", "casting.contentAuto", "units.watt", "proxy.title", "proxy.services", "secrets.proxyTitle", "bridge.agent",
+    "takes.dur",
   ],
 };

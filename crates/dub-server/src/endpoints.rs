@@ -316,17 +316,15 @@ pub async fn put_project(
         Ok(d) => d,
         Err(resp) => return resp,
     };
-    let proj: Project = match serde_json::from_value(body) {
+    let mut proj: Project = match serde_json::from_value(body) {
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, format!("bad project: {e}")).into_response(),
     };
+    crate::fitplan::strip_computed(&mut proj);
     if let Err(e) = save_project_atomic(&dir, &proj) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
-    match proj.to_json() {
-        Ok(s) => ([("content-type", "application/json")], s).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    crate::project_response(&st, &dir, &proj)
 }
 
 // ─── GET /projects/{pid}/waveform?n=600 ─────────────────────────────────────

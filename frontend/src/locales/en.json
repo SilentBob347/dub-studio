@@ -870,6 +870,11 @@
       "tip": "Automatically inserts quiet, natural breaths in the pauses between lines",
       "label": "Breaths between phrases",
       "hint": "inserts natural soft breaths in pauses to make speech livelier"
+    },
+    "autoShorten": {
+      "tip": "If a voiced line needs more speed-up than the render applies (up to ×4 with the dynamic speech rate), the translation model rewrites it shorter once and only that line is voiced again",
+      "label": "Shorten lines that don't fit",
+      "hint": "rewrite the translation of lines that don't fit their slot and voice them again"
     }
   },
   "manual": {
@@ -1040,6 +1045,7 @@
       "align": "Align to speech",
       "download": "Model download",
       "voices_pack": "Voice download",
+      "shorten": "Shortening to the slot",
       "separate": "Voice and background separation",
       "detect_text": "On-screen text reading"
     },
@@ -1052,6 +1058,60 @@
     "busy": "The project is busy: {{kind}} is in progress",
     "waitingFor": "Waiting for {{kind}} on this project to finish",
     "cancelledKind": "{{kind}}: cancelled"
+  },
+  "fit": {
+    "fits": "fits",
+    "tight": "tight",
+    "impossible": "won't fit",
+    "renderedOver": "didn't fit ×{{x}}",
+    "renderedTip": "Voiced clip {{raw}} s for a {{slot}} s slot: needs ×{{needed}} speed-up; natural up to ×{{cap}}, the render speeds up to ×{{max}}",
+    "predictTip": "About {{est}} s of speech for a {{slot}} s slot (×{{ratio}}; natural up to ×{{cap}}, the render speeds up to ×{{max}}). {{pace}}",
+    "paceVoice": "Pace {{cps}} characters per second, measured on this voice",
+    "paceLang": "Pace {{cps}} characters per second, usual for the language (measured on the voice after 3 voiced lines)",
+    "overCount_one": "{{count}} line doesn't fit",
+    "overCount_other": "{{count}} lines don't fit",
+    "onlyOver": "Don't fit",
+    "onlyOverTip": "Show only the lines that don't fit their slot",
+    "shortenAll": "Shorten all that don't fit",
+    "shortenAllTip": "Rewrite shorter the translation of every line that doesn't fit its slot, keeping the meaning",
+    "shortenTip": "Shorten to the slot: rewrite the translation shorter, keeping the meaning, names and terms",
+    "shortening": "Shortening the translation to fit the slots",
+    "shortened_one": "Shortened {{count}} line",
+    "shortened_other": "Shortened {{count}} lines",
+    "rejected_one": "{{count}} answer rejected (other script, not shorter or a copy of the source)",
+    "rejected_other": "{{count}} answers rejected (other script, not shorter or a copy of the source)",
+    "failed_one": "The translation model did not answer for {{count}} line: {{error}}",
+    "failed_other": "The translation model did not answer for {{count}} lines: {{error}}"
+  },
+  "takes": {
+    "toggle_one": "Takes of the line: {{count}}",
+    "toggle_other": "Takes of the line: {{count}}",
+    "loading": "Loading takes…",
+    "loadFailed": "Takes not loaded: {{error}}",
+    "empty": "No takes yet — voice the line first",
+    "listen": "Listen",
+    "dur": "{{sec}} s",
+    "qc": "ASR match {{pct}}%",
+    "source": {
+      "synth": "voiced",
+      "multitake": "multi-take",
+      "qc": "QC re-voice",
+      "shorten": "shortened"
+    },
+    "active": "active",
+    "pinned": "pinned",
+    "pin": "Pin",
+    "unpin": "Unpin",
+    "pinTip": "Pin this take: regeneration and QC won't replace it until the line's text changes",
+    "unpinTip": "Unpin: the next render may voice the line again",
+    "use": "Use",
+    "useTip": "Make this take the one in the mix (no re-voicing, only the mix is rebuilt)",
+    "unpinFirst": "Another take is pinned: unpin it to choose this one",
+    "rollback": "Roll back",
+    "rollbackTip": "Return to this take and its text (undo brings the current one back)",
+    "selecting": "Switching the take and rebuilding the mix",
+    "unpinnedByEdit_one": "Text changed in {{count}} line — its pinned take is unpinned",
+    "unpinnedByEdit_other": "Text changed in {{count}} lines — their pinned takes are unpinned"
   },
   "url": {
     "placeholder": "Paste a video link",

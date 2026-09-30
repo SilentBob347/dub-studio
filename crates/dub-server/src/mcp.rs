@@ -204,6 +204,11 @@ fn compact_segment(segment: &Value) -> Value {
     if !segment["voice"].is_null() {
         row["voice"] = segment["voice"].clone();
     }
+    for computed in ["fit", "takes", "shortened"] {
+        if !segment[computed].is_null() {
+            row[computed] = segment[computed].clone();
+        }
+    }
     row
 }
 
@@ -588,7 +593,7 @@ async fn wait_for(args: &Value) -> Result<Value, String> {
             Some(job) => {
                 let state = fetch(&format!("/jobs/{}", segment(job)))
                     .await
-                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool answering done false returned, or the fetch.id of project_create_from_url (a models download is waited for with until download). Wait for other work with until."))?;
+                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack, segment_shorten or a one-call tool answering done false returned, or the fetch.id of project_create_from_url (a models download is waited for with until download). Wait for other work with until."))?;
                 if state.get("status").and_then(Value::as_str).is_none() {
                     return Err(format!("The job {job} has no status: {state}"));
                 }
@@ -633,6 +638,7 @@ fn annotations(name: &str) -> Value {
     const CHANGES: &[&str] = &[
         "import", "delete", "create", "update", "cancel", "select", "download", "apply", "add", "set", "assign", "analyze", "render", "remix", "retranslate",
         "align", "patch", "put", "rename", "save", "hide", "keep", "reorder", "regen", "enable", "resume", "export", "open", "reveal",
+        "shorten", "pin",
     ];
     // reads whose names the rules above miss
     const READ_NAMES: &[&str] = &["studio_wait", "proxy_test", "openrouter_verify", "project_transcript", "ui_screenshot", "ui_read_page", "ui_console", "editor_state", "url_probe"];
@@ -641,6 +647,7 @@ fn annotations(name: &str) -> Value {
         "project_put", "project_analyze", "project_retranslate", "project_remix", "project_align", "segment_update", "segments_reorder", "segments_regen_all",
         "project_mode_set", "translation_target_set", "translation_style_set", "rewrite_set", "voice_set", "caption_style_set", "casting_update",
         "voice_slots_assign", "openrouter_set_key", "segments_merge", "editor_segment_update", "editor_segments_merge", "editor_mode", "editor_style",
+        "segment_shorten", "take_select",
     ];
     let changes = CHANGES.iter().any(|verb| name.split('_').any(|word| word == *verb));
     let read_only = READ_NAMES.contains(&name) || !changes && READS.iter().any(|part| name.ends_with(part) || name.contains(&format!("{part}_")));
@@ -811,6 +818,8 @@ const PATCH_OPS: &[(&str, &str)] = &[
     ("merge_segments", "segments_merge"),
     ("regen", "segment_regen"),
     ("regen_all", "segments_regen_all"),
+    ("take_select", "take_select"),
+    ("take_pin", "take_pin"),
     ("mode", "project_mode_set"),
     ("dub", "audio_output_set"),
     ("subs_content", "subtitles_content_set"),
@@ -902,8 +911,8 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "studio_wait",
-                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack or a one-call tool still at work returned it, or the fetch.id of project_create_from_url), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, download (models and downloads by link), voices_pack, separate, detect_text - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
-                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "download", "voices_pack", "separate", "detect_text"] }, "seconds": { "type": "integer" } }), &[]),
+                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack, segment_shorten or a one-call tool still at work returned it, or the fetch.id of project_create_from_url), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, shorten, download (models and downloads by link), voices_pack, separate, detect_text - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
+                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "shorten", "download", "voices_pack", "separate", "detect_text"] }, "seconds": { "type": "integer" } }), &[]),
                 call: |_| composite("wait"),
             },
             Tool {
@@ -982,7 +991,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "settings_get",
-                description: "The studio's settings and the values each takes: the model variant of each stage (tts, mt, sep, asr, asr_engine, whisper_model, whisper_compute, whisper_device), where each local stage runs (local_backend, sep_backend, diar_backend, asr_backend: auto, gpu, cpu), the voicing switches (qc_asr, qc_duration, multitake, breath_on, speech_rate_on, emo_ref_on, duck_on), the memory limits (llama_ubatch, higgs_ref_secs), who translates and who reads frames (llm_provider, vision_provider: local = the studio's Gemma, server = a local OpenAI-compatible server at srv_url with the models srv_llm and srv_vision, openrouter = the cloud with or_llm and or_vision), the other cloud stages through OpenRouter (or_tts_on, or_tts_model, or_tts_voice, or_tts_autocast, or_asr_on, or_asr, or_concurrency), whether the proxy is on (proxy_on; proxy_settings_set sets its address) and the stage benchmark (bench). The OpenRouter key is never shown: or_key_set says whether there is one.",
+                description: "The studio's settings and the values each takes: the model variant of each stage (tts, mt, sep, asr, asr_engine, whisper_model, whisper_compute, whisper_device), where each local stage runs (local_backend, sep_backend, diar_backend, asr_backend: auto, gpu, cpu), the voicing switches (qc_asr, qc_duration, multitake, breath_on, speech_rate_on, emo_ref_on, duck_on, auto_shorten: rewrite the translation of lines that do not fit their slot and voice them again during a render), the memory limits (llama_ubatch, higgs_ref_secs), who translates and who reads frames (llm_provider, vision_provider: local = the studio's Gemma, server = a local OpenAI-compatible server at srv_url with the models srv_llm and srv_vision, openrouter = the cloud with or_llm and or_vision), the other cloud stages through OpenRouter (or_tts_on, or_tts_model, or_tts_voice, or_tts_autocast, or_asr_on, or_asr, or_concurrency), whether the proxy is on (proxy_on; proxy_settings_set sets its address) and the stage benchmark (bench). The OpenRouter key is never shown: or_key_set says whether there is one.",
                 schema: nothing,
                 call: |_| get("/engine/capabilities".into()),
             },
@@ -1255,7 +1264,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_get",
-                description: "A project: mode, target language, subtitles, audio and voices, subtitle style, titles and blur boxes (with the idx their tools take), how many lines there are and how many are changed (dirty, voiced again at the next project_dub_audio or project_render), and its lines - id, start, end, speaker, the recognised text (src_text), the translation (tgt_text), dirty, hidden, keep_original. from and to (seconds) or ids narrow the lines. response_format detailed returns the whole project exactly as stored, word timings included: take it from there for project_put.",
+                description: "A project: mode, target language, subtitles, audio and voices, subtitle style, titles and blur boxes (with the idx their tools take), how many lines there are and how many are changed (dirty, voiced again at the next project_dub_audio or project_render), and its lines - id, start, end, speaker, the recognised text (src_text), the translation (tgt_text), dirty, hidden, keep_original. A dubbed or voiced-over project's voiced lines also carry fit - whether the translation fits its time slot: est (seconds at the voice's pace), slot, ratio, verdict (fits; tight: the render speeds it up within eff_cap, up to 4x with speech_rate_on, else the natural cap; impossible), calibrated (the pace measured from this voice's clips, else the language's), over, and rendered (needed, cap, eff_cap, raw, dur; over when needed > eff_cap) when the last render voiced this very text - takes (count, active, pinned) and shortened (from, to). from and to (seconds) or ids narrow the lines. response_format detailed returns the whole project as stored, word timings included, with fit and takes computed: take it from there for project_put, which drops them.",
                 schema: || object(json!({ "pid": pid(), "response_format": { "type": "string", "enum": ["concise", "detailed"] }, "from": { "type": "number" }, "to": { "type": "number" }, "ids": ids("line ids") }), &["pid"]),
                 call: |args| get(project_path(args, "")?),
             },
@@ -1538,6 +1547,39 @@ fn tools() -> &'static [Tool] {
                 description: "Join lines that follow one another in the list into one (ids): the first keeps its id, speaker and voice, it runs from the earliest start to the latest end, the texts follow each other. The lines' own subtitle overrides become one: the place and style of the first that has one, and, when any line has a subtitle text of its own, the parts' texts in order. It is dirty.",
                 schema: || object(json!({ "pid": pid(), "ids": ids("line ids, neighbours in the list"), "response_format": detail() }), &["pid", "ids"]),
                 call: |args| edit(args, "merge_segments"),
+            },
+            Tool {
+                name: "segment_shorten",
+                description: "Rewrite the translation of lines shorter so they fit their time slot, through the translation model: the source, the current translation and two neighbouring lines each side go with a character limit from the slot and the voice's pace; an answer in another script, not shorter, or echoing the source is refused. ids names the lines; all_over takes every line whose fit.over is true (project_get shows fit per line: est, slot, ratio, verdict fits/tight/impossible, calibrated, and rendered with needed/eff_cap from the last render). A job: studio_wait with its job_id; its result lists shortened (from, to), rejected with the reason and unpinned lines. The new text is dirty: project_dub_audio voices it; the previous take stays in takes_list.",
+                schema: || object(json!({ "pid": pid(), "ids": ids("line ids to shorten"), "all_over": { "type": "boolean", "description": "every line that does not fit its slot" } }), &["pid"]),
+                call: |args| {
+                    let path = project_path(args, "/shorten")?;
+                    post(path, body_without(args, &["pid"]))
+                },
+            },
+            Tool {
+                name: "takes_list",
+                description: "The takes of a line - the last five voicings kept by the studio (multi-take alternatives, regenerations, QC re-synthesis, shortened versions): n, the text each voices (text_matches: the line's current text), duration, QC similarity, source, voice, reference, synthesis parameters and the file; active is the take the mix plays, pinned the one a render never replaces.",
+                schema: || object(json!({ "pid": pid(), "id": { "type": "string", "description": "line id" } }), &["pid", "id"]),
+                call: |args| get(project_path(args, &format!("/segments/{}/takes", segment(&text(args, "id")?)))?),
+            },
+            Tool {
+                name: "take_select",
+                description: "Make a take of a line (its n from takes_list) the one the mix plays, without voicing again: a take of other text brings that text back into the line. The next project_dub_audio or project_render only mixes again. Refused (409) while another take of the line is pinned: take_pin with pinned false first.",
+                schema: || object(json!({ "pid": pid(), "id": { "type": "string" }, "take": { "type": "integer", "description": "n of takes_list" }, "response_format": detail() }), &["pid", "id", "take"]),
+                call: |args| {
+                    text(args, "id")?;
+                    edit(args, "take_select")
+                },
+            },
+            Tool {
+                name: "take_pin",
+                description: "Pin the active take of a line (pinned true) so no render, regeneration or QC replaces it, or unpin it (false). Changing the line's text unpins it.",
+                schema: || object(json!({ "pid": pid(), "id": { "type": "string" }, "pinned": { "type": "boolean" }, "response_format": detail() }), &["pid", "id", "pinned"]),
+                call: |args| {
+                    text(args, "id")?;
+                    edit(args, "take_pin")
+                },
             },
             // ---------------------------------------------------------------- what the project makes
             Tool {
@@ -2437,6 +2479,7 @@ mod tests {
         ("GET", "/projects/{pid}/casting/voice", "audio for the page's player"),
         ("GET", "/projects/{pid}/output", "the video for the page's player: project_files names the file"),
         ("GET", "/projects/{pid}/dub", "the audio for the page's player: project_files names the file"),
+        ("GET", "/projects/{pid}/segments/{id}/takes/{n}/audio", "a take for the page's player: takes_list names its file"),
         ("POST", "/projects/{pid}/save-text", "opens Explorer: project_export_text writes the same file without it"),
         ("GET", "/jobs/{job_id}/events", "the page's progress stream: job_get and studio_wait"),
         ("POST", "/url/probe", "the page's probe with cookies.txt as its content (a browser does not know file paths): url_probe passes the path"),

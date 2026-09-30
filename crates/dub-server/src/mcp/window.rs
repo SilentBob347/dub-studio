@@ -38,7 +38,7 @@ pub(crate) const PROJECT_CHANGED: &str = "project_changed";
 const NO_WINDOW: &str = "The studio's window is not open, so there is nothing on screen to work in. Open Dub Studio (or its address in a browser) and call the tool again; every tool that is not ui_* or editor_* works without the window.";
 
 /// Kinds of work a POST starts as a job, by the last part of its route.
-const JOB_ROUTES: &[&str] = &["analyze", "render", "dub-audio", "export-lang", "retranslate", "remix", "resume", "align", "separate", "detect-text"];
+const JOB_ROUTES: &[&str] = &["analyze", "render", "dub-audio", "export-lang", "retranslate", "remix", "resume", "align", "separate", "detect-text", "shorten"];
 
 struct Bridge {
     commands: tokio::sync::broadcast::Sender<String>,

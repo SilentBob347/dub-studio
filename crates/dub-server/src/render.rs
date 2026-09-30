@@ -69,6 +69,8 @@ pub struct RenderPaths {
     pub bench: bool,           // пер-стадийный бенчмарк (галка настроек, ВЫКЛ по умолчанию)
     pub ref_secs: f64,         // длина реф-клипа клона голоса, сек (настройка «Экономия RAM», дефолт 12.0)
     pub models_root: PathBuf,  // каталог моделей (active.json) — читаем настройки облачного TTS OpenRouter
+    pub llama_bin: PathBuf,    // llama-server и GGUF своей Gemma — LLM сокращения перевода не влезших фраз
+    pub mt_model: PathBuf,
 }
 
 pub type Progress<'a> = dyn Fn(Value) + Send + Sync + 'a;
@@ -116,7 +118,7 @@ impl SegCkpts {
         self.map.get(sid).map(String::as_str)
     }
 
-    fn set(&mut self, sid: &str, key: &str) -> Result<(), String> {
+    pub(crate) fn set(&mut self, sid: &str, key: &str) -> Result<(), String> {
         if self.get(sid) == Some(key) {
             return Ok(());
         }
@@ -181,6 +183,8 @@ fn ref_tag(p: &Path) -> String {
 #[allow(dead_code)]
 pub struct RenderResult {
     pub output: PathBuf,
+    /// Проект с репликами, сокращёнными циклом подгонки (уже записан в project.json); None — не сокращали.
+    pub project: Option<Project>,
 }
 
 /// Отрендерить Project -> output.mp4. `regen_dub` — ре-синтез dirty-сегментов дубляжа (иначе кэш).
@@ -223,13 +227,17 @@ pub fn run(
     // ── АУДИО ──────────────────────────────────────────────────────────────────
     // Готовим финальную аудио-дорожку new_audio: dub (клон) поверх инструментала, либо оригинал.
     bench.stage("dub_audio");
+    let mut shortened: Option<Project> = None;
     let new_audio: PathBuf = if is_dub {
-        build_dub(proj, paths, total, keep_music, is_voiceover, regen_dub, progress)?
+        let (audio, updated) = build_dub(proj, paths, total, keep_music, is_voiceover, regen_dub, progress)?;
+        shortened = updated;
+        audio
     } else {
         // nodub/transcribe: оставляем оригинальную дорожку — mux возьмёт её из исходного видео.
         emit(progress, "mix", "nodub: оригинальная аудиодорожка");
         paths.input.clone()
     };
+    let proj: &Project = shortened.as_ref().unwrap_or(proj);
 
     // ── АУДИО-РЕЖИМ (вход без видео) ────────────────────────────────────────────
     // Нет видеокадра (vw/vh<=0) -> результат = сведённый дубляж как WAV. Ни бёрна, ни титров, ни mux
@@ -246,7 +254,7 @@ pub fn run(
             }
         }
         emit(progress, "done", &format!("готово (только аудио) -> {}", out_wav.display()));
-        return Ok(RenderResult { output: out_wav });
+        return Ok(RenderResult { output: out_wav, project: shortened });
     }
 
     // ── КАПШЕНЫ + BURN (только если subs.burn) ─────────────────────────────────
@@ -369,7 +377,7 @@ pub fn run(
     discard_mix(&new_audio, wd);
     emit(progress, "done", &format!("готово -> {}", out_path.display()));
     bench.finish(|m| emit(progress, "bench", m));
-    Ok(RenderResult { output: out_path })
+    Ok(RenderResult { output: out_path, project: shortened })
 }
 
 /// Несжатые файлы микса (media::lossless_out), которые после финального кодирования больше не нужны:
@@ -406,20 +414,21 @@ fn lang_display(code: &str) -> String {
 /// (одно кодирование AAC из несжатого микса).
 /// Нужно, чтобы озвучку можно было СЛУШАТЬ в редакторе сразу после анализа, НЕ собирая финальное видео
 /// (само видео на превью не нужно — кадры показывает per-frame preview). Порт _build_dub-ветки без бёрна.
+/// Второе в ответе — проект с репликами, сокращёнными циклом подгонки (None — не сокращали).
 pub fn dub_audio(
     proj: &Project,
     paths: &RenderPaths,
     regen_dub: bool,
     progress: &Progress,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Option<Project>), String> {
     let wd = &paths.work_dir;
     std::fs::create_dir_all(wd).map_err(|e| e.to_string())?;
     let meta = media::probe(&paths.input)?;
     let total = if proj.meta.duration > 0.0 { proj.meta.duration } else { meta.duration };
-    let src: PathBuf = if proj.mode == "dub" || proj.mode == "voiceover" {
+    let (src, shortened): (PathBuf, Option<Project>) = if proj.mode == "dub" || proj.mode == "voiceover" {
         build_dub(proj, paths, total, proj.audio.keep_music, proj.mode == "voiceover", regen_dub, progress)?
     } else {
-        paths.input.clone() // nodub/transcribe -> оригинальная дорожка
+        (paths.input.clone(), None) // nodub/transcribe -> оригинальная дорожка
     };
     crate::jobs::check_cancelled()?;
     let out = wd.join("dub_audio.m4a");
@@ -427,7 +436,7 @@ pub fn dub_audio(
     media::encode_preview_aac(&src, &out)?;
     discard_mix(&src, wd);
     emit(progress, "done", "дуб-аудио готово");
-    Ok(out)
+    Ok((out, shortened))
 }
 
 /// Нижний предел приглушения оригинала в режиме voiceover (закадровый): -40 dB ≈ почти тихо.
@@ -654,6 +663,9 @@ fn hum_range_db(samples: &[f32], sr: i32) -> f64 {
 }
 
 /// Полный аудио-конвейер дубляжа -> путь к new_audio. Порт _build_dub/_regen_dub (TTS+fit+timeline+mix).
+/// С «Сокращать перевод, если фраза не влезла» первый проход, найдя такие фразы, останавливается до
+/// укладки: их перевод переписывается (shorten::render_overflow) и второй проход озвучивает только их,
+/// остальное берёт из кэша. Второе в ответе — проект с сокращёнными репликами.
 fn build_dub(
     proj: &Project,
     paths: &RenderPaths,
@@ -662,7 +674,47 @@ fn build_dub(
     voiceover: bool,
     regen_dub: bool,
     progress: &Progress,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Option<Project>), String> {
+    let mut engine: Option<Arc<AudiocppEngine>> = None;
+    let first = PassCfg { shorten: crate::fitplan::auto_shorten_on(&paths.models_root), kept: Default::default() };
+    let over = match build_dub_pass(proj, paths, total, keep_music, voiceover, regen_dub, &first, &mut engine, progress)? {
+        DubPass::Mixed(audio) => return Ok((audio, None)),
+        DubPass::Overflow(over) => over,
+    };
+    let log = |m: String| emit(progress, "tts", &m);
+    let updated = crate::shorten::render_overflow(proj, paths, &over, &mut engine, &log)?;
+    let second = PassCfg { shorten: false, kept: over.kept };
+    let proj2 = updated.as_ref().unwrap_or(proj);
+    match build_dub_pass(proj2, paths, total, keep_music, voiceover, regen_dub, &second, &mut engine, progress)? {
+        DubPass::Mixed(audio) => Ok((audio, updated)),
+        DubPass::Overflow(_) => Err("второй проход озвучки запросил сокращение, которое в нём выключено".to_string()),
+    }
+}
+
+/// Проход озвучки: `shorten` — остановиться до укладки, если есть не влезшие фразы; `kept` — сегменты,
+/// где синтез уже провалился в этом рендере (стоит оригинал, заново не синтезируются).
+struct PassCfg {
+    shorten: bool,
+    kept: std::collections::HashSet<String>,
+}
+
+enum DubPass {
+    Mixed(PathBuf),
+    Overflow(crate::shorten::Overflow),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_dub_pass(
+    proj: &Project,
+    paths: &RenderPaths,
+    total: f64,
+    keep_music: bool,
+    voiceover: bool,
+    regen_dub: bool,
+    pass: &PassCfg,
+    engine: &mut Option<Arc<AudiocppEngine>>,
+    progress: &Progress,
+) -> Result<DubPass, String> {
     let wd = &paths.work_dir;
     // Сегменты с непустым tgt (как в питоне: только строки с текстом синтезируются). Несём индекс в
     // ПОЛНОМ списке proj.segments — слот next.start считается по индексу i+1 полного списка (порт
@@ -680,11 +732,17 @@ fn build_dub(
         .collect();
     if segs.is_empty() {
         emit(progress, "tts", "нет строк с переводом -> тишина, оригинальная дорожка");
-        return Ok(paths.input.clone());
+        return Ok(DubPass::Mixed(paths.input.clone()));
     }
 
     if media::drop_stale_separation(wd)? {
         emit(progress, "separate", "стемы посчитаны из звука прежнего извлечения — сепарация заново");
+    }
+    let live: std::collections::HashSet<String> =
+        proj.segments.iter().enumerate().map(|(fi, s)| seg_file_id(&s.id).unwrap_or_else(|| format!("i{fi}"))).collect();
+    let gone = crate::takes::drop_orphans(wd, &live)?;
+    if gone > 0 {
+        emit(progress, "tts", &format!("истории дублей удалённых фраз убраны: {gone}"));
     }
     // 1) extract 44.1k stereo.
     emit(progress, "extract_audio", "извлечение аудио (ffmpeg 44.1k stereo)");
@@ -890,8 +948,7 @@ fn build_dub(
         emit(progress, "tts", "TTS через облако (OpenRouter) — локальный Higgs не загружаем");
     }
     // Локальный Higgs грузится при первом сегменте, которому нужен синтез: продолжение, где всё уже
-    // озвучено, не тратит время и VRAM на загрузку модели.
-    let mut engine: Option<Arc<AudiocppEngine>> = None;
+    // озвучено, не тратит время и VRAM на загрузку модели. Движок живёт между проходами (build_dub).
 
     // Автокастинг облачных голосов по полу спикера: мужскому спикеру — мужской голос, женскому — женский,
     // разным спикерам — разные. Пол — F0-замер (как в кастинге), голоса модели — динамически из API, пол
@@ -1020,6 +1077,21 @@ fn build_dub(
         };
         seg_key(s, &voice, &reference, &engine_tag, &opts_tag)
     };
+    // Голос фразы для истории дублей и отчёта укладки.
+    let or_voice = crate::models::openrouter_tts_voice(&paths.models_root);
+    let voice_of = |s: &dub_core::Segment| -> String {
+        let spk = s.speaker.as_deref().unwrap_or("0");
+        let v = if cloud_tts_on {
+            cloud_voice_map.get(spk).cloned().unwrap_or_else(|| or_voice.clone())
+        } else if use_pack {
+            pack_names.get(spk).cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if v.is_empty() || v == crate::voice_slots::CLONE_SLOT { "clone".to_string() } else { v }
+    };
+    let cloud_params = format!("cloud:{}", crate::models::openrouter_model(&paths.models_root, "tts"));
+    let fit_rules = crate::fitplan::rules(&paths.models_root, paths.max_stretch);
     let sid_of = |fi: usize, s: &dub_core::Segment| seg_file_id(&s.id).unwrap_or_else(|| format!("i{fi}"));
     let keys: Vec<String> = segs
         .iter()
@@ -1039,7 +1111,8 @@ fn build_dub(
         let recorded = ckpts.get(&sid).or(s.ckpt.as_deref());
         seg_needs_synth(raw.is_file(), recorded, &keys[idx], regen_dub && s.dirty)
     };
-    let to_synth = (0..segs.len()).filter(|&i| !seg_keep(segs[i].1) && needs(&ckpts, i)).count();
+    let failed_before = |idx: usize| pass.kept.contains(&sid_of(segs[idx].0, segs[idx].1));
+    let to_synth = (0..segs.len()).filter(|&i| !seg_keep(segs[i].1) && needs(&ckpts, i) && !failed_before(i)).count();
     let synthable = segs.iter().filter(|(_, s)| !seg_keep(s)).count();
     emit(progress, "tts", &format!("синтез {to_synth} из {} сегментов", segs.len()));
     if to_synth < synthable {
@@ -1050,16 +1123,22 @@ fn build_dub(
     // сегменты к синтезу гоним в N потоков (настройка or_concurrency) ДО последовательной укладки — она
     // потом просто подхватит уже готовые seg-файлы (network-latency больше не по одному). Провал сегмента ->
     // ключ не записан -> цикл ниже синтезирует его сам (ретрай/фолбэк).
+    let mut batch_new: std::collections::HashSet<usize> = std::collections::HashSet::new();
     if cloud_tts_on {
         let conc = crate::models::openrouter_concurrency(&paths.models_root);
         let mut jobs: Vec<(PathBuf, String, String)> = Vec::new();
         let mut job_segs: Vec<usize> = Vec::new();
         for (idx, &(_, s)) in segs.iter().enumerate() {
-            if seg_keep(s) || !needs(&ckpts, idx) {
+            if seg_keep(s) || !needs(&ckpts, idx) || failed_before(idx) {
                 continue;
             }
             let tgt = s.tgt_text.trim();
             if tgt.is_empty() {
+                continue;
+            }
+            // Закреплённый дубль этого текста или дубль с этим ключом — цикл ниже возьмёт его без синтеза.
+            let sid = sid_of(segs[idx].0, s);
+            if crate::takes::History::load(wd, &sid).is_ok_and(|h| h.covers(&keys[idx], tgt, s.extra.get(REGEN_NONCE))) {
                 continue;
             }
             let raw = wd.join(format!("seg_{}.wav", sid_of(segs[idx].0, s)));
@@ -1074,6 +1153,7 @@ fn build_dub(
             for (&idx, &good) in job_segs.iter().zip(&done) {
                 if good {
                     ckpts.set(&sid_of(segs[idx].0, segs[idx].1), &keys[idx])?;
+                    batch_new.insert(idx);
                     ok += 1;
                 }
             }
@@ -1084,6 +1164,14 @@ fn build_dub(
     // Сегменты, где синтез провалился и стоит оригинальная реплика: их ключ записывается только когда
     // дорожка собрана целиком (как раньше сброс dirty) — прерванный прогон при продолжении их повторит.
     let mut fallback_keys: Vec<(String, String)> = Vec::new();
+    // Отчёт укладки на каждую запись placed (None — оригинальная реплика) и фразы этого прохода, которые
+    // цикл сокращения может переписать: (индекс в placed, id реплики).
+    let mut fit_recs: Vec<Option<crate::dub_timing::FitRecord>> = Vec::with_capacity(segs.len());
+    let mut shorten_cands: Vec<(usize, String)> = Vec::new();
+    // Запись прошлого рендера: текст клипов, озвученных до истории дублей.
+    let prior_timing = crate::dub_timing::DubTiming::load(wd)?;
+    // Дубль истории, озвученный в этом проходе, для каждой записи qc_list.
+    let mut qc_takes: Vec<Option<u32>> = Vec::new();
     for (idx, &(fi, s)) in segs.iter().enumerate() {
         crate::jobs::check_cancelled()?;
         // Кэш-файл сегмента — ПО ЕГО ID, не по индексу fi. Кэш переиспользуется между рендерами (не-dirty
@@ -1103,6 +1191,7 @@ fn build_dub(
             let d = media::duration(&raw)?;
             cursor = at + d;
             placed.push((at, raw, d));
+            fit_recs.push(None);
             continue;
         }
         let tgt = s.tgt_text.trim();
@@ -1110,10 +1199,65 @@ fn build_dub(
         // совпал с записанным. dirty — флаг UI; для проектов без записанных ключей решает он.
         let key = keys[idx].as_str();
         let recorded = ckpts.get(&sid).or(s.ckpt.as_deref()).map(str::to_string);
-        let need_synth = needs(&ckpts, idx);
+        let mut need_synth = needs(&ckpts, idx);
         // Полный провал лестницы на КОРОТКОМ сегменте -> оригинальная реплика вместо артефакта
         // (объявлен на уровне итерации: ниже гейтит и ASR-QC этого сегмента).
         let mut kept_original = false;
+        let mut hist = match crate::takes::History::load(wd, &sid) {
+            Ok(h) => h,
+            Err(e) => {
+                let aside = crate::takes::History::quarantine(wd, &sid)?;
+                emit(progress, "tts", &format!("{e} — история дублей фразы {fi} отложена в {} и начата заново", aside.display()));
+                crate::takes::History::default()
+            }
+        };
+        // Закреплённый дубль рендер не заменяет, пока текст реплики тот, что в нём озвучен.
+        let mut pinned_key: Option<String> = None;
+        if let Some(p) = hist.pinned_for(tgt).cloned() {
+            hist.restore(wd, &sid, p.n, &raw)?;
+            if need_synth {
+                emit(progress, "tts", &format!("фраза {fi}: звучит закреплённый дубль — новая озвучка его не заменяет"));
+            }
+            need_synth = false;
+            pinned_key = Some(p.key);
+        } else if hist.pinned_take().is_some() {
+            hist.pinned = None;
+            hist.save(wd, &sid)?;
+            emit(progress, "tts", &format!("фраза {fi}: закрепление дубля снято — текст реплики изменён"));
+        }
+        // Выбранный из истории дубль звучит, пока текст и нонс те, что в нём, даже если ключ синтеза с тех пор
+        // сменился (голос, референс, опции): выбор пользователя не откатывается молча.
+        if pinned_key.is_none() {
+            if let Some(sel) = hist.selected_for(tgt, s.extra.get(REGEN_NONCE)).cloned() {
+                if sel.key != key {
+                    hist.restore(wd, &sid, sel.n, &raw)?;
+                    emit(progress, "tts", &format!("фраза {fi}: звучит выбранный дубль {} — новая озвучка его не заменяет", sel.n));
+                    need_synth = false;
+                    pinned_key = Some(sel.key);
+                }
+            }
+        }
+        // Клип, озвученный до истории дублей, уходит в неё, прежде чем его заменит новая озвучка.
+        if need_synth && hist.takes.is_empty() && raw.is_file() {
+            if let Some((rk, text)) = recorded.clone().zip(prior_text(&prior_timing, s)) {
+                let meta = crate::takes::NewTake { text, key: rk, nonce: None, voice: String::new(), reference: String::new(), params: String::new(), source: "synth" };
+                hist.add(wd, &sid, &raw, meta, media::duration(&raw)?)?;
+            }
+        }
+        let mut from_history = false;
+        if need_synth && failed_before(idx) {
+            media::trim(&vocals, &raw, s.start, s.end, 24_000)?;
+            kept_original = true;
+            need_synth = false;
+        } else if need_synth {
+            if let Some(n) = hist.by_key(key).map(|t| t.n) {
+                hist.restore(wd, &sid, n, &raw)?;
+                need_synth = false;
+                from_history = true;
+            }
+        }
+        let mut take_params = if cloud_tts_on { cloud_params.clone() } else { String::new() };
+        let mut take_ref = String::new();
         if need_synth {
             if cloud_tts_on {
             // Облачный TTS: wav-байты OpenRouter пишем ПРЯМО в seg-файл (без декода/перекодировки).
@@ -1141,7 +1285,7 @@ fn build_dub(
             // синтезе (не тратить ffmpeg-обрезку на закэшированные не-dirty сегменты).
             if engine.is_none() {
                 emit(progress, "tts", "загрузка Higgs");
-                engine = Some(load_higgs(paths)?);
+                *engine = Some(load_higgs(paths)?);
             }
             let (ref_wav, ref_text): (PathBuf, Option<String>) = match emo_ref_of(s, &sid) {
                 Some(emo) => emo,
@@ -1168,7 +1312,7 @@ fn build_dub(
             // Динамическая адаптация темпа (Speech Rate): если текст плотный (>14 знаков/сек), понижаем
             // температуру и зажимаем повторы, выговаривая текст собранно; если редкий — повышаем.
             let rate_ratio = if speech_rate_on && expected_dur > 0.1 && tgt_chars > 0 {
-                let ideal_dur = (tgt_chars as f64) / 14.0;
+                let ideal_dur = (tgt_chars as f64) / dub_core::fit::table_cps(&proj.tgt_lang);
                 (ideal_dur / expected_dur).clamp(0.70, 1.40)
             } else {
                 1.0
@@ -1207,6 +1351,8 @@ fn build_dub(
                     ),
                 };
                 attempt += 1;
+                take_params = opts.clone();
+                take_ref = rw.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 // Таймаут ~8× длины слота (флор 45с): нормальный синтез быстрее реалтайма, зависание —
                 // минуты, так что порог чисто разделяет. Ошибка/таймаут -> как дефект (ретрай стохастику
                 // обычно лечит); исчерпали попытки -> ОРИГИНАЛ (сегмент дороже потерять, чем зависший рендер).
@@ -1285,16 +1431,37 @@ fn build_dub(
             }
             } // конец локальной (Higgs) ветки — при облаке wav уже записан выше
         }
+        // Новая озвучка — в историю дублей (активной); облачный пре-синтез тоже озвучил её в этом проходе.
+        // При закреплённом дубле в файле сегмента он, а не новая озвучка.
+        let synthesized = pinned_key.is_none() && ((need_synth && !kept_original) || batch_new.contains(&idx));
+        let mut take_n: Option<u32> = None;
+        if synthesized {
+            let source = if crate::shorten::already_shortened(s) { "shorten" } else { "synth" };
+            let meta = crate::takes::NewTake {
+                text: tgt.to_string(),
+                key: key.to_string(),
+                nonce: s.extra.get(REGEN_NONCE).cloned(),
+                voice: voice_of(s),
+                reference: take_ref.clone(),
+                params: take_params.clone(),
+                source,
+            };
+            take_n = Some(hist.add(wd, &sid, &raw, meta, media::duration(&raw)?)?);
+        }
         // слот: от текущего onset до старта СЛЕДУЮЩЕГО сегмента ПО ИНДЕКСУ (fi+1) полного списка /
-        // конца видео (питон nxt = segs[i+1].start if i+1<len else total).
+        // конца видео (питон nxt = segs[i+1].start if i+1<len else total). Целевая длительность при
+        // «Динамическом темпе речи» — точные границы реплики, иначе до старта следующей; кап — штатный
+        // предел ускорения слота (dub_core::fit, одна формула с прогнозом редактора).
         let at = s.start.max(cursor);
         let nxt = if fi + 1 < n_all { proj.segments[fi + 1].start } else { total };
-        let room = (nxt - at).max(0.3);
+        let slot = dub_core::fit::slot(s.start, s.end, at, nxt, &fit_rules);
+        let target_slot = slot.target;
         let fitp = wd.join(format!("seg_{:03}_fit.wav", fi));
 
         // ── MULTI-TAKE: генерируем 2 доп. дубля и выбираем лучший по близости к target-длительности ──
+        // Все годные дубли остаются в истории, активным становится ближайший к слоту.
         if multitake_on && need_synth && !kept_original && !cloud_tts_on && engine.is_some() {
-            let target = if speech_rate_on { (s.end - s.start).max(0.3) } else { room };
+            let target = target_slot;
             // Дубли сравниваются по длине, которая ляжет на таймлайн: после обрезки тишины под этот слот.
             let placed_secs = |x: &[f32], sr: u32| {
                 crate::tts_trim::tighten(x, sr, target * FIT_NOOP_HI).samples.len() as f64 / sr.max(1) as f64
@@ -1303,7 +1470,7 @@ fn build_dub(
                 let (x, sr) = wavio::read_mono_f32(&raw)?;
                 placed_secs(&x, sr)
             };
-            let mut best_path = raw.clone();
+            let mut best = take_n;
             let mut best_score = (raw_dur - target).abs();
             let tgt = s.tgt_text.trim();
             let (ref_wav_mt, ref_text_mt) = match emo_ref_of(s, &sid) {
@@ -1326,12 +1493,23 @@ fn build_dub(
                     Ok((samples, sr)) => {
                         if synth_defect(&samples, sr, tgt.chars().filter(|c| c.is_alphanumeric()).count()).is_none() {
                             let wav = AudiocppEngine::encode_wav(&samples, sr, 1);
-                            if std::fs::write(&take_path, &wav).is_ok() {
-                                let score = (placed_secs(&samples, sr as u32) - target).abs();
-                                if score < best_score {
-                                    best_score = score;
-                                    best_path = take_path.clone();
-                                }
+                            dub_core::atomic::write(&take_path, &wav)?;
+                            let td = media::duration(&take_path)?;
+                            let meta = crate::takes::NewTake {
+                                text: tgt.to_string(),
+                                key: key.to_string(),
+                                nonce: s.extra.get(REGEN_NONCE).cloned(),
+                                voice: voice_of(s),
+                                reference: ref_wav_mt.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                                params: opts.clone(),
+                                source: "multitake",
+                            };
+                            let n = hist.add(wd, &sid, &take_path, meta, td)?;
+                            std::fs::remove_file(&take_path).map_err(|e| format!("{}: {e}", take_path.display()))?;
+                            let score = (placed_secs(&samples, sr as u32) - target).abs();
+                            if score < best_score {
+                                best_score = score;
+                                best = Some(n);
                             }
                         }
                     }
@@ -1339,10 +1517,12 @@ fn build_dub(
                     Err(_) => {} // провал дубля — пропускаем, используем имеющийся лучший
                 }
             }
-            // Если лучший дубль — не первый, подменяем raw-файл
-            if best_path != raw {
-                dub_core::atomic::copy(&best_path, &raw)?;
-                emit(progress, "tts", &format!("сегмент {fi}: multi-take — выбран дубль ближе к слоту ({best_score:.2}с отклонение)"));
+            if let Some(bn) = best {
+                hist.restore(wd, &sid, bn, &raw)?;
+                if best != take_n {
+                    emit(progress, "tts", &format!("сегмент {fi}: multi-take — выбран дубль ближе к слоту ({best_score:.2}с отклонение)"));
+                }
+                take_n = best;
             }
         }
         // Файл сегмента готов (синтез с выбранным дублем или принятый старый файл без ключа): ключ пишется
@@ -1350,35 +1530,17 @@ fn build_dub(
         if kept_original {
             ckpts.set(&sid, SEG_FALLBACK)?;
             fallback_keys.push((sid.clone(), key.to_string()));
-        } else if need_synth || recorded.is_none() {
+        } else if let Some(pk) = &pinned_key {
+            ckpts.set(&sid, pk)?;
+        } else if need_synth || from_history || recorded.is_none() {
             ckpts.set(&sid, key)?;
         }
 
-        // Целевая длительность слота: при ВКЛЮЧЕННОМ «Динамическом темпе речи» берем ТОЧНЫЕ границы
-        // данного субтитра (s.end - s.start), чтобы фраза укладывалась ровно в свой прямоугольник.
-        // При ВЫКЛЮЧЕННОМ — используем дефолтное поведение (room от старта до старта следующего + защитные кап-лимиты).
-        let target_slot = if speech_rate_on {
-            (s.end - s.start).max(0.3)
-        } else {
-            room
-        };
-
-        // Кап этого сегмента: если контроль длительности выключен (qc_duration=0), даем свободу (10.0)
-        let run_qc_duration = crate::models::load_selection(&paths.models_root)
-            .get("qc_duration")
-            .and_then(|v| v.as_str())
-            .map(|v| v != "0")
-            .unwrap_or(true);
-        let seg_cap = if !run_qc_duration {
-            10.0
-        } else if target_slot < 1.5 {
-            paths.max_stretch.max(1.30)
-        } else {
-            paths.max_stretch
-        };
         // Дрейф-кап (#116, находка [4]): рассинхрон дороже темпа. Кап 1.25 при cursor-ripple копит сдвиг
         // на плотном диалоге — фразы всё позже. Если дубль уже отстал (cursor > s.start), эскалируем кап
-        // до нужного, чтобы догнать слот (потолок 2.0), ценой временной спешки.
+        // до нужного, чтобы догнать слот (потолок 2.0), ценой временной спешки. При «Динамическом темпе
+        // речи» — прямое ускорение под точный размер реплики (до 4.0x).
+        let seg_cap = slot.cap;
         let drift = (cursor - s.start).max(0.0);
         // Клип TTS до подгонки темпа теряет тишину по краям, а если и так не влезает — длинные паузы.
         // Оригинальная реплика (сбой синтеза) остаётся как вырезана.
@@ -1397,24 +1559,16 @@ fn build_dub(
             }
             (t.path, t.after, t.before)
         };
-        let needed = if target_slot > 0.05 { raw_dur / target_slot } else { 1.0 };
-        // При включенном тумблере — прямое ускорение атемпо под точный размер субтитра (до 4.0x).
-        // При выключенном — дефолтные защитные ограничения (не быстрее 1.25x-1.30x, либо до 2.0x при дрейфе).
-        let eff_cap = if speech_rate_on {
-            seg_cap.max(needed).min(4.0)
-        } else if drift > 0.6 {
-            seg_cap.max(needed).min(2.0)
-        } else {
-            seg_cap
-        };
-        if drift > 0.6 && eff_cap > seg_cap {
+        let needed = dub_core::fit::needed(raw_dur, target_slot);
+        let eff_cap = dub_core::fit::eff_cap(seg_cap, needed, drift, &fit_rules);
+        if drift > dub_core::fit::DRIFT_ESCALATE && eff_cap > seg_cap {
             drift_escalations += 1;
         }
         // Телеметрия укладки (#107): needed>eff_cap -> дубль не влезает даже с (эскалированным) капом,
         // текст пойдёт быстрее нормы. raw_dur==0 (сбой duration) -> сегмент не считаем в статистику.
         if raw_dur > 0.0 {
             fit_total += 1;
-            if needed > eff_cap {
+            if dub_core::fit::over(needed, eff_cap) {
                 fit_over_cap += 1;
                 emit(progress, "mix", &format!(
                     "сегмент {fi}: нужно растянуть x{needed:.2} (слот {target_slot:.2}с), кап x{eff_cap:.2} — текст быстрее нормы"
@@ -1424,6 +1578,19 @@ fn build_dub(
         let (fit, d) = fit_to_slot(&clip, target_slot, &fitp, eff_cap, untrimmed)?;
         cursor = at + d;
         placed.push((at, fit, d));
+        fit_recs.push((!kept_original && raw_dur > 0.0).then(|| crate::dub_timing::FitRecord {
+            raw: raw_dur,
+            slot: target_slot,
+            needed,
+            cap: seg_cap,
+            eff_cap,
+            speaker: s.speaker.clone().unwrap_or_else(|| "0".into()),
+            voice: voice_of(s),
+            lang: proj.tgt_lang.clone(),
+        }));
+        if pass.shorten && synthesized && pinned_key.is_none() && !crate::shorten::already_shortened(s) {
+            shorten_cands.push((placed.len() - 1, s.id.clone()));
+        }
         // В QC — только реально синтезированное в этом прогоне (кэш уже проверялся в своём прогоне).
         // kept_original (оригинальная реплика вместо неспасаемого выкрика) НЕ сверяем: там исходный
         // язык, ASR-QC счёл бы его браком и пересинтезировал обратно в артефакт.
@@ -1439,6 +1606,7 @@ fn build_dub(
                 target_slot,
                 fitp,
             ));
+            qc_takes.push(take_n);
         }
     }
     if trim_phrases > 0 {
@@ -1467,12 +1635,20 @@ fn build_dub(
         let mut qc_asr = crate::models::build_engine(&paths.asr);
         let files: Vec<PathBuf> = qc_list.iter().map(|q| q.2.clone()).collect();
         let heard = qc_asr.transcribe_many(&files, &proj.tgt_lang);
+        // Сходство QC — в дубль истории, который проверялся.
+        let qc_note = |fi: usize, n: Option<u32>, sim: f64| -> Result<(), String> {
+            let Some(n) = n else { return Ok(()) };
+            let sid = sid_of(fi, &proj.segments[fi]);
+            crate::takes::History::load(wd, &sid)?.set_qc(wd, &sid, n, sim)
+        };
         let mut bad_idx: Vec<usize> = Vec::new();
         for (i, q) in qc_list.iter().enumerate() {
             // Междометия НЕ пропускаем: вой «О,»->«ОООО…» жил именно на них (QC-скан R5b);
             // ложные капризы ASR на коротких гасит префикс-режим qc_similarity (0.5 на пустом ASR).
             let h = heard.get(i).and_then(|x| x.as_deref()).unwrap_or("");
-            if qc_similarity(&q.3, h) < 0.35 {
+            let sim = qc_similarity(&q.3, h);
+            qc_note(q.0, qc_takes[i], sim)?;
+            if sim < 0.35 {
                 bad_idx.push(i);
             }
         }
@@ -1520,12 +1696,29 @@ fn build_dub(
                         // seg_cap; пересинтез с seg_cap дал бы более ДЛИННЫЙ дубль и порвал синк (#116 [6]).
                         let tight = wd.join(format!("seg_{fi:03}_tight.wav"));
                         let refit = tighten_clip(raw, *room, &tight)
-                            .and_then(|t| fit_to_slot(&t.path, *room, fitp, 2.0, t.before));
-                        if let Ok((nf, nd)) = refit {
+                            .and_then(|t| fit_to_slot(&t.path, *room, fitp, dub_core::fit::CAP_DRIFT, t.before).map(|f| (f, t.after)));
+                        if let Ok(((nf, nd), placed_dur)) = refit {
                             placed[*pidx].1 = nf;
                             placed[*pidx].2 = nd;
                             fixed = true;
                             emit(progress, "tts", &format!("QC: сегмент {fi} пересинтезирован (попытка {})", k + 1));
+                            let raw_dur = media::duration(raw)?;
+                            let sid = sid_of(*fi, s);
+                            let meta = crate::takes::NewTake {
+                                text: tgtq.clone(),
+                                key: keys[segs.iter().position(|(f, _)| f == fi).expect("QC-фраза из segs")].clone(),
+                                nonce: s.extra.get(REGEN_NONCE).cloned(),
+                                voice: voice_of(s),
+                                reference: rw.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                                params: opts.clone(),
+                                source: "qc",
+                            };
+                            qc_takes[i] = Some(crate::takes::History::load(wd, &sid)?.add(wd, &sid, raw, meta, raw_dur)?);
+                            if let Some(rec) = fit_recs[*pidx].as_mut() {
+                                rec.raw = placed_dur;
+                                rec.needed = dub_core::fit::needed(placed_dur, *room);
+                                rec.eff_cap = dub_core::fit::CAP_DRIFT;
+                            }
                             break;
                         }
                     }
@@ -1540,7 +1733,9 @@ fn build_dub(
             let mut still = 0usize;
             for (j, &i) in bad_idx.iter().enumerate() {
                 let h = heard2.get(j).and_then(|x| x.as_deref()).unwrap_or("");
-                if qc_similarity(&qc_list[i].3, h) < 0.35 {
+                let sim = qc_similarity(&qc_list[i].3, h);
+                qc_note(qc_list[i].0, qc_takes[i], sim)?;
+                if sim < 0.35 {
                     // Отключён сброс на оригинальное аудио. Сгенерированный TTS-звук ВСЕГДА остаётся
                     // на таймлайне, даже если QC (сверка через ASR) не подтвердил совпадение текста.
                     still += 1;
@@ -1550,6 +1745,28 @@ fn build_dub(
             emit(progress, "tts", &format!("QC итог: исправлено {}/{}, осталось помеченных {}", bad_idx.len() - still, bad_idx.len(), still));
         } else {
             emit(progress, "tts", "QC: все фразы подтверждены транскрипцией ✓");
+        }
+    }
+
+    // Замкнутая подгонка: фразы этого прохода, которым нужно ускорение сверх капа, с которым рендер их
+    // подогнал (как у телеметрии «выше капа»), уходят на сокращение перевода (build_dub) — укладка и микс
+    // будут во втором проходе.
+    if pass.shorten {
+        let picks: Vec<(String, f64)> = shorten_cands
+            .iter()
+            .filter_map(|(pidx, id)| {
+                let r = fit_recs[*pidx].as_ref()?;
+                dub_core::fit::over(r.needed, r.eff_cap).then(|| (id.clone(), r.slot))
+            })
+            .collect();
+        if !picks.is_empty() {
+            let samples = segs
+                .iter()
+                .zip(&fit_recs)
+                .filter_map(|((_, s), r)| r.as_ref().map(|r| (r.speaker.clone(), dub_core::fit::text_units(&s.tgt_text), r.raw)))
+                .collect();
+            let kept = fallback_keys.iter().map(|(sid, _)| sid.clone()).collect();
+            return Ok(DubPass::Overflow(crate::shorten::Overflow { picks, samples, kept }));
         }
     }
 
@@ -1588,7 +1805,7 @@ fn build_dub(
         }
     }
 
-    record_dub_timing(proj, paths, &segs, &placed, &laid_spans, track_sf, progress)?;
+    record_dub_timing(proj, paths, &segs, &placed, &fit_recs, &laid_spans, track_sf, progress)?;
 
     // 6) свести дорожку.
     let mixed = if voiceover {
@@ -1672,12 +1889,12 @@ fn build_dub(
         match media::gain(&normalized, &gained, gain_db) {
             Ok(()) => {
                 discard_mix(&normalized, wd);
-                Ok(gained)
+                Ok(DubPass::Mixed(gained))
             }
-            Err(_) => Ok(normalized),
+            Err(_) => Ok(DubPass::Mixed(normalized)),
         }
     } else {
-        Ok(normalized)
+        Ok(DubPass::Mixed(normalized))
     }
 }
 
@@ -1685,17 +1902,19 @@ fn build_dub(
 /// dub/voiceover берут отсюда тайминги событий, а пословные пресеты — слова, услышанные в самом дубле.
 /// Цикл укладки кладёт в `placed` ровно одну запись на каждый элемент `segs` в том же порядке, а
 /// timeline возвращает спаны в порядке `placed` (onset'ы неубывают, сортировка стабильная).
+#[allow(clippy::too_many_arguments)]
 fn record_dub_timing(
     proj: &Project,
     paths: &RenderPaths,
     segs: &[(usize, &dub_core::Segment)],
     placed: &[(f64, PathBuf, f64)],
+    fit_recs: &[Option<crate::dub_timing::FitRecord>],
     laid_spans: &[(f64, f64)],
     track_sf: f64,
     progress: &Progress,
 ) -> Result<(), String> {
     let wd = &paths.work_dir;
-    if placed.len() != segs.len() || laid_spans.len() != placed.len() {
+    if placed.len() != segs.len() || laid_spans.len() != placed.len() || fit_recs.len() != placed.len() {
         crate::dub_timing::clear(wd)?;
         emit(progress, "mix", &format!(
             "тайминги дубляжа для субтитров не записаны: укладка ({} фраз, {} спанов) не сопоставилась с сегментами ({}) — субтитры по таймингам оригинала",
@@ -1708,8 +1927,9 @@ fn record_dub_timing(
         .iter()
         .zip(placed)
         .zip(laid_spans)
-        .filter(|(((_, s), _), _)| !seg_keep(s) && !s.tgt_text.trim().is_empty())
-        .map(|(((_, s), p), span)| crate::dub_timing::Laid { seg: s, file: &p.1, span: *span })
+        .zip(fit_recs)
+        .filter(|((((_, s), _), _), _)| !seg_keep(s) && !s.tgt_text.trim().is_empty())
+        .map(|((((_, s), p), span), fit)| crate::dub_timing::Laid { seg: s, file: &p.1, span: *span, fit: fit.clone() })
         .collect();
     let preset = &proj.captions.preset;
     let caption_style = preset.name.as_deref().filter(|n| *n != "match");
@@ -2159,6 +2379,11 @@ fn fit_to_slot(
     media::time_stretch(seg_wav, work_path, factor)?;
     let d = media::duration(work_path).unwrap_or(actual / factor);
     Ok((work_path.to_path_buf(), d))
+}
+
+/// Текст, который звучит в клипе реплики по записи прошлого рендера.
+fn prior_text(prior: &Option<crate::dub_timing::DubTiming>, s: &dub_core::Segment) -> Option<String> {
+    prior.as_ref()?.segments.get(&s.id).map(|t| t.text.trim().to_string()).filter(|t| !t.is_empty())
 }
 
 /// Дорожка, из которой режутся рефы клона, и true, когда это микс: вокал проекта в полной полосе, кто бы
@@ -2921,6 +3146,7 @@ mod tests {
                 at: 3.0,
                 dur: 1.5,
                 words: vec![("Привет".into(), 3.1, 3.5), ("мир".into(), 3.6, 4.2)],
+                fit: None,
             },
         );
         std::fs::write(dir.join(crate::dub_timing::FILE), serde_json::to_string(&timing).unwrap()).unwrap();
