@@ -875,6 +875,13 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
                 quote_list(&report.hidden)
             ));
         }
+        if !report.hidden_by_text.is_empty() {
+            emit(progress, "asr", &format!(
+                "скрыто титров и звуков ASR по тексту (на интервале звук, голос от музыки не отделён): {} — {}",
+                report.hidden_by_text.len(),
+                quote_list(&report.hidden_by_text)
+            ));
+        }
         if !report.voiced.is_empty() {
             emit(progress, "asr", &format!(
                 "похожи на галлюцинацию, но голос есть — оставлены с пометкой: {} — {}",

@@ -64,29 +64,44 @@ impl VoiceEvidence {
         covered / dur >= VOICE_MIN_COVER
     }
 
-    /// Скрыть ли кандидата. По вокалу и диаризации — если голоса нет. По сырому миксу энергия не
-    /// отличает голос от музыки: сильный признак (титр, звук в скобках, текст без слов) скрывается
-    /// всегда, слабый (фраза из списка, крик) — только в тишине.
-    fn hide(&self, kind: dub_asr::HallucinationKind, start: f64, end: f64) -> bool {
+    /// Что делать с кандидатом. В тишине — скрыть. По вокалу и диаризации звук на интервале — голос,
+    /// кандидат остаётся. По сырому миксу энергия не отличает голос от музыки: сильный признак (титр,
+    /// звук в скобках, текст без букв и цифр) скрывается по тексту, слабый (фраза из списка, крик, одни
+    /// цифры, слово «субтитры» без автора) остаётся.
+    fn decide(&self, kind: dub_asr::HallucinationKind, start: f64, end: f64) -> Decision {
+        if !self.voiced(start, end) {
+            return Decision::HideSilent;
+        }
         match self {
-            VoiceEvidence::Vocals(_) | VoiceEvidence::Turns(_) => !self.voiced(start, end),
-            VoiceEvidence::Mix(_) => kind.is_strong() || !self.voiced(start, end),
+            VoiceEvidence::Mix(_) if kind.is_strong() => Decision::HideByText,
+            _ => Decision::Keep,
         }
     }
+}
+
+enum Decision {
+    /// На интервале нет звука.
+    HideSilent,
+    /// Звук есть, но голос от музыки не отделён, а признак в тексте сильный.
+    HideByText,
+    Keep,
 }
 
 /// Итог фильтра для журнала analyze.
 #[derive(Debug, Default)]
 pub struct Report {
-    /// Скрытые реплики.
+    /// Скрыты: на интервале реплики голоса нет.
     pub hidden: Vec<String>,
+    /// Скрыты по сильному признаку в тексте: звук на интервале есть, но без отделённого вокала и
+    /// диаризации неизвестно, голос это или музыка.
+    pub hidden_by_text: Vec<String>,
     /// Похожи на галлюцинацию, но на интервале звучит голос — оставлены, только помечены.
     pub voiced: Vec<String>,
 }
 
 /// Пометить реплики-галлюцинации: `extra.asr_flag = "hallucination"`, `extra.asr_reason` (wordless |
-/// bracketed | credit | shouted | known_phrase), `extra.asr_evidence` (vocals | diarization | mix);
-/// скрытым — ещё `extra.hidden = true`.
+/// numeric | bracketed | credit | subtitle_word | shouted | known_phrase), `extra.asr_evidence` (vocals |
+/// diarization | mix); скрытым — ещё `extra.hidden = true`.
 pub fn apply(segs: &mut [Segment], rules: HallucinationRules, evidence: &VoiceEvidence) -> Report {
     let mut report = Report::default();
     for s in segs.iter_mut() {
@@ -95,11 +110,14 @@ pub fn apply(segs: &mut [Segment], rules: HallucinationRules, evidence: &VoiceEv
         s.extra.insert("asr_reason".into(), Value::String(kind.as_str().into()));
         s.extra.insert("asr_evidence".into(), Value::String(evidence.name().into()));
         let text = s.src_text.trim().to_string();
-        if evidence.hide(kind, s.start, s.end) {
+        let decision = evidence.decide(kind, s.start, s.end);
+        if !matches!(decision, Decision::Keep) {
             s.extra.insert("hidden".into(), Value::Bool(true));
-            report.hidden.push(text);
-        } else {
-            report.voiced.push(text);
+        }
+        match decision {
+            Decision::HideSilent => report.hidden.push(text),
+            Decision::HideByText => report.hidden_by_text.push(text),
+            Decision::Keep => report.voiced.push(text),
         }
     }
     report
@@ -160,8 +178,30 @@ mod tests {
         assert!(!is_hidden(&segs[0]), "«Watch out!» со звуком — обычная реплика");
         assert_eq!(segs[0].extra["asr_reason"], "known_phrase");
         assert!(is_hidden(&segs[1]), "титр субтитровщика скрывается и поверх музыки");
-        assert_eq!(r.hidden.len(), 1);
+        assert!(r.hidden.is_empty(), "звук на интервале есть — это не «голоса нет»");
+        assert_eq!(r.hidden_by_text, vec!["Subtitles by the Amara.org community".to_string()]);
         assert_eq!(segs[1].extra["asr_evidence"], "mix");
+    }
+
+    #[test]
+    fn over_the_raw_mix_numbers_and_a_request_for_subtitles_with_sound_stay() {
+        let ev = VoiceEvidence::Mix(vec![(0.0, 20.0)]);
+        let mut segs = vec![seg(2.0, 3.0, " 300."), seg(5.0, 6.5, "Включите субтитры"), seg(8.0, 9.0, "Mach die Untertitel an")];
+        let r = apply(&mut segs, HallucinationRules::Whisper, &ev);
+        assert!(segs.iter().all(|s| !is_hidden(s)), "реплики со звуком остаются в субтитрах");
+        assert_eq!(segs[0].extra["asr_reason"], "numeric");
+        assert_eq!(segs[1].extra["asr_reason"], "subtitle_word");
+        assert!(r.hidden.is_empty() && r.hidden_by_text.is_empty());
+        assert_eq!(r.voiced.len(), 3);
+    }
+
+    #[test]
+    fn over_the_raw_mix_numbers_in_silence_are_hidden() {
+        let ev = VoiceEvidence::Mix(vec![(0.0, 5.0)]);
+        let mut segs = vec![seg(12.0, 12.8, " 1.")];
+        let r = apply(&mut segs, HallucinationRules::Whisper, &ev);
+        assert!(is_hidden(&segs[0]));
+        assert_eq!(r.hidden, vec!["1.".to_string()]);
     }
 
     #[test]
