@@ -18,7 +18,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 audiocpp = { path = "../audiocpp" }
 hound = "3"
 axum = { version = "0.8", features = ["multipart"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["cors", "fs"] }
 tokio = { workspace = true }
 tokio-stream = "0.1"
@@ -31,6 +31,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 mime_guess = "2"
+# MCP: картинки кадров в ответе инструмента, заголовки =?base64?…?= и границы since/until в часовом поясе компьютера.
+base64 = "0.23"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # setup-автозакачка: HTTPS-загрузка компонентов (rustls, без системного OpenSSL) + распаковка zip/wheel.
 # rustls: собственный криптопровайдер reqwest (aws-lc-rs) и корни из системного хранилища сертификатов.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
@@ -48,3 +51,6 @@ rfd = "0.17"
 # content-addressable per-stage кэш (analyze::cache): лёгкий, чистый хэш без C-зависимостей.
 # Префикс-хэш длинных wav (первые+последние N байт + размер) — быстрый ключ инвалидации стадий.
 blake3 = "1"
+
+[dev-dependencies]
+tempfile = "3"
