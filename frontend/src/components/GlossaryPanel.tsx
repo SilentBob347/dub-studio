@@ -72,10 +72,13 @@ export default function GlossaryPanel({ pid, project, onClose }: { pid: string; 
     setRows((rs) => (rs || []).map((r) => (r.key === key ? { ...r, entry: { ...r.entry, ...patch, source: "manual" }, asr: asr ?? r.asr } : r)));
 
   // Правки окна сохраняются до любого действия над сохранённым глоссарием (импорт, экспорт, профиль, перевод).
+  // После записи окно перечитывает проект: произношение меняет то, что услышит озвучка (tts_text фраз).
+  const refresh = async () => setProject(await api.getProject(pid));
   async function save(): Promise<GlossaryEntry[]> {
     const list = entries.filter((e) => e.term.trim());
     const g = await api.saveGlossary(pid, { entries: list });
     load(g);
+    await refresh();
     return g.entries;
   }
   async function run(kind: NonNullable<typeof busy>, action: () => Promise<void>) {
@@ -104,6 +107,7 @@ export default function GlossaryPanel({ pid, project, onClose }: { pid: string; 
     const tsv = await file.text();
     if (dirty) await save();
     load(await api.saveGlossary(pid, { tsv, merge: true, lang }));
+    await refresh();
     setNotice(t("glossary.imported"));
   });
   const doExport = () => run("export", async () => {
@@ -127,7 +131,7 @@ export default function GlossaryPanel({ pid, project, onClose }: { pid: string; 
       if (e instanceof JobCancelledError) { setNotice(t("jobs.cancelledKind", { kind: t("jobs.kind.retranslate") })); return; }
       throw e;
     }
-    setProject(await api.getProject(pid));
+    await refresh();
     bump();
     load(await api.glossary(pid));
     pushActivity(t("glossary.retranslated"), "done");

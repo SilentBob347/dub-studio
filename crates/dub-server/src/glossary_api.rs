@@ -270,6 +270,27 @@ mod tests {
     }
 
     #[test]
+    fn analysis_takes_the_series_glossary_under_the_projects_own() {
+        let repo = std::env::temp_dir().join(format!("dub_gloss_analyze_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        let seen = std::sync::Mutex::new(Vec::<String>::new());
+        let progress = |v: Value| seen.lock().unwrap().push(v["msg"].as_str().unwrap_or_default().to_string());
+        let prev = Project { glossary: vec![entry("Harry", "Гарри")], ..Project::default() };
+        assert_eq!(for_analyze(&repo, Some(&prev), "", &progress).unwrap().len(), 1);
+        assert_eq!(for_analyze(&repo, Some(&prev), "show", &progress).unwrap().len(), 1, "no profile: the project's own");
+        assert!(seen.lock().unwrap()[0].contains("не найден"));
+        let dir = casting_library::profile_dir(&repo, "show");
+        std::fs::create_dir_all(&dir).unwrap();
+        dub_faces::save_casting(&dir.join("casting.json"), &dub_faces::Casting::default()).unwrap();
+        casting_library::write_glossary(&repo, "show", &[entry("harry", "Хэрри"), entry("Ron", "Рон")]).unwrap();
+        let merged = for_analyze(&repo, Some(&prev), "show", &progress).unwrap();
+        assert_eq!(merged.iter().map(|e| e.translation.as_str()).collect::<Vec<_>>(), vec!["Гарри", "Рон"]);
+        std::fs::write(dir.join("glossary.json"), "{").unwrap();
+        assert!(for_analyze(&repo, None, "show", &progress).unwrap_err().contains("не читается"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
     fn put_replaces_or_merges_and_fills_the_language() {
         let current = vec![entry("Harry", "Гарри"), entry("Ron", "Рон")];
         let replaced = incoming(put(Some(vec![entry("Harry", "Хэрри")]), None, false), "ru", &current).unwrap();
