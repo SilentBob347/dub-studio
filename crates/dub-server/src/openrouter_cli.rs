@@ -67,7 +67,7 @@ pub fn run_json(repo_root: &Path, key: &str, op: &str, payload: &Value) -> Resul
 /// Суммарно потрачено по ключу в ДОЛЛАРАХ (credits.data.total_usage; кредиты OpenRouter = USD 1:1).
 /// None -> нет ключа/связи. Дельта до/после джобы = стоимость прогона.
 pub fn total_usage_usd(models_root: &Path) -> Option<f64> {
-    let key = crate::models::openrouter_key(models_root)?;
+    let key = crate::models::openrouter_key()?;
     let repo = repo_from_models(models_root);
     run_json(&repo, &key, "verify", &serde_json::json!({}))
         .ok()?

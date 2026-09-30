@@ -38,11 +38,18 @@ export type ProjectSummary = {
   audio_only: boolean; mtime: number; done: boolean;
 };
 export type ModelStack = { asr: string; llm: string; vision: string; tts: string };
+// Выбор active.json: строковые слоты + флаги секретов. Ключ OpenRouter и пароль прокси сервер не отдаёт.
+export type Selection = { [slot: string]: string | boolean | undefined; or_key_set?: boolean; proxy_password_set?: boolean };
+// Строковый слот выбора (флаги и отсутствующие слоты -> undefined).
+export const slot = (sel: Selection | undefined, key: string): string | undefined => {
+  const v = sel?.[key];
+  return typeof v === "string" ? v : undefined;
+};
 export type Capabilities = {
   device: string; tts_quant: string; asr_model: string; ffmpeg: boolean;
   languages: string[]; voice_modes: string[]; models?: ModelStack;
   // Выбор ASR-движка (active.json): движок parakeet|whisper + модель/квант Whisper.
-  selection?: Record<string, string>;
+  selection?: Selection;
   asr_engines?: string[]; whisper_models?: string[]; whisper_computes?: string[];
   // Видимые лимиты RAM (настройки): prefill-батч Gemma + длина реф-клипа клона.
   llama_ubatches?: string[]; higgs_ref_secs_opts?: string[];
@@ -99,6 +106,30 @@ const getJson = <T>(path: string): Promise<T> => fetch(`${BASE}${path}`).then(j<
 const postJson = <T>(path: string, body: unknown): Promise<T> =>
   fetch(`${BASE}${path}`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) }).then(j<T>);
 
+// Ошибка ручки с кодом ({error, detail}): текст для окна выбирается по коду через t().
+export class ApiError extends Error {
+  code: string;
+  detail: string;
+  constructor(code: string, detail: string) {
+    super(detail ? `${code}: ${detail}` : code);
+    this.code = code;
+    this.detail = detail;
+  }
+}
+async function coded<T>(r: Response): Promise<T> {
+  if (r.ok) return r.json() as Promise<T>;
+  const text = await r.text();
+  let body: { error?: unknown; detail?: unknown } | null;
+  try { body = JSON.parse(text) as { error?: unknown; detail?: unknown }; } catch { body = null; }
+  if (body && typeof body.error === "string") throw new ApiError(body.error, typeof body.detail === "string" ? body.detail : "");
+  throw new ApiError(`http_${r.status}`, text);
+}
+const sendCoded = <T>(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<T> =>
+  fetch(`${BASE}${path}`, body === undefined ? { method } : { method, headers: JSON_HEADERS, body: JSON.stringify(body) }).then(coded<T>);
+
+export type OpenRouterSettings = { configured: boolean; source: "environment" | "local_store" | null; environment_variable: string };
+export type ProxySettings = { on: boolean; url: string; password_set: boolean };
+
 export const api = {
   capabilities: () => getJson<Capabilities>("/engine/capabilities"),
   setupStatus: () => getJson<SetupStatus>("/setup/status"),
@@ -110,16 +141,23 @@ export const api = {
   setOpts: (edit: Partial<ModelStack>) =>
     fetch(`${BASE}/engine/opts`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify(edit) }).then(j<{ models: ModelStack }>),
   // Сделать вариант модели (квант) активным: id компонента настроек -> пишет models/active.json на бэке.
-  selectModel: (id: string) => postJson<Record<string, string>>("/engine/select", { id }),
+  selectModel: (id: string) => postJson<Selection>("/engine/select", { id }),
   // Прямая установка слота выбора (движок/модель/квант ASR) без скачивания: {key,value} -> active.json.
-  setSelection: (key: string, value: string) => postJson<Record<string, string>>("/engine/select", { key, value }),
+  setSelection: (key: string, value: string) => postJson<Selection>("/engine/select", { key, value }),
   // Облачные модели (OpenRouter): проверка ключа + фильтрованный каталог по модальности (llm/vision/tts).
   openrouterVerify: (key: string) => postJson<{ ok: boolean; data?: { label?: string; limit?: number; usage?: number }; error?: unknown }>("/engine/openrouter/verify", { key }),
+  // Ключ OpenRouter: сервер отдаёт только «задан ли» и источник; PUT сначала проверяет ключ в OpenRouter.
+  openrouterSettings: () => getJson<OpenRouterSettings>("/engine/openrouter/settings"),
+  saveOpenrouterKey: (apiKey: string) => sendCoded<OpenRouterSettings>("PUT", "/engine/openrouter/settings", { api_key: apiKey }),
+  deleteOpenrouterKey: () => sendCoded<OpenRouterSettings>("DELETE", "/engine/openrouter/settings"),
+  // Прокси: адрес без пароля + флаг. password: нет поля — оставить сохранённый, null — удалить, строка — заменить.
+  proxySettings: () => getJson<ProxySettings>("/engine/proxy/settings"),
+  saveProxy: (form: { on?: boolean; url?: string; password?: string | null }) => sendCoded<ProxySettings>("PUT", "/engine/proxy/settings", form),
   openrouterModels: (kind: "llm" | "vision" | "tts" | "asr") => getJson<{ models: { id: string; name: string; context?: number }[] }>(`/engine/openrouter/models?kind=${kind}`),
   // Голоса TTS-модели с полом/возрастом/русским (встроенный справочник) — для дропдауна + автокастинга.
   openrouterVoices: (model: string) => getJson<{ voices: { name: string; gender: string; age: string; ru: boolean }[]; supportsRussian: boolean | null }>(`/engine/openrouter/voices?model=${encodeURIComponent(model)}`),
   // Прокси: проверить связность до HF (закачка моделей) и OpenRouter через указанный URL. Пусто -> прямой доступ.
-  proxyTest: (url: string) => postJson<{ ok: boolean; hf?: boolean; openrouter?: boolean; hf_error?: string | null; openrouter_error?: string | null; error?: string }>("/engine/proxy/test", { url }),
+  proxyTest: (url: string, password?: string) => postJson<{ ok: boolean; hf?: boolean; openrouter?: boolean; hf_error?: string | null; openrouter_error?: string | null; error?: string }>("/engine/proxy/test", password ? { url, password } : { url }),
   // Пресеты железа: список + детект GPU/VRAM + рекомендация; применение пишет кванты/облако в active.json.
   hwPresets: () => getJson<{ presets: { id: string; title: string; subtitle: string }[]; hardware: { gpuName: string; totalVramGb: number; totalRamGb: number; hasGpu: boolean; recommended: string; reason: string } }>("/engine/presets"),
   applyPreset: (id: string) => postJson<{ ok: boolean; id: string; applied: { key: string; value: string }[] }>("/engine/preset", { id }),

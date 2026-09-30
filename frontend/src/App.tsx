@@ -4,12 +4,14 @@ import { motion } from "motion/react";
 import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
+import { api, slot, type Selection, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
 import { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
 import { playSfx, sfxEnabled, setSfxEnabled } from "./lib/sfx";
 import ResourceMonitor from "./components/ResourceMonitor";
+import OpenRouterKey from "./components/OpenRouterKey";
+import ProxySection from "./components/ProxySection";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -64,7 +66,7 @@ const VARIANT_SLOT: Record<string, [string, string]> = {
   "whisper-large-v3": ["whisper_model", "large-v3"], "whisper-large-v3-turbo": ["whisper_model", "large-v3-turbo"],
 };
 // Какой из ids сейчас активен по выбору (active.json из capabilities.selection).
-const activeVariantId = (ids: string[], sel: Record<string, string>): string | undefined =>
+const activeVariantId = (ids: string[], sel: Selection): string | undefined =>
   ids.find((id) => { const m = VARIANT_SLOT[id]; return !!m && sel[m[0]] === m[1]; });
 
 // 25 европейских языков, которые распознаёт дефолтный ASR Parakeet-TDT v3. Источник вне этого набора
@@ -94,14 +96,13 @@ function ModelsSection() {
   const [ttsRu, setTtsRu] = useState<boolean | null>(null);
   const loadCap = () => api.capabilities().then((c) => {
     setCap(c);
-    const s = c.selection ?? {};
-    setAsrEngine(s.asr_engine ?? "parakeet");
-    setWhisperCompute(s.whisper_compute ?? "int8");
+    setAsrEngine(slot(c.selection, "asr_engine") ?? "parakeet");
+    setWhisperCompute(slot(c.selection, "whisper_compute") ?? "int8");
   }).catch(() => {});
   const refresh = () => { api.setupStatus().then(setStatus).catch(() => {}); loadCap(); };
   useEffect(() => { refresh(); }, []);
-  const selv = (k: string) => cap?.selection?.[k] ?? "";
-  const hasOrKey = (cap?.selection?.or_key ?? "").trim().length > 0;
+  const selv = (k: string) => slot(cap?.selection, k) ?? "";
+  const hasOrKey = cap?.selection?.or_key_set === true;
   const setSel = (k: string, v: string) => api.setSelection(k, v).then(loadCap).catch(() => {});
   // Каталоги моделей по стадиям — динамически из OpenRouter, как только есть рабочий ключ (без хардкода id).
   useEffect(() => {
@@ -110,7 +111,7 @@ function ModelsSection() {
       api.openrouterModels(kind).then((r) => setOrModels((m) => ({ ...m, [kind]: r.models }))).catch(() => {}));
   }, [hasOrKey]);
   // Голоса выбранной облачной TTS-модели (пол/возраст/русский) для дропдауна + предупреждения о русском.
-  const orTtsModel = cap?.selection?.or_tts_model ?? "";
+  const orTtsModel = slot(cap?.selection, "or_tts_model") ?? "";
   useEffect(() => {
     if (!orTtsModel) { setOrVoices([]); setTtsRu(null); return; }
     api.openrouterVoices(orTtsModel).then((r) => { setOrVoices(r.voices); setTtsRu(r.supportsRussian); }).catch(() => {});
@@ -382,7 +383,7 @@ function ModelsSection() {
           { key: "llama_ubatch", label: t("settings.llamaUbatch"), hint: t("settings.llamaUbatchHint"), opts: cap?.llama_ubatches ?? ["0", "512", "256", "128"], def: "0", fmt: (v: string) => (v === "0" ? t("settings.auto") : v) },
           { key: "higgs_ref_secs", label: t("settings.higgsRef"), hint: t("settings.higgsRefHint"), opts: cap?.higgs_ref_secs_opts ?? ["12", "8", "6", "4"], def: "12", fmt: (v: string) => `${v}${t("settings.sec")}` },
         ].map((row) => {
-          const cur = cap?.selection?.[row.key] ?? row.def;
+          const cur = slot(cap?.selection, row.key) ?? row.def;
           return (
             <div key={row.key} className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
               <div className="flex items-center gap-2.5">
@@ -434,101 +435,8 @@ function ModelsSection() {
   );
 }
 
-// Прокси-сервер для всего исходящего трафика (закачка моделей + OpenRouter): у части юзеров прямой доступ к
-// HF/OpenRouter закрыт. URL может содержать логин:пароль -> прячем как ключ. «Проверить» бьёт в HF и OpenRouter
-// через указанный прокси. Действует сразу для закачки и облака; остальному (апдейтер) — рестарт.
-function ProxySection() {
-  const [url, setUrl] = useState("");
-  const [on, setOn] = useState(false);
-  const [show, setShow] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  useEffect(() => {
-    api.capabilities().then((c) => {
-      setUrl(c.selection?.proxy_url ?? "");
-      setOn((c.selection?.proxy_on ?? "") === "1");
-    }).catch(() => {});
-  }, []);
-  // Сохраняем URL (только непустой — setSelection не принимает пустое) + флаг вкл/выкл.
-  const save = async (nextOn: boolean) => {
-    if (url.trim()) await api.setSelection("proxy_url", url.trim());
-    await api.setSelection("proxy_on", nextOn ? "1" : "0");
-    setOn(nextOn);
-    setMsg(null);
-  };
-  const test = async () => {
-    setTesting(true); setMsg(null);
-    try {
-      const r = await api.proxyTest(url.trim());
-      if (r.ok) setMsg({ ok: true, text: "Работает — HF и OpenRouter доступны через прокси" });
-      else if (r.error) setMsg({ ok: false, text: r.error });
-      else {
-        const bad = [r.hf === false ? "закачка моделей (HF)" : "", r.openrouter === false ? "OpenRouter" : ""].filter(Boolean);
-        setMsg({ ok: false, text: `Недоступно через прокси: ${bad.join(", ") || "сервисы"}` });
-      }
-    } catch { setMsg({ ok: false, text: "Не удалось проверить прокси" }); }
-    setTesting(false);
-  };
-  return (
-    <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)] space-y-2">
-      <label className="flex items-center gap-2.5 cursor-pointer select-none">
-        <input type="checkbox" checked={on} onChange={(e) => save(e.target.checked)}
-          className="accent-[var(--color-accent)] w-3.5 h-3.5 shrink-0" />
-        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${on ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />
-        <span className="min-w-0 flex-1">
-          <span className="block text-[12px] font-medium">Проксировать весь трафик</span>
-          <span className="block mono text-[10px] text-[var(--color-muted)]">включите, если прямая закачка моделей или OpenRouter не работает</span>
-        </span>
-      </label>
-      <div className="flex gap-2">
-        <input type={show ? "text" : "password"} value={url} onChange={(e) => setUrl(e.target.value)} onBlur={() => { if (on && url.trim()) save(true); }} placeholder="http://user:pass@host:8080  ·  socks5://host:1080"
-          className="flex-1 px-2 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] mono focus:border-[var(--color-accent)] outline-none" />
-        <button onClick={() => setShow((s) => !s)} className="px-2 rounded-md border border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]">{show ? <EyeOff size={13} /> : <Eye size={13} />}</button>
-        <button onClick={test} disabled={testing || !url.trim()} className="px-3 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] hover:border-[var(--color-accent)] disabled:opacity-40">{testing ? "…" : "Проверить"}</button>
-      </div>
-      {msg && <div className={`text-[11px] ${msg.ok ? "text-[var(--color-accent)]" : "text-[var(--color-warn)]"}`}>{msg.text}</div>}
-      <div className="mono text-[10px] text-[var(--color-muted)] leading-snug">Поддержка HTTP/HTTPS/SOCKS5. Действует сразу для закачки моделей и облака.</div>
-    </div>
-  );
-}
-
 // Пресет под железо: автоопределение GPU/VRAM -> рекомендованные кванты, но юзер применяет любой сам.
 // Облачный пресет включает OpenRouter на все стадии — работает даже на слабом ПК без своей GPU.
-// Переиспользуемая строка ключа OpenRouter (настройки И первый запуск). onSaved — после успешной проверки.
-function OpenRouterKey({ onSaved }: { onSaved?: () => void }) {
-  const [key, setKey] = useState("");
-  const [show, setShow] = useState(false);
-  const [verifying, setVerifying] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [has, setHas] = useState(false);
-  useEffect(() => { api.capabilities().then((c) => { const k = c.selection?.or_key ?? ""; setKey(k); setHas(k.trim().length > 0); }).catch(() => {}); }, []);
-  const verify = async () => {
-    setVerifying(true); setMsg(null);
-    try {
-      const r = await api.openrouterVerify(key.trim());
-      if (r.ok) { await api.setSelection("or_key", key.trim()); setHas(true); setMsg({ ok: true, text: "Ключ рабочий — сохранён" }); onSaved?.(); }
-      else setMsg({ ok: false, text: "Ключ не принят OpenRouter" });
-    } catch { setMsg({ ok: false, text: "OpenRouter недоступен" }); }
-    setVerifying(false);
-  };
-  return (
-    <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
-      <div className="flex items-center gap-2 mb-1">
-        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${has ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />
-        <span className="text-[12px] font-medium">Ключ OpenRouter</span>
-        <span className="mono text-[10px] text-[var(--color-muted)]">для облачных движков (перевод / TTS)</span>
-      </div>
-      <div className="flex gap-2">
-        <input type={show ? "text" : "password"} value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-or-v1-…"
-          className="flex-1 px-2 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] mono focus:border-[var(--color-accent)] outline-none" />
-        <button onClick={() => setShow((s) => !s)} className="px-2 rounded-md border border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]">{show ? <EyeOff size={13} /> : <Eye size={13} />}</button>
-        <button onClick={verify} disabled={verifying || !key.trim()} className="px-3 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] hover:border-[var(--color-accent)] disabled:opacity-40">{verifying ? "…" : "Проверить"}</button>
-      </div>
-      {msg && <div className={`text-[11px] mt-1 ${msg.ok ? "text-[var(--color-accent)]" : "text-[var(--color-warn)]"}`}>{msg.text}</div>}
-    </div>
-  );
-}
-
 function PresetsSection({ onApplied }: { onApplied?: () => void }) {
   const [data, setData] = useState<Awaited<ReturnType<typeof api.hwPresets>> | null>(null);
   const [applied, setApplied] = useState<string | null>(null);
@@ -1936,7 +1844,7 @@ function CastingPanel({ pid, characters, voices, onChange }: {
     api.capabilities().then((cap) => {
       const on = (cap.selection?.or_tts_on ?? "") === "1";
       setCloudOn(on);
-      const model = cap.selection?.or_tts_model ?? "";
+      const model = slot(cap.selection, "or_tts_model") ?? "";
       if (on && model) api.openrouterVoices(model).then((r) => setCloudVoices(r.voices.map((v) => ({ name: v.name, gender: v.gender })))).catch(() => {});
     }).catch(() => {});
   }, []);

@@ -56,7 +56,7 @@ pub struct LlmOpen<'a> {
 pub fn open(o: &LlmOpen, mode: LlmMode) -> Result<LlmProvider, String> {
     let stage = if mode == LlmMode::Vision { "vision" } else { "llm" };
     if crate::models::openrouter_stage_on(o.models_root, stage) {
-        let key = crate::models::openrouter_key(o.models_root)
+        let key = crate::models::openrouter_key()
             .ok_or("OpenRouter включён, но ключ не задан")?;
         let model = crate::models::openrouter_model(o.models_root, stage);
         // Модель не выбрана (без хардкода id) — облако невозможно; тихо откатываемся на локаль

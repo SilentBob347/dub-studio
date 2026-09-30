@@ -31,7 +31,7 @@ pub async fn presets() -> Json<Value> {
 // llm = output text; vision = input image; tts = output speech; asr = output transcription.
 pub async fn openrouter_models(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Response {
     let kind = q.get("kind").cloned().unwrap_or_else(|| "llm".to_string());
-    let Some(key) = crate::models::openrouter_key(&st.models_root) else {
+    let Some(key) = crate::models::openrouter_key() else {
         return (StatusCode::BAD_REQUEST, "ключ OpenRouter не задан").into_response();
     };
     let repo = st.repo_root.clone();
@@ -76,12 +76,15 @@ pub async fn openrouter_verify(State(st): State<AppState>, Json(body): Json<Valu
     }
 }
 
-// ─── POST /engine/proxy/test {url} — проверить связность через прокси ────────────────────────────────
+// ─── POST /engine/proxy/test {url, password?} — проверить связность через прокси ────────────────────────────────
 // Пробуем достучаться до HF (закачка моделей) и OpenRouter (облако) через указанный прокси. Пустой url ->
 // проверка ПРЯМОГО доступа (без прокси): юзер сразу видит, нужен ли ему прокси вообще. http_status_as_error
 // выключаем — меряем транспорт (дошли до сервера через прокси), а не HTTP-статус ответа.
 pub async fn proxy_test(Json(body): Json<Value>) -> Response {
     let url = body.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    // Форма не держит сохранённый пароль: адрес с логином без пароля проверяем с паролем из тела или из хранилища.
+    let typed = body.get("password").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
+    let url = crate::models::proxy_with_password(&url, typed.or_else(crate::credentials::proxy_password).as_deref());
     let res = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let agent: ureq::Agent = if url.is_empty() {
             ureq::Agent::config_builder().http_status_as_error(false).build().into()
@@ -195,7 +198,7 @@ pub async fn select_model(State(st): State<AppState>, Json(body): Json<Value>) -
         if let Err(e) = crate::models::set_selection(&st.models_root, key, val) {
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("write selection: {e}")).into_response();
         }
-        return Json(crate::models::load_selection(&st.models_root)).into_response();
+        return Json(crate::models::public_selection(&st.models_root)).into_response();
     }
     // Форма 2: {"id":"whisper-small"} — id компонента манифеста -> набор слотов (активация при скачивании
     // и переключение варианта). Пустой набор -> неизвестный компонент.
@@ -209,7 +212,7 @@ pub async fn select_model(State(st): State<AppState>, Json(body): Json<Value>) -
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("write selection: {e}")).into_response();
         }
     }
-    Json(crate::models::load_selection(&st.models_root)).into_response()
+    Json(crate::models::public_selection(&st.models_root)).into_response()
 }
 
 // ─── PUT /projects/{pid} ────────────────────────────────────────────────────

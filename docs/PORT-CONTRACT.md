@@ -282,3 +282,27 @@ sub_style). Осознанное ограничение: текст-оверра
 Причина: артефакт ae61067 СТАРШЕ compose-фикса (см. раздел «РЕГРЕСС ТИТРА починен» выше). Свежий
 compose всегда даёт титру bbox (матч ИЛИ fallback центр-полоса); титр «THAT VERY…» ВИДЕН, стабильно
 на 3 прогонах. Регресс-тест `ae61067_title_always_drawn_with_bbox` гвардит от рецидива.
+
+## Доступ и секреты — **done**
+
+- Весь роутер (API, SPA и всё, что появится) за middleware `guard::origin_guard`: заголовок `Origin`, если он
+  есть, должен быть локальным (`localhost`, `127.0.0.1`, `[::1]`, `tauri.localhost` с любым портом или схема
+  `tauri`), имя хоста в `Host` — одно из тех же (защита от DNS-rebinding); иначе 403. Агенты и curl без `Origin`
+  с локальным `Host` проходят. CORS отвечает только локальным источникам (dev-фронт Vite, окно студии).
+- Секреты не отдаёт ни одна ручка. `selection` в `GET /engine/capabilities` и в ответе `POST /engine/select` —
+  без `or_key`, `proxy_url` без пароля, плюс флаги `or_key_set` и `proxy_password_set`. Слоты `or_key` и
+  `proxy_url` через `POST /engine/select` не пишутся (400).
+- Хранилище — `crates/dub-server/src/credentials.rs`: в портативной раскладке `<папка приложения>/secrets/`,
+  иначе `%LOCALAPPDATA%\Dub Studio\secrets\`; `DUB_STUDIO_SECRETS_DIR` перекрывает оба. Переменная окружения
+  `OPENROUTER_API_KEY` главнее сохранённого ключа. На старте сервера `or_key` и пароль из `proxy_url`
+  переносятся из `models/active.json` в хранилище, active.json переписывается без них.
+- Ошибки ручек ниже — JSON `{error: <код>, detail}`.
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/engine/openrouter/settings` | `{configured, source: environment\|local_store\|null, environment_variable}` |
+| PUT | `/engine/openrouter/settings` | `{api_key}`: проверка ключа в OpenRouter (операция verify сайдкара), затем сохранение; ответ как у GET. Коды: `empty_key`/`invalid_key` 400, `key_rejected` 400, `verify_failed` 502, `environment_key` 409, `store_failed` 500 |
+| DELETE | `/engine/openrouter/settings` | Удалить сохранённый ключ; ответ как у GET. `environment_key` 409 |
+| GET | `/engine/proxy/settings` | `{on, url, password_set}` — адрес без пароля |
+| PUT | `/engine/proxy/settings` | `{on?, url?, password?}`: `password` нет или `""` — оставить сохранённый, `null` — удалить, строка — заменить; пароль, вписанный в адрес, уходит в хранилище; `url: ""` — убрать прокси. Коды: `proxy_password_without_user`, `invalid_proxy_url`, `invalid_proxy_password`, `invalid_proxy_on` 400, `store_failed` 500 |
+| POST | `/engine/proxy/test` | `{url, password?}`: адрес с логином без пароля проверяется с паролем из тела или из хранилища |
