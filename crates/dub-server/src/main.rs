@@ -1,26 +1,41 @@
-//! Точка входа dub-server: поднимает axum на 127.0.0.1:8765 (порт как у backend/app.py).
+//! Точка входа dub-server: поднимает axum на 127.0.0.1:8793 (порт env DUB_STUDIO_PORT).
 //! Корень репо резолвится из env DUB_STUDIO_ROOT, иначе — рабочий каталог процесса.
 
-use dub_server::{apply_proxy_env, augment_path_for_tools, build_router, AppState};
+use dub_server::service::{self, Claim};
+use dub_server::{apply_proxy_env, augment_path_for_tools, serve, AppState};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Рецепт «taskkill //IM dub-server.exe //F» не должен оставлять сирот (llama-server, ffmpeg, roformer).
+    let bound = dub_server::process_group::bind_children_to_this_process();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
         )
         .init();
+    if !bound {
+        tracing::error!("процесс не встал в свой job object: сайдкары гасятся только своими деструкторами");
+    }
 
     let repo_root = std::env::var("DUB_STUDIO_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().expect("cwd"));
 
-    let port: u16 = std::env::var("DUB_STUDIO_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8765);
+    let port = service::listen_port().map_err(anyhow::Error::msg)?;
+    let listener = match tokio::task::spawn_blocking(move || service::claim_port(port, Duration::from_secs(20))).await? {
+        Ok(Claim::Bound(l)) => l,
+        Ok(Claim::AlreadyRunning(r)) => anyhow::bail!(
+            "на 127.0.0.1:{port} уже работает Dub Studio {} ({}, repo_root={}); второй сервис не поднимаю",
+            r.version,
+            r.service_executable,
+            r.repo_root
+        ),
+        Err(busy) => return Err(busy.into()),
+    };
 
     // Прописать в PATH каталоги скачанных бинарей (ffmpeg/llama/higgs-engine) до старта — чтобы после
     // автозакачки они находились без рестарта процесса.
@@ -29,16 +44,13 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::new(&repo_root);
     tracing::info!(
-        "dub-server: repo_root={}, workspace={}, web_root={:?}",
+        "dub-server {}: repo_root={}, workspace={}, web_root={:?}",
+        service::app_version(),
         state.repo_root.display(),
         state.workspace.display(),
         state.web_root
     );
 
-    let app = build_router(state);
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("слушаю http://{addr}");
-    axum::serve(listener, app).await?;
-    Ok(())
+    tracing::info!("слушаю http://{}", listener.local_addr()?);
+    serve(state, listener).await
 }

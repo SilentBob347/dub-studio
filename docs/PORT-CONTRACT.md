@@ -2,7 +2,7 @@
 
 Источник истины: `backend/app.py` (FastAPI, один GPU-воркер + asyncio-очередь). Rust-сервер
 (`crates/dub-server`, axum) обязан отдавать **тот же** контракт, чтобы SPA (`frontend/dist`) работал
-без правок. Порт (8765) и формат ответов совпадают.
+без правок. Формат ответов совпадает; порт Rust-сервера — 8793 (`DUB_STUDIO_PORT`), у питона был 8765.
 
 Легенда статуса: **done** — реализовано в раунде 1; **todo** — каркас/следующие раунды (нужен движок).
 
@@ -28,6 +28,7 @@ data: {"type":"error", "error": "..."}
 
 | Метод | Путь | Статус | Назначение |
 |-------|------|--------|-----------|
+| GET | `/health` | **done** | {status:"ok", app:"dub-studio", version, service_executable, repo_root, port}: чей сервис на порту; по нему оболочка переиспользует уже запущенную Dub Studio (service.rs) |
 | GET | `/engine/capabilities` | **done** | JSON: device, tts_quant, asr_model, models{asr,llm,vision,tts}, ffmpeg(bool), languages[], voice_modes[] |
 | PATCH | `/engine/opts` | **done** | Валидирует непустые строки (иначе 400), возвращает {models:{...}}. Рантайм-свап слота вне scope: OPTS иммутабелен (Arc<EngineOpts>), стек задаётся при старте — форма ответа соблюдена (endpoints.rs::set_opts) |
 | — | | | **Раунд 2:** analyze покрывает ТОЛЬКО транскрипт-стадию (ASR+диаризация); перевод/vision/OCR/captions — раунд 3 |

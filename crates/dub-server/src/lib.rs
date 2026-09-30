@@ -34,6 +34,8 @@ mod subimport;
 mod translate;
 mod voice_slots;
 mod wavio;
+pub mod process_group;
+pub mod service;
 
 use axum::extract::{Multipart, Path as AxPath, Query, State};
 use axum::http::StatusCode;
@@ -204,20 +206,24 @@ pub fn apply_proxy_env(repo_root: &Path) {
 
 /// Поднять axum-сервер БЛОКИРУЮЩЕ на собственном tokio-рантайме. Для встраивания в десктоп-оболочку ОДНИМ
 /// процессом (вместо запуска dub-server.exe отдельным subprocess) — вызывать из фонового std::thread.
-/// Слушает 127.0.0.1:port; augment PATH под инструменты делается здесь же.
-pub fn serve_blocking(repo_root: impl AsRef<Path>, port: u16) -> anyhow::Result<()> {
+/// Слушатель уже занят вызывающим (service::claim_port); augment PATH под инструменты делается здесь же.
+pub fn serve_blocking(repo_root: impl AsRef<Path>, listener: std::net::TcpListener) -> anyhow::Result<()> {
     let root = repo_root.as_ref().to_path_buf();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         augment_path_for_tools(&root);
         apply_proxy_env(&root);
-        let state = AppState::new(&root);
-        let app = build_router(state);
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
-        Ok::<(), anyhow::Error>(())
+        serve(AppState::new(&root), listener).await
     })
+}
+
+/// Обслуживать API и SPA на занятом слушателе до остановки рантайма.
+pub async fn serve(state: AppState, listener: std::net::TcpListener) -> anyhow::Result<()> {
+    listener.set_nonblocking(true)?;
+    service::record_port(listener.local_addr()?.port());
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    axum::serve(listener, build_router(state)).await?;
+    Ok(())
 }
 
 impl AppState {
@@ -321,6 +327,7 @@ pub fn build_router(state: AppState) -> Router {
         .allow_headers(Any);
 
     Router::new()
+        .route("/health", get(service::health))
         .route("/engine/capabilities", get(capabilities))
         .route("/engine/opts", axum::routing::patch(endpoints::set_opts))
         .route("/engine/select", post(endpoints::select_model))
@@ -2096,7 +2103,9 @@ async fn open_output(State(st): State<AppState>, AxPath(pid): AxPath<String>) ->
     let _ = tokio::task::spawn_blocking(move || {
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new("cmd").args(["/C", "start", "", &path]).spawn();
+            let _ = process_group::detach_from_group(&mut std::process::Command::new("cmd"))
+                .args(["/C", "start", "", &path])
+                .spawn();
         }
         #[cfg(not(windows))]
         {
@@ -2113,7 +2122,9 @@ fn reveal_in_explorer(path: String) {
         #[cfg(windows)]
         {
             // explorer /select,"<path>" — выделяет файл в открытом каталоге. Один аргумент.
-            let _ = std::process::Command::new("explorer").arg(format!("/select,{path}")).spawn();
+            let _ = process_group::detach_from_group(&mut std::process::Command::new("explorer"))
+                .arg(format!("/select,{path}"))
+                .spawn();
         }
         #[cfg(not(windows))]
         {
