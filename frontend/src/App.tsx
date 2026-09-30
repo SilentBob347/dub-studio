@@ -40,6 +40,8 @@ import { fmtBytes } from "./lib/format";
 import SubsAlignToggle from "./components/SubsAlignToggle";
 import LlmProviders from "./components/LlmProviders";
 import OpenRouterModelSelect, { OpenRouterCatalogRow } from "./components/OpenRouterModelSelect";
+import { GlossaryButton } from "./components/GlossaryPanel";
+import { SourceText, TtsSkipNote } from "./components/SegmentText";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -2791,6 +2793,7 @@ function Editor() {
                   {spks.length > 1 && spks.map((spk) => <button key={spk} onClick={() => toggleMany(idsOf(spk))} className={chip}>SPK {spk}</button>)}
 
                   <div className="ml-auto inline-flex items-center gap-1.5 shrink-0">
+                    <GlossaryButton pid={pid} project={p} />
                     <button onClick={handleSaveSubtitles} title={t("subs.saveTip")}
                       className="inline-flex items-center justify-center p-1 rounded-md bg-[var(--color-surface-2)] border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors shrink-0">
                       <Save size={14} />
@@ -2861,11 +2864,12 @@ function Editor() {
                       className="p-0.5 text-[var(--color-muted)] hover:text-[#ef4444] disabled:opacity-40 transition-colors"><Trash2 size={13} /></button>
                   </div>
                 </div>
-                <div className="text-[11px] text-[var(--color-muted)]/80 mt-1.5 leading-snug">{seg.src_text}</div>
+                <SourceText pid={pid} seg={seg} />
                 <AutoGrowTextarea value={seg.tgt_text} onChange={(e) => patchSeg(seg.id, e.target.value)}
                   onClick={(e) => e.stopPropagation()}                       // editing text must not re-seek on every click
                   onBlur={(e) => { burstRef.current = null; persistSeg(seg.id, e.target.value); }}   // end the edit burst
                   className="w-full mt-1.5 bg-[var(--color-bg)]/60 border border-[var(--color-border)] rounded-lg p-1.5 text-[13px] leading-snug resize-none overflow-hidden focus:border-[var(--color-accent)] focus:outline-none transition-colors" />
+                {seg.tts_skip && <TtsSkipNote reason={seg.tts_skip} />}
                 {on && (
                   <div className="flex items-center gap-1.5 mt-1.5" onClick={(e) => e.stopPropagation()} title={t("seg.timingHint")}>
                     <Clock size={11} className="text-[var(--color-muted)] shrink-0" />
@@ -4438,6 +4442,7 @@ function TranscriptView() {
           {busy === "__all__" ? <Loader2 size={15} className="animate-spin" /> : <Users size={15} />}{t("transcribe.makeAll")}
         </button>
         <div className="flex gap-2">
+          <GlossaryButton pid={pid} project={p} wide />
           <button onClick={exportSrt} className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[#37414d] text-[12px] hover:border-[var(--color-accent)]"><Download size={13} />{t("transcribe.exportSrt")}</button>
           <button onClick={exportTxt} className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[#37414d] text-[12px] hover:border-[var(--color-accent)]"><FileText size={13} />{t("transcribe.exportTxt")}</button>
         </div>

@@ -13,7 +13,18 @@ export type SubStyle = {
 export type Segment = {
   id: string; start: number; end: number; speaker?: string | null;
   src_text: string; tgt_text: string; voice?: string | null; dirty: boolean; hidden?: boolean; keep_original?: boolean;
+  // что услышит озвучка, если отличается от tgt_text (без тегов звуков, с произношением глоссария); почему фраза не озвучивается
+  tts_text?: string; tts_skip?: TtsSkip;
 };
+export type TtsSkip = "sound_only" | "no_words";
+// Запись глоссария: перевод или keep (не переводить), произношение для озвучки, как ASR ошибается в термине.
+export type GlossaryEntry = {
+  term: string; translation: string; keep: boolean; pronunciation: string; asr_fix: string[]; note: string;
+  source: "manual" | "auto"; lang: string;
+};
+export type ProjectGlossary = { entries: GlossaryEntry[]; tgt_lang: string; casting_ref: string; stale: boolean };
+// Тело PUT глоссария: весь список или TSV; merge — влить в имеющиеся (присланное главнее).
+export type GlossaryPut = { entries: GlossaryEntry[]; merge?: boolean } | { tsv: string; merge?: boolean; lang?: string };
 export type BlurBox = { x: number; y: number; w: number; h: number; t0: number; t1: number; hidden?: boolean; fill?: string | null };
 export type Title = {
   text: string; tgt: string; bbox?: number[] | null; color?: string | null; bg?: string | null;
@@ -331,6 +342,15 @@ export const api = {
   saveCastingToLibrary: (pid: string, name: string) => postJson<{ slug: string }>(`/projects/${pid}/casting/library`, { name }),
   deleteCastingLibrary: (slug: string) => fetch(`${BASE}/casting/library/${encodeURIComponent(slug)}`, { method: "DELETE" }).then(j<{ ok: boolean }>),
   castingLibraryAvatarUrl: (slug: string, id: string) => `${BASE}/casting/library/${encodeURIComponent(slug)}/avatar?id=${encodeURIComponent(id)}`,
+  // Глоссарий проекта и профиля сериала (библиотека кастингов); «Собрать из текста» — джоба с кандидатами в итоге.
+  glossary: (pid: string) => getJson<ProjectGlossary>(`/projects/${pid}/glossary`),
+  glossaryTsv: (pid: string) => fetch(`${BASE}/projects/${pid}/glossary?format=tsv`).then(async (r) => { if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); return r.text(); }),
+  saveGlossary: (pid: string, body: GlossaryPut) =>
+    fetch(`${BASE}/projects/${pid}/glossary`, { method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body) }).then(j<ProjectGlossary>),
+  extractGlossary: (pid: string) => postJson<{ job_id: string }>(`/projects/${pid}/glossary/extract`, {}),
+  seriesGlossary: (slug: string) => getJson<{ slug: string; entries: GlossaryEntry[] }>(`/casting/library/${encodeURIComponent(slug)}/glossary`),
+  saveSeriesGlossary: (slug: string, body: GlossaryPut) =>
+    fetch(`${BASE}/casting/library/${encodeURIComponent(slug)}/glossary`, { method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body) }).then(j<{ slug: string; entries: GlossaryEntry[] }>),
   listProjects: () => getJson<{ projects: ProjectListing[] }>("/projects"),   // недавние/сохранённые проекты для экрана «Открыть»
   getProject: (pid: string) => getJson<Project>(`/projects/${pid}`),
   deleteProject: (pid: string) => fetch(`${BASE}/projects/${pid}`, { method: "DELETE" }).then(j<{ ok: boolean }>),   // удалить проект (стирает workspace/<pid>) — кнопка в «Недавних»
