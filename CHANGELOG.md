@@ -13,6 +13,17 @@ release notes on GitHub are taken from the release's section.
   edits the transcript and the translation line by line, casts the voices, renders, exports more
   languages and saves the result. The Settings section **Agent (MCP)** shows whether an agent is
   connected and gives the command for Claude Code and the config for other clients.
+- **One call for one result.** An agent gets a file's transcript, translated subtitles, a dubbed video,
+  the voice and the background apart or the text in the picture with a single tool; a second call for
+  the same file answers from the finished project. Subtitles are written as SRT, WebVTT, JSON with word
+  timings or ASS styled as the render burns them.
+- **The agent works in the studio's window while you watch.** It opens a project in the editor, selects
+  and edits lines, cuts and joins them, moves them on the timeline, restyles the subtitles, plays the
+  dub and starts the export; every step is highlighted and signed «Agent: …». It sees the window as a
+  picture and as a list of controls; a key or a password field reads only as filled or empty. What an
+  agent or another window saves appears at once, and undo never writes over it.
+- **Cut and join lines** in the editor: scissors at the playhead and join with the next line; the
+  words, the texts and a line's own subtitle are divided or joined with them.
 - **Jobs you can stop and continue.** Every long task shows its step and has **Cancel**; a task stopped
   by an error, a crash or closing the app is continued with **Continue** from where it stopped: the
   finished stages and the already voiced lines are taken from the project, not made again (issue #2).
@@ -57,6 +68,10 @@ release notes on GitHub are taken from the release's section.
 - A short clip with two people is no longer merged into one speaker, and casting no longer splits two or
   three people into five characters.
 - The header no longer stays on "Downloading models…" after the download finished.
+- Saved subtitles leave out hidden lines and the lines that keep the original speech, and use a line's
+  own subtitle text, as the burned subtitles do.
+- Deleting a casting profile asks in the studio's own dialog and shows why it failed instead of
+  silently keeping the profile.
 
 ## 2026-08-06 — 3.1.1
 
