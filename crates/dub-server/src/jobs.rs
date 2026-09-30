@@ -176,7 +176,8 @@ pub struct JobCtl {
     children: std::sync::Mutex<HashSet<u32>>,
     last: std::sync::Mutex<Option<Value>>,
     tx: broadcast::Sender<Value>,
-    store: Option<PathBuf>,
+    /// Каталог проекта и id джобы для job.json (обновляется, только пока запись принадлежит этой джобе).
+    store: Option<(PathBuf, String)>,
     stage_write: std::sync::Mutex<StageWrite>,
 }
 
@@ -188,7 +189,7 @@ struct StageWrite {
 }
 
 impl JobCtl {
-    fn new(store: Option<PathBuf>) -> Self {
+    fn new(store: Option<(PathBuf, String)>) -> Self {
         let (tx, _rx) = broadcast::channel(256);
         JobCtl {
             cancel: AtomicBool::new(false),
@@ -238,7 +239,7 @@ impl JobCtl {
     }
 
     fn note_stage(&self, stage: &str) {
-        let Some(dir) = &self.store else { return };
+        let Some((dir, id)) = &self.store else { return };
         let mut sw = self.stage_write.lock().unwrap_or_else(|p| p.into_inner());
         sw.stage = stage.to_string();
         if sw.written == sw.stage {
@@ -247,7 +248,7 @@ impl JobCtl {
         if sw.at.is_some_and(|t| t.elapsed() < STAGE_WRITE_EVERY) {
             return;
         }
-        match job_store::update(dir, |r| r.stage = stage.to_string()) {
+        match job_store::update_owned(dir, id, |r| r.stage = stage.to_string()) {
             Ok(()) => {
                 sw.written = sw.stage.clone();
                 sw.at = Some(Instant::now());
@@ -259,8 +260,8 @@ impl JobCtl {
     fn mark_running(&self) {
         *self.last.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let _ = self.tx.send(json!({ "type": "running" }));
-        if let Some(dir) = &self.store {
-            if let Err(e) = job_store::update(dir, |r| r.state = job_store::STATE_RUNNING.into()) {
+        if let Some((dir, id)) = &self.store {
+            if let Err(e) = job_store::update_owned(dir, id, |r| r.state = job_store::STATE_RUNNING.into()) {
                 eprintln!("[jobs] job.json running: {e}");
             }
         }
@@ -268,7 +269,7 @@ impl JobCtl {
 
     /// Терминал: job.json (состояние + последняя стадия + ошибка) и событие подписчикам.
     fn finish(&self, status: JobStatus, error: Option<&str>, ev: Value) {
-        if let Some(dir) = &self.store {
+        if let Some((dir, id)) = &self.store {
             let stage = self.stage_write.lock().map(|s| s.stage.clone()).unwrap_or_default();
             let state = match status {
                 JobStatus::Done => job_store::STATE_DONE,
@@ -276,7 +277,7 @@ impl JobCtl {
                 _ => job_store::STATE_FAILED,
             };
             let err = error.map(job_store::JobError::from_message);
-            if let Err(e) = job_store::update(dir, |r| {
+            if let Err(e) = job_store::update_owned(dir, id, |r| {
                 r.state = state.into();
                 if !stage.is_empty() {
                     r.stage = stage.clone();
@@ -336,6 +337,13 @@ pub fn check_cancelled() -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// Обновить job.json джобы этого потока (пока запись принадлежит ей).
+pub fn update_record(f: impl FnOnce(&mut job_store::JobRecord)) -> Result<(), String> {
+    let ctl = current().ok_or("поток не привязан к джобе")?;
+    let (dir, id) = ctl.store.as_ref().ok_or("у джобы нет job.json")?;
+    job_store::update_owned(dir, id, f)
 }
 
 fn child_hook(pid: u32, alive: bool) {
@@ -579,7 +587,7 @@ impl JobQueue {
             Some((dir, args)) => {
                 job_store::write_queued(&dir, meta.kind.as_str(), &args, &job_id)
                     .map_err(EnqueueError::Store)?;
-                Some(dir)
+                Some((dir, job_id.clone()))
             }
             None => None,
         };
@@ -707,6 +715,9 @@ impl JobQueue {
                 return Ok(json!({ "id": job_id, "status": "cancelling" }));
             }
             _ => return Err(CancelError::Finished),
+        }
+        if j.kind == JobKind::Frame {
+            g.jobs.remove(job_id);
         }
         g.queue.retain(|x| x != job_id);
         g.announce_positions();

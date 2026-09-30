@@ -114,6 +114,16 @@ pub fn update(dir: &Path, f: impl FnOnce(&mut JobRecord)) -> Result<(), String> 
     write(dir, &rec)
 }
 
+/// Обновить запись джобы `job_id`. Если job.json уже принадлежит более новой джобе проекта (другой
+/// класс поставлен следом), запись не трогаем: job.json — всегда последняя джоба проекта.
+pub fn update_owned(dir: &Path, job_id: &str, f: impl FnOnce(&mut JobRecord)) -> Result<(), String> {
+    match read(dir)? {
+        Some(rec) if rec.job_id == job_id => update(dir, f),
+        Some(_) => Ok(()),
+        None => Err(format!("{} нет в {}", FILE, dir.display())),
+    }
+}
+
 /// При старте сервиса: незавершённые (queued/running) записи всех проектов -> interrupted.
 pub fn recover(workspace: &Path) -> usize {
     let Ok(rd) = std::fs::read_dir(workspace) else {
@@ -197,6 +207,19 @@ mod tests {
         assert_eq!(read(&d).unwrap().unwrap().resumes, 1);
         write_queued(&d, "remix", &json!({}), "j3").unwrap();
         assert_eq!(read(&d).unwrap().unwrap().resumes, 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn older_job_does_not_overwrite_newer_record() {
+        let d = tmp_dir("owned");
+        write_queued(&d, "analyze", &json!({}), "old").unwrap();
+        write_queued(&d, "dub_audio", &json!({}), "new").unwrap();
+        update_owned(&d, "old", |r| r.state = STATE_DONE.into()).unwrap();
+        let r = read(&d).unwrap().unwrap();
+        assert_eq!((r.kind.as_str(), r.state.as_str()), ("dub_audio", STATE_QUEUED));
+        update_owned(&d, "new", |r| r.state = STATE_RUNNING.into()).unwrap();
+        assert_eq!(read(&d).unwrap().unwrap().state, STATE_RUNNING);
         let _ = std::fs::remove_dir_all(&d);
     }
 

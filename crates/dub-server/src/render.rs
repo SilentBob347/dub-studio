@@ -80,7 +80,15 @@ fn emit(progress: &Progress, stage: &str, msg: &str) {
 /// сегмента: оборванный рендер при повторе синтезирует только то, чего нет или что изменилось.
 pub const SEG_CKPT_FILE: &str = "seg_ckpt.json";
 /// Запись «в seg-файле оригинальная реплика (keep_original), а не синтез» — не совпадает ни с одним ключом.
-pub const SEG_ORIGINAL: &str = "original";
+const SEG_ORIGINAL: &str = "original";
+/// Запись «синтез провалился, в seg-файле оригинальная реплика»: пока дорожка не собрана целиком,
+/// продолжение прерванного прогона синтезирует такой сегмент снова.
+const SEG_FALLBACK: &str = "fallback";
+
+/// Запись в seg_ckpt.json — настоящий ключ синтеза (а не метка оригинальной реплики).
+pub fn is_synth_key(k: &str) -> bool {
+    k != SEG_ORIGINAL && k != SEG_FALLBACK
+}
 /// Поле Segment.extra с нонсом «перегенерировать»: patch regen/regen_all меняет его, меняя и ключ.
 pub const REGEN_NONCE: &str = "regen";
 /// Версия ключа: поднимать при смене лестницы/опций синтеза, меняющей звучание уже озвученного.
@@ -1025,6 +1033,9 @@ fn build_dub(
             crate::jobs::check_cancelled()?;
         }
     }
+    // Сегменты, где синтез провалился и стоит оригинальная реплика: их ключ записывается только когда
+    // дорожка собрана целиком (как раньше сброс dirty) — прерванный прогон при продолжении их повторит.
+    let mut fallback_keys: Vec<(String, String)> = Vec::new();
     for (idx, &(fi, s)) in segs.iter().enumerate() {
         crate::jobs::check_cancelled()?;
         // Кэш-файл сегмента — ПО ЕГО ID, не по индексу fi. Кэш переиспользуется между рендерами (не-dirty
@@ -1235,8 +1246,11 @@ fn build_dub(
             }
             } // конец локальной (Higgs) ветки — при облаке wav уже записан выше
         }
-        // Файл сегмента готов (синтез, оригинал по провалу лестницы или принятый старый файл без ключа).
-        if need_synth || recorded.is_none() {
+        // Файл сегмента готов (синтез или принятый старый файл без ключа).
+        if kept_original {
+            ckpts.set(&sid, SEG_FALLBACK)?;
+            fallback_keys.push((sid.clone(), key.to_string()));
+        } else if need_synth || recorded.is_none() {
             ckpts.set(&sid, key)?;
         }
         // слот: от текущего onset до старта СЛЕДУЮЩЕГО сегмента ПО ИНДЕКСУ (fi+1) полного списка /
@@ -1563,6 +1577,9 @@ fn build_dub(
             mixed
         }
     };
+    for (sid, key) in &fallback_keys {
+        ckpts.set(sid, key)?;
+    }
     // 8) монтажный гейн всей дорожки (если задан) — наша opt-in фича «усилить всё» поверх нормализации.
     let gain_db = proj.audio.gain_db;
     if gain_db.abs() > 0.05 {
@@ -2532,6 +2549,9 @@ mod tests {
         // Проект без записанных ключей — прежнее правило dirty.
         assert!(!seg_needs_synth(true, None, &key, false));
         assert!(seg_needs_synth(true, None, &key, true));
+        // Оригинальная реплика вместо провалившегося синтеза — при продолжении синтез повторяется.
+        assert!(seg_needs_synth(true, Some(SEG_FALLBACK), &key, false));
+        assert!(!is_synth_key(SEG_FALLBACK) && !is_synth_key(SEG_ORIGINAL) && is_synth_key(&key));
     }
 
     #[test]

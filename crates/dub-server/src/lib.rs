@@ -337,7 +337,15 @@ fn enqueue_error(e: jobs::EnqueueError) -> Response {
 
 /// Начало тела джобы проекта: убрать недописанные временные файлы прошлого (упавшего) процесса.
 fn clean_partials(dir: &Path) {
-    let n = dub_core::atomic::cleanup_stale(dir) + dub_core::atomic::cleanup_stale(&dir.join("stems"));
+    let mut n = dub_core::atomic::cleanup_stale(dir) + dub_core::atomic::cleanup_stale(&dir.join("stems"));
+    // Джобы идут по одной, поэтому недописанная сепарация на старте джобы — остаток оборванного прогона.
+    let stems_part = dub_sep::part_dir(&dir.join("stems"));
+    if stems_part.is_dir() {
+        match std::fs::remove_dir_all(&stems_part) {
+            Ok(()) => n += 1,
+            Err(e) => eprintln!("[jobs] {}: {e}", stems_part.display()),
+        }
+    }
     if n > 0 {
         eprintln!("[jobs] {}: удалено недописанных файлов: {n}", dir.display());
     }
@@ -1688,7 +1696,7 @@ fn bake_render_state(proj: &Project, proj_path: &Path, dir_for_job: &Path, regen
         }
         if let Some(sid) = render::seg_file_id(&s.id) {
             match ckpts.get(&sid) {
-                Some(k) if k != render::SEG_ORIGINAL => s.ckpt = Some(k.to_string()),
+                Some(k) if render::is_synth_key(k) => s.ckpt = Some(k.to_string()),
                 Some(_) => s.ckpt = None,
                 None => {}
             }
@@ -1928,7 +1936,7 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
             }
             drop(prov); // освободить VRAM перед TTS/рендером (облако — no-op)
             save_project_atomic(&dst_for_job, &p)?;
-            job_store::update(&dst_for_job, |r| r.args["translated"] = json!(true))?;
+            jobs::update_record(|r| r.args["translated"] = json!(true))?;
         }
         jobs::check_cancelled()?;
         let cb = |ev: Value| progress(ev);
