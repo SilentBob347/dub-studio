@@ -48,7 +48,7 @@ data: {"type":"error", "error": "..."}
 | GET | `/projects/{pid}/dub` | **done** | Проигрываемое видео: output.mp4, иначе analyzed.mp4 (Range) |
 | GET | `/projects/{pid}/files` | **done** | Пути файлов проекта на диске: папка, исходник, output (mkv раньше mp4) и проигрываемый output, dub_audio.m4a, project.json, casting.json, записанные SRT/TXT; null — ещё не сделан (project_files.rs::files) |
 | POST | `/projects/{pid}/export-text` | **done** | {format: srt\|txt, text?: tgt\|src, dir?, name?, speaker_label?} — строки проекта файлом, как кнопки окна (SRT перевода: все строки, tgt иначе src; транскрипт: строки с src). Без dir — в папку проекта с перезаписью, в dir — занятое имя получает (2), (3); Проводник не открывает. Вернуть {ok, path, lines} (project_files.rs::export_text) |
-| POST | `/mcp` | **done** | MCP-сервер (Streamable HTTP, stateless JSON-RPC): каждый tool зовёт маршрут этой таблицы внутри процесса; skill — docs/mcp-skill.md (mcp.rs::handle) |
+| POST | `/mcp` | **done** | MCP-сервер (Streamable HTTP, stateless JSON-RPC): каждый tool зовёт маршрут этой таблицы внутри процесса; skill — docs/mcp-skill.md (mcp.rs::handle). Порядок в build_router как в YuE2: `mcp::install(api.clone())` до гарда Origin/Host, гард — снаружи `api` вместе с `/mcp` и `/mcp/status`; внутренние запросы инструментов несут `Host: 127.0.0.1` (mcp.rs::call_route_raw) и проходят гард, где бы он ни стоял |
 | GET | `/mcp/status` | **done** | {agent_connected, agent_last_call, agent_seconds_ago, agent_calls} для раздела настроек «Агент (MCP)» (mcp.rs::status) |
 | — (fallback) | `/{spa_path}` | **done** | SPA: реальный статик-файл (с защитой от path-traversal), иначе index.html |
 

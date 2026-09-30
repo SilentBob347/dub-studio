@@ -402,7 +402,8 @@ pub fn build_router(state: AppState) -> Router {
         // реальном ролике). Питон (Starlette) лимита не ставит -> снимаем и мы.
         .layer(axum::extract::DefaultBodyLimit::disable())
         .with_state(state);
-    // MCP-инструменты зовут те же маршруты внутри процесса.
+    // MCP-инструменты зовут те же маршруты внутри процесса. Гард Origin/Host вешается ниже этой точки,
+    // снаружи /mcp и /mcp/status, а не внутри `api`.
     mcp::install(api.clone());
     api.route("/mcp", post(mcp::handle))
         .route("/mcp/status", get(mcp::status))

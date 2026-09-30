@@ -23,6 +23,11 @@ use tower::ServiceExt;
 /// The studio's API router, set once the service has built it.
 static API: OnceLock<Router> = OnceLock::new();
 
+/// Takes the API router before the Origin/Host guard is layered: the guard
+/// wraps this router together with `/mcp` and `/mcp/status` from outside, so
+/// the MCP endpoints are guarded and the tools' own calls do not go through it.
+/// The tools' requests still carry `Host: 127.0.0.1`, so they pass the guard
+/// should it be put inside this router.
 pub fn install(api: Router) {
     let _ = API.set(api);
 }
@@ -1509,7 +1514,7 @@ struct Reply {
 async fn call_route_raw(call: Call) -> Result<Reply, String> {
     let api = studio_api()?;
     let asked = format!("{} {}", call.method, call.path);
-    let builder = Request::builder().method(call.method).uri(&call.path);
+    let builder = Request::builder().method(call.method).uri(&call.path).header(header::HOST, "127.0.0.1");
     let request = match call.payload {
         Payload::None => builder.body(Body::empty()),
         Payload::Json(body) => builder.header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string())),
@@ -1949,6 +1954,7 @@ mod tests {
             .route("/engine/capabilities", get(|| async { Json(json!({ "selection": { "or_key": "sk-or-secret", "proxy_url": "http://user:pass@host:8080", "bench": "1" }, "asr_engines": ["parakeet", "whisper"] })) }))
             .route("/projects/{pid}", get(|| async { Json(a_project()) }).patch(|| async { Json(a_project()) }))
             .route("/projects/{pid}/preview", get(|| async { ([(header::CONTENT_TYPE, "image/jpeg")], vec![0xFFu8, 0xD8, 0xFF, 0xD9]).into_response() }))
+            .route("/host", get(|headers: HeaderMap| async move { Json(json!({ "host": headers.get(header::HOST).and_then(|value| value.to_str().ok()) })) }))
             .route("/projects", post(|mut form: Multipart| async move {
                 let mut parts = Vec::new();
                 while let Some(field) = form.next_field().await.unwrap() {
@@ -2326,6 +2332,13 @@ mod tests {
         let frame = call_tool("project_frame", json!({ "pid": "p1", "t": 3.0 })).await;
         assert_eq!(frame["result"]["isError"], true);
         assert!(answer_text(&frame).contains("busy: running render of project p1"), "{frame}");
+    }
+
+    #[tokio::test]
+    async fn a_tool_calls_its_route_as_this_computer() {
+        stub();
+        let reply = call_route_raw(Call { method: Method::GET, path: "/host".into(), payload: Payload::None }).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&reply.bytes).unwrap()["host"], "127.0.0.1");
     }
 
     #[tokio::test]
