@@ -420,7 +420,7 @@ fn win_target_sec() -> f64 {
     std::env::var("DUB_WIN_TARGET_SEC").ok().and_then(|v| v.parse().ok()).unwrap_or(600.0)
 }
 
-const EXTRACT_VER: &str = "extract-16kmono-v1";
+const EXTRACT_VER: &str = "extract-16kmono-sync-v2";
 /// В тексте сегмента есть хоть одна буква или цифра: сегмент из одной пунктуации («.») — остаток
 /// ASR на хвосте тишины, переводить и озвучивать его нельзя.
 fn has_speech_text(text: &str) -> bool {

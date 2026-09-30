@@ -47,6 +47,7 @@ mod studio_settings;
 mod subalign;
 mod subimport;
 mod translate;
+mod tts_trim;
 mod voice_slots;
 mod wavio;
 pub mod process_group;

@@ -6,6 +6,23 @@ release notes on GitHub are taken from the release's section.
 
 ## Unreleased — 4.0.0
 
+### Changed
+
+- **Less speeding up of dubbed lines.** The silence the voice leaves around a line is cut before
+  the line is fitted to its slot, and long pauses inside it shrink when it would not fit
+  otherwise. The render log says how much was cut and how many lines stayed within the speed-up
+  limit thanks to it. Projects dubbed earlier voice their lines once more on the next render.
+- **Cloned voices keep their high frequencies.** A cloned voice's reference is cut from the
+  separated vocals in full band instead of 16 kHz, its edges fall on pauses between words and its
+  transcript is exactly the words it contains. Without separation it comes from the original mix,
+  and the render log says so.
+
+### Fixed
+
+- **Sound no longer drifts from the picture on clips with broken timestamps.** Audio is read by
+  its timestamps, with gaps filled by silence, so on screen recordings, phone clips and remuxed
+  files the recognition, the dub and the subtitles stay in sync to the end.
+
 ## 2026-08-06 — 3.1.1
 
 ### Fixed

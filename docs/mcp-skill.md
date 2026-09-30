@@ -59,6 +59,9 @@ connected and the address to paste.
   rest comes from the cache. `segment_regen` marks one line, `segments_regen_all` every
   line. Changing the mode, the target language, the translation's tone or the voices makes
   every line dirty.
+- **How the dub sounds**: a voiced line loses the silence around it before it is fitted to its
+  slot (long pauses inside shrink only when it would not fit), and a cloned voice's reference is
+  cut from the separated vocals in full band, at word boundaries.
 - **Answers are short by default**: `project_get` leaves out word timings and the vision
   context, an edit answers what it changed and how many lines are dirty. Pass
   `response_format: detailed` for everything - and only take a project for `project_put`
