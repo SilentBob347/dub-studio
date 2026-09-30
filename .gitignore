@@ -48,3 +48,12 @@ frontend/public/*.mp4
 
 # тестовые видео — не в репо (>100МБ лимит GitHub)
 test_media/
+
+# Собранные установщики и портативные архивы — во вложения GitHub-релиза, не в репо
+release/
+
+# Локальные агентские правила и пароли ключей не публикуются
+.claude/
+HANDOFF.md
+NEXT_SESSION_PROMPT.md
+*.password

@@ -6,8 +6,9 @@
 //! сервис не поднимается, а окно открывается на неё; второй запуск релизной сборки на порту по
 //! умолчанию отдаёт фокус уже открытому окну.
 //!
-//! Портативность взята из эталона Higgs-Ultimate (desktop/src-tauri/src/lib.rs):
-//! app_root_dir = каталог рядом с exe; WEBVIEW2_USER_DATA_FOLDER и рантайм-модели держим там же.
+//! Где лежат ресурсы, данные, профиль WebView2 и временные файлы — решает модуль `layout`.
+
+mod layout;
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -15,40 +16,6 @@ use std::time::{Duration, Instant};
 
 use dub_server::service::{self, Claim};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
-
-/// Каталог рядом с exe (портативная установка). Дев-режим: корень репозитория.
-fn app_root_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// Найти корень репо в dev (…/desktop/src-tauri/target/<profile>/exe -> вверх до dub-studio).
-/// В портативной сборке возвращаем каталог рядом с exe (там лежат frontend/, models/, fonts/).
-fn resolve_repo_root() -> PathBuf {
-    // Явное переопределение (dev / тесты).
-    if let Ok(r) = std::env::var("DUB_STUDIO_ROOT") {
-        return PathBuf::from(r);
-    }
-    let exe_dir = app_root_dir();
-    // Портативная раскладка: ресурсы (frontend/models) лежат рядом с оболочкой (dub-server встроен в exe).
-    if exe_dir.join("frontend").is_dir() && exe_dir.join("models").is_dir() {
-        return exe_dir;
-    }
-    // Dev: exe в …/desktop/src-tauri/target/<profile>/. Поднимаемся до каталога с crates/.
-    let mut d = exe_dir.as_path();
-    for _ in 0..6 {
-        if d.join("crates").is_dir() && d.join("frontend").is_dir() {
-            return d.to_path_buf();
-        }
-        match d.parent() {
-            Some(p) => d = p,
-            None => break,
-        }
-    }
-    exe_dir
-}
 
 /// Ждать, пока встроенный сервер ответит на /health, или его поток не сообщит, что остановился.
 fn wait_for_own_service(port: u16, stopped: &Receiver<Result<(), String>>) -> Result<(), String> {
@@ -131,7 +98,7 @@ fn setup_server_env(repo_root: &PathBuf) {
             // GPU-сборка (cuda13) приоритетнее — суперсет CPU+CUDA; переключение backend без рестарта.
             rt.join("onnxruntime-win-x64-gpu_cuda13-1.28.2").join("lib").join("onnxruntime.dll"),
             rt.join("onnxruntime-win-x64-1.28.2").join("lib").join("onnxruntime.dll"),
-            app_root_dir().join("onnxruntime.dll"),
+            layout::executable_directory().join("onnxruntime.dll"),
             rt.join("onnxruntime-1.28.dll"),
             rt.join("onnxruntime.dll"),
         ] {
@@ -143,36 +110,37 @@ fn setup_server_env(repo_root: &PathBuf) {
     }
 }
 
-/// Портативная раскладка (ресурсы рядом с exe)? Тот же маркер, что в resolve_repo_root.
-fn is_portable() -> bool {
-    let d = app_root_dir();
-    d.join("frontend").is_dir() && d.join("models").is_dir()
-}
-
 /// Проверка обновления на GitHub-релизе и (по согласию юзера) установка. Драйвится из Rust: фронт
 /// грузится с внешнего http-URL встроенного сервера, где Tauri JS-IPC ненадёжен, а Rust-апдейтер
-/// работает независимо от webview. Тихо выходит при отсутствии апдейта/сети. Портатив НЕ ставит на
-/// лету (нельзя перезаписать запущенный ~489-МБ каталог) — предлагает открыть страницу релиза.
+/// работает независимо от webview. Тихо выходит при отсутствии апдейта/сети. На лету ставится только
+/// копия из NSIS-установщика; портатив (нельзя перезаписать запущенный ~489-МБ каталог), MSI
+/// (msiexec не принимает /D=, а Program Files без повышения прав недоступен) и сборка без типа
+/// бандла получают предложение открыть страницу релиза.
 const RELEASES_URL: &str = "https://github.com/timoncool/dub-studio/releases/latest";
 fn spawn_update_check(app: tauri::AppHandle, portable: bool) {
+    use tauri::utils::config::BundleType;
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     use tauri_plugin_updater::UpdaterExt;
+    let install_in_place =
+        !portable && tauri::utils::platform::bundle_type() == Some(BundleType::Nsis);
     tauri::async_runtime::spawn(async move {
         // Установщик — ребёнок этого процесса, а процесс сидит в своём job с kill-on-close: без
         // освобождения установщик умер бы вместе со студией, ничего не поставив. Свой хук заменяет
         // штатный, поэтому cleanup_before_exit вызывается здесь же.
         let cleanup = app.clone();
-        let updater = match app
-            .updater_builder()
-            .on_before_exit(move || {
-                cleanup.cleanup_before_exit();
-                dub_server::process_group::terminate_group_members();
-                if !dub_server::process_group::release_children() {
-                    eprintln!("[ERROR] установщик обновления не выведен из job object студии");
-                }
-            })
-            .build()
-        {
+        let mut builder = app.updater_builder().on_before_exit(move || {
+            cleanup.cleanup_before_exit();
+            dub_server::process_group::terminate_group_members();
+            if !dub_server::process_group::release_children() {
+                eprintln!("[ERROR] установщик обновления не выведен из job object студии");
+            }
+        });
+        if install_in_place {
+            // Без /D= установщик, запущенный из студии, ставит копию в папку по умолчанию, а не в
+            // текущую; NSIS требует его последним аргументом и без кавычек.
+            builder = builder.installer_arg(format!("/D={}", layout::executable_directory().display()));
+        }
+        let updater = match builder.build() {
             Ok(u) => u,
             Err(_) => return,
         };
@@ -181,7 +149,7 @@ fn spawn_update_check(app: tauri::AppHandle, portable: bool) {
             _ => return, // нет апдейта или ошибка сети -> тихо
         };
         let ver = update.version.clone();
-        if portable {
+        if !install_in_place {
             let open = app
                 .dialog()
                 .message(format!(
@@ -276,15 +244,11 @@ pub fn run() {
     }
     #[cfg(windows)]
     hide_console_window();
-    // Портатив: состояние WebView2 (localStorage) держим рядом с exe, а не в профиле пользователя.
-    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
-        std::env::set_var(
-            "WEBVIEW2_USER_DATA_FOLDER",
-            app_root_dir().join("webview-data"),
-        );
-    }
-
-    let repo_root = resolve_repo_root();
+    let placed = match layout::resolve().and_then(|l| layout::apply_environment(&l).map(|_| l)) {
+        Ok(l) => l,
+        Err(e) => layout::fatal(&e),
+    };
+    let repo_root = placed.server_root;
     setup_server_env(&repo_root);
 
     let context = tauri::generate_context!();
@@ -342,7 +306,7 @@ pub fn run() {
                 let _ = win.set_icon(ic);
             }
             // авто-обновление: проверка на GitHub-релизе в фоне, установка по согласию (см. spawn_update_check)
-            spawn_update_check(app.handle().clone(), is_portable());
+            spawn_update_check(app.handle().clone(), layout::is_portable());
             Ok(())
         })
         .run(context)

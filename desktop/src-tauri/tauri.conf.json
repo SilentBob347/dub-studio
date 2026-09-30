@@ -33,7 +33,19 @@
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installerHooks": "installer-hooks.nsi",
+        "languages": [
+          "English",
+          "Russian"
+        ],
+        "customLanguageFiles": {
+          "English": "installer-english.nsh",
+          "Russian": "installer-russian.nsh"
+        }
       }
     }
-  }
+  },
+  "mainBinaryName": "Dub-Studio"
 }

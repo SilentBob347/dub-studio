@@ -1,2 +1,5 @@
+# Text is stored and checked out with LF, whatever tool wrote it; Windows command scripts keep CRLF.
+* text=auto eol=lf
 *.bat text eol=crlf
 *.cmd text eol=crlf
+*.ps1 text eol=crlf
