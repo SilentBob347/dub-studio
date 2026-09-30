@@ -280,17 +280,10 @@ pub fn run() {
     let context = tauri::generate_context!();
     service::set_app_version(context.package_info().version.to_string());
 
-    // axum-бэкенд поднимается В ЭТОМ ЖЕ процессе на фоновом потоке — ОДИН exe, без dub-server.exe-сайдкара.
-    // Окно открывается только после ответа /health, чтобы не встать на пустую страницу.
-    let port = match start_or_reuse_service(&repo_root) {
-        Ok(p) => p,
-        Err(message) => return fatal(&message),
-    };
-
-    let url = format!("http://127.0.0.1:{port}/");
-
     tauri::Builder::default()
         // Первым: второй запуск должен уйти до остальной настройки, отдав фокус открытому окну.
+        // Сервис поднимается только в .setup(), который Tauri зовёт после setup плагинов: второй
+        // запуск выходит здесь, не тронув порт, и сервер живёт в процессе, чьё окно останется.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(win) = app.get_webview_window("main") {
                 let shown = win.unminimize().and_then(|_| win.show()).and_then(|_| win.set_focus());
@@ -304,6 +297,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            // axum-бэкенд поднимается В ЭТОМ ЖЕ процессе на фоновом потоке — ОДИН exe, без dub-server.exe-сайдкара.
+            // Окно открывается только после ответа /health, чтобы не встать на пустую страницу.
+            let port = match start_or_reuse_service(&repo_root) {
+                Ok(p) => p,
+                Err(message) => {
+                    fatal(&message);
+                    app.handle().exit(1);
+                    return Ok(());
+                }
+            };
+            let url = format!("http://127.0.0.1:{port}/");
             // Иконка бандла для GUI-окна: без явной установки окно оставалось пустым в ALT+TAB/панели задач
             // (иконка висела на консольном окне). Ставим её на само GUI-окно.
             let icon = app.default_window_icon().cloned();

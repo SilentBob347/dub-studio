@@ -9,16 +9,16 @@ description: Use when building or releasing dub-studio — tauri build, setup.ex
 
 ## Steps
 1. **Portable zip**: read the newest `scratchpad/pack_portable_<ver>.ps1` (highest number) and copy→bump it. It takes a base portable zip (engine DLLs/models unchanged) and swaps in fresh `Dub Studio.exe` + `frontend/dist` + `fonts`. Add any NEW sidecar files here too.
-2. **Signing (critical)**: the updater key `~/.tauri/dubstudio-updater.key` **HAS a password** (stored in the `reference_dubstudio_updater` memory — NOT empty). Before `npx tauri build`:
+2. **Signing (critical)**: the updater key `~/.tauri/dubstudio-updater.key` **HAS a password** (stored in the `reference_dubstudio_updater` memory — NOT empty). The installer is built from `desktop/` with `npm run bundle` (= `npx tauri build --config src-tauri/tauri.bundle.conf.json`); plain `npx tauri build` only builds the exe (`bundle.active` is false in `tauri.conf.json`, and `--bundles` without the bundle config fails in `beforeBundleCommand`). Before `npm run bundle`:
    ```
    export TAURI_SIGNING_PRIVATE_KEY="$(cat /c/Users/user/.tauri/dubstudio-updater.key)"
    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD='<from reference_dubstudio_updater memory>'
    ```
    An empty/wrong password → `failed to decode secret key: Wrong password` → no `.sig` → auto-update dead. `latest.json` embeds the setup.exe `.sig`.
 3. **New sidecar binaries** (e.g. `tools/openrouter-helper/openrouter-helper.exe`): `repo_root` = the dir next to the exe (holds `frontend/`, `models/`, `fonts/`). So ship the binary in BOTH:
-   - installer → `tauri.conf.json` `bundle.resources`: `"staging/tools/X": "tools/X"` + copy into `staging/`
+   - installer → `tauri.bundle.conf.json` `bundle.resources`: `"staging/tools/X": "tools/X"` + copy into `staging/` (see `desktop/src-tauri/STAGING.md`)
    - portable zip → add entry at the same relative path
-4. **Kill the running server first** (holds the exe lock → `os error 5` on build): `taskkill //IM dub-studio-desktop.exe //F` + free port 8765.
+4. **Kill the running server first** (holds the exe lock → `os error 5` on build): `taskkill //IM dub-studio-desktop.exe //F` + free port 8793 (`DUB_STUDIO_PORT`).
 5. Never commit `models/active.json` (gitignored, holds the OpenRouter key) or test media.
 
 ## Release notes discipline
