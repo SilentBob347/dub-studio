@@ -1837,17 +1837,30 @@ async fn patch_project(
 
 // ─── POST /projects/{pid}/render ────────────────────────────────────────────
 
-/// Хвост рендера/озвучки: сбросить dirty у сегментов, чьи правки запечены (при regen), и перенести ключи
-/// синтеза из seg_ckpt.json в Segment.ckpt. project.json перечитывается с диска (а не пишется
-/// захваченный proj), чтобы не затереть правки, пришедшие во время джобы.
-fn bake_render_state(proj: &Project, proj_path: &Path, dir_for_job: &Path, regen: bool) -> Result<(), String> {
-    let baked: std::collections::HashMap<&str, &str> =
-        proj.segments.iter().map(|s| (s.id.as_str(), s.tgt_text.as_str())).collect();
+/// Хвост рендера/озвучки: сбросить dirty у сегментов, чьи правки запечены, и перенести ключи синтеза из
+/// seg_ckpt.json в Segment.ckpt. Запечены все правки при regen и реплики, переписанные циклом сокращения
+/// (`shortened` — проект после него): второй проход озвучивает их и без regen. project.json перечитывается
+/// с диска (а не пишется захваченный proj), чтобы не затереть правки, пришедшие во время джобы.
+fn bake_render_state(
+    start: &Project,
+    shortened: Option<&Project>,
+    proj_path: &Path,
+    dir_for_job: &Path,
+    regen: bool,
+) -> Result<(), String> {
+    fn texts(p: &Project) -> HashMap<&str, &str> {
+        p.segments.iter().map(|s| (s.id.as_str(), s.tgt_text.as_str())).collect()
+    }
+    let before = texts(start);
+    let after = shortened.map(texts);
+    let baked = after.as_ref().unwrap_or(&before);
     let ckpts = render::SegCkpts::load(dir_for_job)?;
     let t2 = std::fs::read_to_string(proj_path).map_err(|e| format!("чтение {}: {e}", proj_path.display()))?;
     let mut cur = Project::from_json(&t2).map_err(|e| format!("разбор {}: {e}", proj_path.display()))?;
     for s in &mut cur.segments {
-        if regen && baked.get(s.id.as_str()).copied() == Some(s.tgt_text.as_str()) {
+        let id = s.id.as_str();
+        let voiced = regen || baked.get(id) != before.get(id);
+        if voiced && baked.get(id).copied() == Some(s.tgt_text.as_str()) {
             s.dirty = false;
         }
         if let Some(sid) = render::seg_file_id(&s.id) {
@@ -1859,6 +1872,55 @@ fn bake_render_state(proj: &Project, proj_path: &Path, dir_for_job: &Path, regen
         }
     }
     save_project_atomic(dir_for_job, &cur)
+}
+
+#[cfg(test)]
+mod bake_tests {
+    use super::*;
+
+    fn seg(id: &str, tgt: &str) -> dub_core::Segment {
+        let mut s: dub_core::Segment = serde_json::from_value(json!({ "id": id, "start": 0.0, "end": 1.0, "src_text": "x", "tgt_text": tgt })).unwrap();
+        s.dirty = false;
+        s
+    }
+
+    fn load(d: &Path) -> Project {
+        Project::from_json(&std::fs::read_to_string(d.join("project.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn lines_the_render_loop_shortened_are_baked_without_regen() {
+        let d = std::env::temp_dir().join(format!("dub_bake_{}_{}", std::process::id(), uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&d).unwrap();
+        let start = Project {
+            segments: vec![seg("s1", "Нам прямо сейчас уже пора идти"), seg("s2", "Да"), seg("s3", "Эта фраза тоже длинная")],
+            ..Default::default()
+        };
+        let mut after = start.clone();
+        for (i, to) in [(0, "Нам пора"), (2, "Фраза длинная")] {
+            let c = shorten::Change { id: after.segments[i].id.clone(), from: after.segments[i].tgt_text.clone(), to: to.into() };
+            shorten::mark(&mut after.segments[i], &c);
+        }
+        let mut disk = after.clone();
+        disk.segments[1].dirty = true;
+        disk.segments[2].tgt_text = "Правка во время рендера".into();
+        save_project_atomic(&d, &disk).unwrap();
+
+        bake_render_state(&start, Some(&after), &d.join("project.json"), &d, false).unwrap();
+        let back = load(&d);
+        assert!(!back.segments[0].dirty, "the second pass voiced the shortened line");
+        assert_eq!(back.segments[0].tgt_text, "Нам пора");
+        assert!(back.segments[1].dirty, "an edit made during the job is not in this render");
+        assert!(back.segments[2].dirty, "the line was edited after it was shortened");
+
+        bake_render_state(&start, None, &d.join("project.json"), &d, false).unwrap();
+        assert!(load(&d).segments[1].dirty, "without regen and without shortening nothing is baked");
+
+        bake_render_state(&after, None, &d.join("project.json"), &d, true).unwrap();
+        let back = load(&d);
+        assert!(!back.segments[1].dirty && back.segments[2].dirty);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }
 
 async fn render_project(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> Response {
@@ -1938,7 +2000,7 @@ async fn render_enqueue(st: &AppState, pid: &str) -> Result<String, Box<Response
                 cb(json!({ "stage": "cost", "msg": format!("OpenRouter: потрачено ${spent:.4} за прогон (всего использовано ${a:.2})") }));
             }
         }
-        bake_render_state(done.project.as_ref().unwrap_or(&proj), &proj_path, &dir_for_job, regen)?;
+        bake_render_state(&proj, done.project.as_ref(), &proj_path, &dir_for_job, regen)?;
         Ok(json!({ "output": out_for_result.to_string_lossy() }))
     });
     st.jobs
@@ -2104,7 +2166,7 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
         let cb = |ev: Value| progress(ev);
         let regen = p.segments.iter().any(|s| s.dirty);
         let done = render::run(&p, &paths, regen, &cb)?;
-        bake_render_state(done.project.as_ref().unwrap_or(&p), &pj, &dst_for_job, regen)?;
+        bake_render_state(&p, done.project.as_ref(), &pj, &dst_for_job, regen)?;
         Ok(json!({ "output": out_res.to_string_lossy(), "project_id": new_pid_res }))
     });
     st.jobs
@@ -2263,7 +2325,7 @@ async fn dub_audio_enqueue(st: &AppState, pid: &str) -> Result<String, Box<Respo
         let (out, shortened) = render::dub_audio(&proj, &paths, regen, &cb)?;
         // Правки запечены в озвучку (seg_XXX.wav) -> сбросить dirty, как делает render_project. Иначе
         // последующий Экспорт (render видит dirty) РЕ-РОЛЛИТ уже одобренный дубляж — регресс «скидывается».
-        bake_render_state(shortened.as_ref().unwrap_or(&proj), &proj_path, &dir_for_job, regen)?;
+        bake_render_state(&proj, shortened.as_ref(), &proj_path, &dir_for_job, regen)?;
         Ok(json!({ "audio": out.to_string_lossy() }))
     });
     st.jobs
