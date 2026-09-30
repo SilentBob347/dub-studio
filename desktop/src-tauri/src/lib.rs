@@ -3,48 +3,15 @@
 //! окно на этот URL. Сервер сам раздаёт SPA (frontend/dist) и API на одном origin — фронт работает
 //! с относительными путями без правок.
 //!
-//! Портативность взята из эталона Higgs-Ultimate (desktop/src-tauri/src/lib.rs):
-//! app_root_dir = каталог рядом с exe; WEBVIEW2_USER_DATA_FOLDER и рантайм-модели держим там же.
+//! Где лежат ресурсы, данные, профиль WebView2 и временные файлы — решает модуль `layout`.
+
+mod layout;
 
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tauri::{WebviewUrl, WebviewWindowBuilder};
-
-/// Каталог рядом с exe (портативная установка). Дев-режим: корень репозитория.
-fn app_root_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// Найти корень репо в dev (…/desktop/src-tauri/target/<profile>/exe -> вверх до dub-studio).
-/// В портативной сборке возвращаем каталог рядом с exe (там лежат frontend/, models/, fonts/).
-fn resolve_repo_root() -> PathBuf {
-    // Явное переопределение (dev / тесты).
-    if let Ok(r) = std::env::var("DUB_STUDIO_ROOT") {
-        return PathBuf::from(r);
-    }
-    let exe_dir = app_root_dir();
-    // Портативная раскладка: ресурсы (frontend/models) лежат рядом с оболочкой (dub-server встроен в exe).
-    if exe_dir.join("frontend").is_dir() && exe_dir.join("models").is_dir() {
-        return exe_dir;
-    }
-    // Dev: exe в …/desktop/src-tauri/target/<profile>/. Поднимаемся до каталога с crates/.
-    let mut d = exe_dir.as_path();
-    for _ in 0..6 {
-        if d.join("crates").is_dir() && d.join("frontend").is_dir() {
-            return d.to_path_buf();
-        }
-        match d.parent() {
-            Some(p) => d = p,
-            None => break,
-        }
-    }
-    exe_dir
-}
 
 /// Занять свободный TCP-порт на 127.0.0.1 (ядро выдаёт порт 0 -> читаем реальный, отпускаем).
 fn pick_free_port() -> std::io::Result<u16> {
@@ -74,7 +41,7 @@ fn setup_server_env(repo_root: &PathBuf) {
             // GPU-сборка (cuda13) приоритетнее — суперсет CPU+CUDA; переключение backend без рестарта.
             rt.join("onnxruntime-win-x64-gpu_cuda13-1.28.2").join("lib").join("onnxruntime.dll"),
             rt.join("onnxruntime-win-x64-1.28.2").join("lib").join("onnxruntime.dll"),
-            app_root_dir().join("onnxruntime.dll"),
+            layout::executable_directory().join("onnxruntime.dll"),
             rt.join("onnxruntime-1.28.dll"),
             rt.join("onnxruntime.dll"),
         ] {
@@ -86,12 +53,6 @@ fn setup_server_env(repo_root: &PathBuf) {
     }
 }
 
-/// Портативная раскладка (ресурсы рядом с exe)? Тот же маркер, что в resolve_repo_root.
-fn is_portable() -> bool {
-    let d = app_root_dir();
-    d.join("frontend").is_dir() && d.join("models").is_dir()
-}
-
 /// Проверка обновления на GitHub-релизе и (по согласию юзера) установка. Драйвится из Rust: фронт
 /// грузится с внешнего http-URL встроенного сервера, где Tauri JS-IPC ненадёжен, а Rust-апдейтер
 /// работает независимо от webview. Тихо выходит при отсутствии апдейта/сети. Портатив НЕ ставит на
@@ -101,7 +62,16 @@ fn spawn_update_check(app: tauri::AppHandle, portable: bool) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     use tauri_plugin_updater::UpdaterExt;
     tauri::async_runtime::spawn(async move {
-        let updater = match app.updater() {
+        // Без /D= установщик, запущенный из студии, ставит копию в папку по умолчанию, а не в текущую;
+        // NSIS требует его последним аргументом и без кавычек.
+        let cleanup = app.clone();
+        let install_directory = format!("/D={}", layout::executable_directory().display());
+        let updater = match app
+            .updater_builder()
+            .installer_arg(install_directory)
+            .on_before_exit(move || cleanup.cleanup_before_exit())
+            .build()
+        {
             Ok(u) => u,
             Err(_) => return,
         };
@@ -189,15 +159,11 @@ fn hide_console_window() {
 pub fn run() {
     #[cfg(windows)]
     hide_console_window();
-    // Портатив: состояние WebView2 (localStorage) держим рядом с exe, а не в профиле пользователя.
-    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
-        std::env::set_var(
-            "WEBVIEW2_USER_DATA_FOLDER",
-            app_root_dir().join("webview-data"),
-        );
-    }
-
-    let repo_root = resolve_repo_root();
+    let placed = match layout::resolve().and_then(|l| layout::apply_environment(&l).map(|_| l)) {
+        Ok(l) => l,
+        Err(e) => layout::fatal(&e),
+    };
+    let repo_root = placed.server_root;
     let port = pick_free_port().unwrap_or(8765);
     setup_server_env(&repo_root);
 
@@ -244,7 +210,7 @@ pub fn run() {
                 let _ = win.set_icon(ic);
             }
             // авто-обновление: проверка на GitHub-релизе в фоне, установка по согласию (см. spawn_update_check)
-            spawn_update_check(app.handle().clone(), is_portable());
+            spawn_update_check(app.handle().clone(), layout::is_portable());
             Ok(())
         })
         .run(tauri::generate_context!())
