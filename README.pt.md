@@ -35,7 +35,7 @@
 
 Por padrão tudo roda **localmente na sua máquina** —— sem nuvem, sem assinatura: nem o seu material nem a sua voz saem do computador. E se o seu PC for fraco (não roda o Gemma/Higgs local) ou você quiser mais velocidade e qualidade, as partes pesadas (tradução, visão, TTS, transcrição) podem **opcionalmente** ir para a nuvem via **OpenRouter** —— cada motor escolhido separadamente (local ↔ nuvem), com vozes atribuídas automaticamente por sexo do falante (beta). A chave fica guardada localmente; tudo desativado por padrão.
 
-Esta é **uma reescrita totalmente nativa**. Sem Python embutido, sem torch, sem wheels CUDA. Todo o pipeline é **Rust + motores nativos C++/CUDA (GGUF/ONNX)**: um processo, início rápido, baixo consumo de VRAM. Modelos, motores, runtime CUDA/VC++ e ffmpeg são **baixados e instalados pelo próprio app** no primeiro uso. **NVIDIA é recomendada, mas não obrigatória**: a separação tem uma build para CPU, a diarização e o ASR rodam na CPU, e as etapas pesadas (tradução, visão, TTS) vão para a nuvem, então uma dublagem pode ser montada numa máquina sem NVIDIA alguma.
+Esta é **uma reescrita totalmente nativa**. Sem Python embutido, sem torch, sem wheels CUDA. Todo o pipeline é **Rust + motores nativos C++/CUDA (GGUF/ONNX)**: um processo, início rápido, baixo consumo de VRAM. Modelos, motores, runtime CUDA/VC++ e ffmpeg são **baixados e instalados pelo próprio app** no primeiro uso. **O app é feito e testado para uma GPU NVIDIA**: a voz, a tradução e a visão rodam localmente em CUDA, e as legendas são gravadas no vídeo com NVENC. A separação, a diarização e o reconhecimento podem rodar na CPU e as etapas pesadas podem ir para o OpenRouter, mas uma máquina sem NVIDIA não é uma configuração testada: veja *O que roda onde* abaixo.
 
 ## Cinco modos, alternáveis na hora
 
@@ -74,7 +74,7 @@ Carregue um clipe uma vez e envie-o para qualquer modo dentro do editor.
 - **Qualquer formato de vídeo** —— MP4, MOV, MKV, WEBM, AVI e mais (decodificado via ffmpeg).
 - **Instalação de um botão + atualização automática** —— modelos, motores, runtime CUDA/VC++ e ffmpeg baixam no primeiro uso; o app se atualiza sozinho.
 - **Downloads retomáveis** —— modelos grandes (10 GB+) retomam de onde pararam após queda de conexão, em vez de recomeçar.
-- **Rode cada etapa onde quiser** —— separação, diarização e ASR alternam de forma independente entre **GPU, CPU e nuvem**; combine como quiser. Com os modelos pesados (tradução, visão, TTS) delegáveis ao **OpenRouter**, todo o pipeline roda até numa máquina **sem NVIDIA**.
+- **Rode cada etapa onde quiser** —— separação, diarização e reconhecimento alternam de forma independente entre **GPU e CPU**, e o reconhecimento, a tradução, a visão e a voz podem ser delegados ao **OpenRouter**. A tabela *O que roda onde*, abaixo, mostra o que cada etapa realmente pode usar.
 - **Ajuste ao seu hardware** —— cada motor traz várias quantizações (TTS Q8/Q6/Q4, tradução Q4…Q8, ASR int8/fp32 ou Whisper tiny…large-v3-turbo, separação Q8/Q5/Q4) — troque nas configurações; limite o lote de prefill e a duração da referência para GPU de 8–12 GB e 32 GB de RAM.
 - **Totalmente portátil** —— nada é escrito no seu perfil de usuário; apague a pasta e não sobra rastro.
 
@@ -91,11 +91,11 @@ Modo transcrição —— transcrição diarizada com layout por falante, karaok
 ## Requisitos
 
 - **SO:** Windows 10 / 11 (x64)
-- **GPU:** NVIDIA com 8–16 GB de VRAM recomendada —— **ou nenhuma**: separação, diarização e ASR rodam na CPU, e os modelos pesados vão para a nuvem
-- **WebView2** —— pré-instalado no Windows 11 (instala sozinho no Windows 10)
-- **Disco:** ~15 GB para modelos, motores e runtime (baixados no primeiro uso), mais espaço para seus projetos
+- **GPU:** NVIDIA com 8 GB de VRAM ou mais (há predefinições para 8, 12, 16, 24 e 32 GB) e um driver recente. A voz local (Higgs Audio), a tradução e a visão (Gemma) rodam em CUDA, e as legendas são gravadas com NVENC. Sem NVIDIA, só podem funcionar as etapas que *O que roda onde* marca para a CPU ou a nuvem, e essa configuração não é testada
+- **WebView2** —— pré-instalado no Windows 11; no Windows 10 o instalador o baixa (se falhar, veja *Solução de problemas*)
+- **Disco:** ~15 GB para os modelos padrão, os motores e o runtime (baixados no primeiro uso), mais espaço para seus projetos; as quantizações alternativas e os modelos Whisper são extras
 
-Numa máquina com NVIDIA, a única coisa que você instala à mão é um **[driver NVIDIA](https://www.nvidia.com/Download/index.aspx)** recente. Todo o resto o app baixa com um botão no primeiro uso.
+Numa máquina com NVIDIA, a única coisa que você instala à mão é um **[driver NVIDIA](https://www.nvidia.com/Download/index.aspx)** recente. Todo o resto —modelos (Higgs Audio v3, Gemma-4 12B + vision, Parakeet-TDT, Sortformer, Mel-Band Roformer), motores, runtime CUDA e ffmpeg— o app baixa com um botão no primeiro uso.
 
 ## Início rápido
 
@@ -105,6 +105,81 @@ Numa máquina com NVIDIA, a única coisa que você instala à mão é um **[driv
 4. **Solte um vídeo**, escolha o idioma-alvo → o passe automático cria o primeiro rascunho. Ajuste tudo no editor e clique em **Exportar**.
 
 > Tudo baixa e fica **dentro da pasta do app**. Modelos, caches e projetos não vão para outro lugar.
+
+O que mudou e quando está em [CHANGELOG.md](CHANGELOG.md), e o botão de brilhos no topo do app o mostra. Regras para colaboradores e agentes de programação: [AGENTS.md](AGENTS.md).
+
+## Tudo o que o app baixa
+
+O painel de primeiro uso baixa tudo isso com um botão. Atrás de um proxy, ou onde o Hugging Face está bloqueado, configure um proxy (Configurações, **Proxy** no fim das configurações de modelos; HTTP, HTTPS ou SOCKS5 com o esquema, por exemplo `socks5://host:port`) ou baixe os arquivos você mesmo e coloque-os onde diz a última coluna, contando a partir da pasta do app (a que contém `models\`).
+
+Um arquivo no lugar indicado, com tamanho até 3 % diferente do indicado, conta como instalado e não é baixado de novo. **Importar da pasta** (no painel de primeiro uso e nas configurações de modelos) copia esses arquivos de qualquer pasta que você escolher. Os tamanhos são os do próprio manifesto do app, `crates/dub-server/src/setup.rs`, e esta tabela é conferida com ele.
+
+O runtime do Visual C++ e os modelos PP-OCR vêm dentro da versão e não são baixados; o driver NVIDIA é instalado à parte.
+
+<!-- downloads:start -->
+| Componente | Necessidade | Arquivos (links diretos) | Tamanho | Onde colocar |
+|---|---|---|---|---|
+| Higgs Audio v3 Q8_0 | obrigatório | [q8_0.gguf](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/q8_0.gguf)<br>[config.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/config.json)<br>[chat_template.jinja](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/chat_template.jinja)<br>[tokenizer.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/tokenizer.json)<br>[tokenizer_config.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/tokenizer_config.json)<br>[higgs_audio_v2_tokenizer_config.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/higgs_audio_v2_tokenizer_config.json) | 5.5 GB | como está, em `models\higgs-q8_0\` |
+| audiocpp_engine.dll (Higgs engine) | obrigatório | [audiocpp_engine.dll](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/engines/audiocpp_engine.dll) | 72 MB | como está, em `models\higgs-engine\` |
+| Gemma-4 12B QAT q4_0 + vision | obrigatório | [gemma-4-12b-it-qat-q4_0.gguf](https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf/resolve/main/gemma-4-12b-it-qat-q4_0.gguf)<br>[mmproj-gemma-4-12b-it-qat-q4_0.gguf](https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf/resolve/main/mmproj-gemma-4-12b-it-qat-q4_0.gguf) | 7.2 GB | como está, em `models\mt\` |
+| Gemma-4 12B Q5_K_M + vision | opcional | [gemma-4-12b-it-Q5_K_M.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q5_K_M.gguf)<br>[mmproj-F16.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf) | 8.6 GB | como está, em `models\mt-q5_0\` |
+| Gemma-4 12B Q6_K + vision | opcional | [gemma-4-12b-it-Q6_K.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q6_K.gguf)<br>[mmproj-F16.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf) | 10.0 GB | como está, em `models\mt-q6_k\` |
+| Gemma-4 12B Q8_0 + vision | opcional | [gemma-4-12b-it-Q8_0.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q8_0.gguf)<br>[mmproj-F16.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf) | 12.8 GB | como está, em `models\mt-q8_0\` |
+| Parakeet-TDT 0.6B v3 int8 | obrigatório | [encoder-model.int8.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.int8.onnx)<br>[decoder_joint-model.int8.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.int8.onnx)<br>[nemo128.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/nemo128.onnx)<br>[vocab.txt](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt)<br>[config.json](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/config.json) | 689 MB | como está, em `models\tdt\` |
+| Higgs Audio v3 Q6_K | opcional | [q6_k.gguf](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/q6_k.gguf)<br>[config.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/config.json)<br>[chat_template.jinja](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/chat_template.jinja)<br>[tokenizer.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/tokenizer.json)<br>[tokenizer_config.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/tokenizer_config.json)<br>[higgs_audio_v2_tokenizer_config.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/higgs_audio_v2_tokenizer_config.json) | 5.0 GB | como está, em `models\higgs-q6_k\` |
+| Higgs Audio v3 Q4_K_M | opcional | [q4_k_m.gguf](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/q4_k_m.gguf)<br>[config.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/config.json)<br>[chat_template.jinja](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/chat_template.jinja)<br>[tokenizer.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/tokenizer.json)<br>[tokenizer_config.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/tokenizer_config.json)<br>[higgs_audio_v2_tokenizer_config.json](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/higgs_audio_v2_tokenizer_config.json) | 4.1 GB | como está, em `models\higgs-q4_k_m\` |
+| Parakeet-TDT 0.6B v3 fp32 | opcional | [encoder-model.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.onnx)<br>[encoder-model.onnx.data](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.onnx.data)<br>[decoder_joint-model.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.onnx)<br>[nemo128.onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/nemo128.onnx)<br>[vocab.txt](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt)<br>[config.json](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/config.json) | 2.6 GB | como está, em `models\tdt-fp32\` |
+| Whisper-Faster (faster-whisper standalone) | opcional | [Whisper-Faster_r192.3_windows.zip](https://github.com/Purfview/whisper-standalone-win/releases/download/faster-whisper/Whisper-Faster_r192.3_windows.zip) | 88 MB | descompactar os arquivos, sem subpastas, em `tools\whisper\` |
+| Whisper CUDA (cuBLAS 11, cuDNN 8) | opcional | [libcublas-windows-x86_64-11.11.3.6-archive.zip](https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-11.11.3.6-archive.zip)<br>[cudnn-windows-x86_64-8.9.7.29_cuda11-archive.zip](https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-8.9.7.29_cuda11-archive.zip) | 1.1 GB | pegar todos os .dll do arquivo e colocar em `tools\whisper\` |
+| Whisper tiny | opcional | [model.bin](https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/model.bin)<br>[config.json](https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/config.json)<br>[tokenizer.json](https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/tokenizer.json)<br>[vocabulary.txt](https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/vocabulary.txt) | 78 MB | como está, em `models\whisper\faster-whisper-tiny\` |
+| Whisper base | opcional | [model.bin](https://huggingface.co/Systran/faster-whisper-base/resolve/main/model.bin)<br>[config.json](https://huggingface.co/Systran/faster-whisper-base/resolve/main/config.json)<br>[tokenizer.json](https://huggingface.co/Systran/faster-whisper-base/resolve/main/tokenizer.json)<br>[vocabulary.txt](https://huggingface.co/Systran/faster-whisper-base/resolve/main/vocabulary.txt) | 148 MB | como está, em `models\whisper\faster-whisper-base\` |
+| Whisper small | opcional | [model.bin](https://huggingface.co/Systran/faster-whisper-small/resolve/main/model.bin)<br>[config.json](https://huggingface.co/Systran/faster-whisper-small/resolve/main/config.json)<br>[tokenizer.json](https://huggingface.co/Systran/faster-whisper-small/resolve/main/tokenizer.json)<br>[vocabulary.txt](https://huggingface.co/Systran/faster-whisper-small/resolve/main/vocabulary.txt) | 486 MB | como está, em `models\whisper\faster-whisper-small\` |
+| Whisper medium | opcional | [model.bin](https://huggingface.co/Systran/faster-whisper-medium/resolve/main/model.bin)<br>[config.json](https://huggingface.co/Systran/faster-whisper-medium/resolve/main/config.json)<br>[tokenizer.json](https://huggingface.co/Systran/faster-whisper-medium/resolve/main/tokenizer.json)<br>[vocabulary.txt](https://huggingface.co/Systran/faster-whisper-medium/resolve/main/vocabulary.txt) | 1.5 GB | como está, em `models\whisper\faster-whisper-medium\` |
+| Whisper large-v3 | opcional | [model.bin](https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/model.bin)<br>[config.json](https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/config.json)<br>[preprocessor_config.json](https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/preprocessor_config.json)<br>[tokenizer.json](https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/tokenizer.json)<br>[vocabulary.json](https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/vocabulary.json) | 3.1 GB | como está, em `models\whisper\faster-whisper-large-v3\` |
+| Whisper large-v3-turbo | opcional | [model.bin](https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/model.bin)<br>[config.json](https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/config.json)<br>[preprocessor_config.json](https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/preprocessor_config.json)<br>[tokenizer.json](https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/tokenizer.json)<br>[vocabulary.json](https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/vocabulary.json) | 1.6 GB | como está, em `models\whisper\faster-whisper-large-v3-turbo\` |
+| Sortformer v2 | recomendado | [diar_streaming_sortformer_4spk-v2.onnx](https://huggingface.co/altunenes/parakeet-rs/resolve/main/diar_streaming_sortformer_4spk-v2.onnx) | 492 MB | como está, em `models\sortformer\` |
+| Mel-Band Roformer voc_fv6 Q8_0 | recomendado | [voc_fv6-Q8_0.gguf](https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/main/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q8_0.gguf) | 252 MB | como está, em `models\bsroformer\` |
+| Mel-Band Roformer voc_fv6 Q5_0 | opcional | [voc_fv6-Q5_0.gguf](https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/main/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q5_0.gguf) | 167 MB | como está, em `models\bsroformer\` |
+| Mel-Band Roformer voc_fv6 Q4_0 | opcional | [voc_fv6-Q4_0.gguf](https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/main/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q4_0.gguf) | 139 MB | como está, em `models\bsroformer\` |
+| Modelos de casting (rostos e voz) | recomendado | [model.onnx](https://huggingface.co/immich-app/buffalo_l/resolve/main/detection/model.onnx)<br>[LVFace-L_Glint360K.onnx](https://huggingface.co/bytedance-research/LVFace/resolve/main/LVFace-L_Glint360K/LVFace-L_Glint360K.onnx)<br>[model_feat.onnx](https://huggingface.co/deepghs/ccip_onnx/resolve/main/ccip-caformer-24-randaug-pruned/model_feat.onnx)<br>[model.onnx](https://huggingface.co/deepghs/anime_face_detection/resolve/main/face_detect_v1.4_s/model.onnx)<br>[xseg_1.onnx](https://huggingface.co/facefusion/models-3.1.0/resolve/main/xseg_1.onnx)<br>[voxceleb_resnet34_LM.onnx](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx) | 1.3 GB | como está, em `models\faces\`<br>como está, em `models\faces\ccip\`<br>como está, em `models\faces\anime_face\`<br>como está, em `models\faces\occluder\`<br>como está, em `models\faces\wespeaker\` |
+| BSRoformer.cpp (CUDA) | recomendado | [BSRoformer-windows-cuda-13.1.0.zip](https://github.com/chenmozhijin/BSRoformer.cpp/releases/download/v0.1.0/BSRoformer-windows-cuda-13.1.0.zip) | 165 MB | descompactar os arquivos, sem subpastas, em `tools\bsroformer\` |
+| BSRoformer.cpp (CPU) | opcional | [BSRoformer-windows-x64-msvc.zip](https://github.com/chenmozhijin/BSRoformer.cpp/releases/download/v0.1.0/BSRoformer-windows-x64-msvc.zip) | 671 KB | descompactar os arquivos, sem subpastas, em `tools\bsroformer-cpu\` |
+| llama.cpp server (CUDA) | obrigatório | [llama-b11146-bin-win-cuda-13.4-x64.zip](https://github.com/ggml-org/llama.cpp/releases/download/b11146/llama-b11146-bin-win-cuda-13.4-x64.zip) | 150 MB | descompactar os arquivos, sem subpastas, em `tools\llama\` |
+| ONNX Runtime | obrigatório | [onnxruntime-win-x64-1.28.2.zip](https://github.com/microsoft/onnxruntime/releases/download/v1.28.2/onnxruntime-win-x64-1.28.2.zip) | 79 MB | descompactar com a árvore de pastas em `models\runtime\` |
+| ONNX Runtime GPU (CUDA) | recomendado | [onnxruntime-win-x64-gpu_cuda13-1.28.2.zip](https://github.com/microsoft/onnxruntime/releases/download/v1.28.2/onnxruntime-win-x64-gpu_cuda13-1.28.2.zip) | 366 MB | descompactar com a árvore de pastas em `models\runtime\` |
+| FFmpeg (static build) | obrigatório | [ffmpeg-master-latest-win64-gpl.zip](https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip) | 169 MB | pegar ffmpeg.exe e ffprobe.exe do arquivo e colocar em `tools\ffmpeg\` |
+| CUDA runtime (cudart, cuBLAS, cuFFT) | obrigatório | [nvidia_cuda_runtime-13.4.92-py3-none-win_amd64.whl](https://files.pythonhosted.org/packages/86/00/d5436004268f049214193659ebc36550b5ef3925c3d13b4cc980e13be6f5/nvidia_cuda_runtime-13.4.92-py3-none-win_amd64.whl)<br>[nvidia_cublas-13.8.0.4-py3-none-win_amd64.whl](https://files.pythonhosted.org/packages/a3/df/f1246959833e2c437db8be3e5b477f66b87f8817821ed40de6c7561c9a36/nvidia_cublas-13.8.0.4-py3-none-win_amd64.whl)<br>[libcufft-windows-x86_64-12.4.0.43-archive.zip](https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-12.4.0.43-archive.zip) | 586 MB | pegar todos os .dll do arquivo e colocar em `models\higgs-engine\` |
+| cuDNN 9 | recomendado | [nvidia_cudnn_cu13-9.27.0.42-py3-none-win_amd64.whl](https://files.pythonhosted.org/packages/87/6a/e55ff0ac26a5c6e2b21f41c9d04ad096b4ed6da593fba7e25845c61b0532/nvidia_cudnn_cu13-9.27.0.42-py3-none-win_amd64.whl) | 436 MB | pegar todos os .dll do arquivo e colocar em `models\higgs-engine\` |
+<!-- downloads:end -->
+
+## O que roda onde
+
+Cada etapa tem seu próprio seletor de dispositivo. *Sim* significa que o código tem esse caminho; a tabela não diz nada sobre velocidade nem cobertura de testes, e os caminhos de CPU são mais lentos. Os caminhos na nuvem precisam de uma chave do OpenRouter (Configurações) e vêm desativados por padrão.
+
+| Etapa | Motor | GPU NVIDIA | CPU | OpenRouter (nuvem) |
+|---|---|---|---|---|
+| Separação | Mel-Band Roformer (BSRoformer.cpp) | sim (versão CUDA) | sim (versão CPU separada, mais lenta) | não |
+| Diarização | Sortformer v2 | sim (ONNX Runtime CUDA) | sim | não |
+| Reconhecimento de fala | Parakeet-TDT ou Whisper-Faster | sim | sim | sim |
+| Tradução e visão | Gemma-4 12B (llama.cpp) | sim (versão CUDA) | não | sim |
+| Voz e clonagem | Higgs Audio v3 | sim (CUDA) | não | sim |
+| Texto na tela | PP-OCR | não | sim | não |
+| Casting (rostos e vozes) | SCRFD, LVFace, anime_face, CCIP, WeSpeaker | não | sim | não |
+| Legendas gravadas no vídeo | ffmpeg | sim (NVENC) | não | não |
+
+Sem NVIDIA, a voz, a tradução, a visão e o reconhecimento podem ir para a nuvem e a separação e a diarização para a CPU, mas a gravação das legendas não tem caminho de CPU, então uma máquina assim não é uma configuração testada.
+
+## Solução de problemas
+
+**O instalador para no WebView2.** A janela do app roda sobre o Microsoft Edge WebView2, e o instalador o baixa quando o Windows não o tem. Com uma conexão bloqueada ou instável, ou em versões do Windows 10 que recusam o pequeno inicializador da Microsoft (erro 0x80040902), esse download falha. Instale o WebView2 com o instalador independente da Microsoft, [Evergreen Standalone x64](https://go.microsoft.com/fwlink/p/?LinkId=2124701), e execute o instalador do Dub Studio de novo.
+
+**Os downloads travam ou falham.** Arquivos grandes retomam de onde pararam, então aperte o botão outra vez. Se o Hugging Face ou o GitHub estiverem bloqueados para você, configure um proxy (veja *Tudo o que o app baixa*) ou baixe os arquivos à mão pela tabela e use **Importar da pasta**.
+
+**A exportação para com `Unrecognized option 'filter_complex_script'`.** Era uma falha no ffmpeg 8 e mais novos, corrigida na 3.1.1: atualize o app. O app usa o ffmpeg de `tools\ffmpeg` e, se não houver nenhum, aceita o que estiver no `PATH`. Ao relatar um erro de exportação, anexe a saída completa do ffmpeg que está no log.
+
+**O reconhecimento falha com `MemcpyToHost` ou `Failed to allocate memory`.** A GPU ficou sem memória no reconhecimento de fala de um arquivo longo ou grande (issue #4). Feche outros programas que usam a GPU, ou ponha a etapa de reconhecimento em **CPU** nas configurações, e execute de novo.
+
+**`CUDA execution provider is not enabled`, ou tudo cai em um só falante.** As bibliotecas da GPU estão ausentes ou são antigas demais para o driver. Instale o driver NVIDIA atual, aperte o botão de download do runtime CUDA, do cuDNN e do ONNX Runtime GPU nas configurações de modelos, ou mude a etapa para CPU.
 
 ## Como funciona
 
@@ -138,10 +213,16 @@ Requer Node 20+, Rust (toolchain MSVC) e WebView2. Os motores nativos não preci
 
 ## Créditos
 
-- **[Boson AI](https://huggingface.co/bosonai)** —— modelo Higgs Audio v3; **[drbaph / Higgs-Audio-v3-Studio](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio)** —— quantizações GGUF e `audiocpp_engine.dll` nativo.
-- **[NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)** e **[Sortformer](https://huggingface.co/nvidia)** —— ASR e diarização; pesos ONNX de [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) e [altunenes/parakeet-rs](https://github.com/altunenes/parakeet-rs).
-- **[Google Gemma](https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf)** —— Gemma-4 12B (tradução + visão), via [llama.cpp](https://github.com/ggml-org/llama.cpp).
-- **[chenmozhijin / BSRoformer.cpp](https://github.com/chenmozhijin/BSRoformer.cpp)** e **[GaboxR67](https://huggingface.co/GaboxR67)** —— o motor nativo e o modelo Mel-Band Roformer.
+- **[Boson AI](https://huggingface.co/bosonai)** —— o modelo Higgs Audio v3, e **[drbaph / Higgs-Audio-v3-Studio](https://huggingface.co/drbaph/Higgs-Audio-v3-Studio)** —— as quantizações GGUF e o motor nativo `audiocpp_engine.dll`.
+- **[NVIDIA](https://huggingface.co/nvidia)** —— Parakeet-TDT 0.6B v3 e Sortformer v2 (reconhecimento de fala e diarização); pesos ONNX de [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) e de [altunenes/parakeet-rs](https://github.com/altunenes/parakeet-rs), que é também o crate Rust sobre o qual o app é construído.
+- **[Google Gemma](https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf)** —— Gemma-4 12B (tradução e visão), as quantizações da [unsloth](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF) e o [llama.cpp](https://github.com/ggml-org/llama.cpp) que as executa.
+- **[chenmozhijin / BSRoformer.cpp](https://github.com/chenmozhijin/BSRoformer.cpp)** e **[GaboxR67](https://huggingface.co/GaboxR67)** —— o motor nativo de separação com seus modelos GGUF e o checkpoint do Mel-Band Roformer.
+- **[Systran / faster-whisper](https://github.com/SYSTRAN/faster-whisper)**, **[deepdml](https://huggingface.co/deepdml)** e **[Purfview](https://github.com/Purfview/whisper-standalone-win)** —— os modelos Whisper no formato CTranslate2 e a versão independente que os executa.
+- **[InsightFace](https://github.com/deepinsight/insightface)** (via [immich-app/buffalo_l](https://huggingface.co/immich-app/buffalo_l)), **[ByteDance LVFace](https://huggingface.co/bytedance-research/LVFace)**, **[deepghs](https://huggingface.co/deepghs)** (CCIP, detecção de rostos de anime), **[FaceFusion](https://huggingface.co/facefusion/models-3.1.0)** e **[WeSpeaker](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM)** —— os modelos de rostos e vozes do casting de personagens.
+- **[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)** —— PP-OCR, os modelos de detecção e reconhecimento de texto na tela.
+- **[ONNX Runtime](https://github.com/microsoft/onnxruntime)**, **[FFmpeg](https://ffmpeg.org)** com as builds da [BtbN](https://github.com/BtbN/FFmpeg-Builds), **[JASSUB](https://github.com/ThaUnknown/jassub)**, **[Tauri](https://tauri.app)** e **[ort](https://github.com/pykeio/ort)**.
+- **NVIDIA CUDA runtime, cuBLAS, cuFFT e cuDNN** —— as bibliotecas sobre as quais rodam os caminhos de GPU.
+- **Serega (SilentBob)** —— versão 3.1.0: multi-take, referência emocional, sincronização e editor de legendas. **[@nevoin](https://github.com/nevoin)** —— o log detalhado de [#1](https://github.com/timoncool/dub-studio/issues/1) que levou à correção para o ffmpeg 8. **[LongNT2011](https://github.com/LongNT2011)** —— [PR #1](https://github.com/timoncool/dub-studio/pull/1), textos da interface em inglês.
 
 ## Apoie o autor
 
@@ -155,4 +236,23 @@ Faço software de código aberto e pesquisa em IA —— a maior parte é de ace
 
 ## Licença
 
-O código do app é [MIT](LICENSE). Os pesos dos modelos mantêm suas licenças (Higgs Audio v3 —— Boson AI research/não comercial; Gemma —— Gemma Terms; etc.) —— auditados antes de cada lançamento.
+O código do app é [MIT](LICENSE). **Os modelos não são**: cada um mantém a própria licença, e o que segue é o que suas páginas dizem hoje. Leia-as antes de publicar ou vender um vídeo dublado.
+
+| Componente | Licença | O que significa |
+|---|---|---|
+| Higgs Audio v3 (Boson AI) | [Boson Higgs TTS 3 Research and Non-Commercial License](https://huggingface.co/bosonai/higgs-tts-3-4b/blob/main/LICENSE) | Gratuito para pesquisa, uso pessoal e, com o Creator Use Grant, para criadores digitais que publicam e monetizam o próprio conteúdo, desde que creditem o Higgs Audio da Boson AI. Hospedá-lo, redistribuí-lo ou embuti-lo em um produto ou serviço para terceiros, inclusive um serviço de dublagem, exige uma licença comercial da Boson |
+| Parakeet-TDT 0.6B v3 (NVIDIA) e sua exportação ONNX | CC-BY-4.0 | Creditar a NVIDIA |
+| Sortformer v2 (NVIDIA) | CC-BY-4.0 | Creditar a NVIDIA; o arquivo ONNX vem de altunenes/parakeet-rs, cuja página não indica licença |
+| Gemma-4 12B (Google) | Apache-2.0 na página do modelo, que aponta para os [termos do Gemma 4 do Google](https://ai.google.dev/gemma/docs/gemma_4_license) | Leia os dois |
+| Mel-Band Roformer voc_fv6 (GaboxR67), GGUF de chenmozhijin | As páginas dos modelos não indicam licença; o motor BSRoformer.cpp é MIT | Pergunte aos autores antes de uso comercial |
+| Modelos Whisper (Systran, deepdml) e faster-whisper | MIT | A versão independente da Purfview não tem arquivo de licença no repositório |
+| Detector de rostos SCRFD (InsightFace buffalo_l) | InsightFace: modelos pré-treinados **somente para pesquisa não comercial** | O casting de rostos reais está sujeito a essa restrição |
+| LVFace (ByteDance) | MIT |  |
+| CCIP (deepghs) | OpenRAIL | Leia suas restrições de uso |
+| anime_face_detection (deepghs) | MIT |  |
+| Oclusor xseg_1 (modelos do FaceFusion) | A página do modelo não indica licença | Pergunte aos autores antes de uso comercial |
+| WeSpeaker ResNet34-LM | CC-BY-4.0 | Creditar o WeSpeaker |
+| PP-OCR (PaddleOCR) | Apache-2.0 |  |
+| llama.cpp, ONNX Runtime, BSRoformer.cpp, JASSUB | MIT |  |
+| FFmpeg (build da BtbN) | Build GPL do FFmpeg | Vem como programa separado, não ligado ao app |
+| NVIDIA CUDA runtime, cuBLAS, cuFFT, cuDNN | Termos de licença próprios da NVIDIA | Baixados da NVIDIA e do PyPI, não estão no repositório |
