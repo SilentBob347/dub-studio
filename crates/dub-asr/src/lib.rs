@@ -585,6 +585,13 @@ pub fn turns(
     Ok(merge_turns(&raw, merge_gap, min_speaker_dur))
 }
 
+/// Порог «настоящего» спикера: 10% всей речи ролика, не меньше 1.5 с и не больше `cap`. Ложные спикеры
+/// диаризации — обрывки меньше секунды, а живой человек с парой реплик в коротком ролике набирает 2 с
+/// и больше; фиксированный `cap` в коротком ролике выбрасывал таких людей.
+fn speaker_dur_threshold(total_speech: f64, cap: f64) -> f64 {
+    (0.1 * total_speech).clamp(1.5_f64.min(cap), cap)
+}
+
 /// Свёртка сырых реплик диаризации (отсортированных по началу) в DiarTurns — логика [`turns`] без модели.
 pub fn merge_turns(raw: &[Turn], merge_gap: f64, min_speaker_dur: f64) -> DiarTurns {
     use std::collections::HashMap;
@@ -605,13 +612,14 @@ pub fn merge_turns(raw: &[Turn], merge_gap: f64, min_speaker_dur: f64) -> DiarTu
         }
     }
 
-    // Суммарная длительность на спикера -> «настоящие» спикеры (>= min_speaker_dur).
+    // Суммарная длительность на спикера -> «настоящие» спикеры (>= порога).
     let mut dur: HashMap<i32, f64> = HashMap::new();
     for m in &merged {
         *dur.entry(m[2] as i32).or_insert(0.0) += m[1] - m[0];
     }
+    let threshold = speaker_dur_threshold(dur.values().sum(), min_speaker_dur);
     let realset: std::collections::HashSet<i32> =
-        dur.iter().filter(|(_, &d)| d >= min_speaker_dur).map(|(&s, _)| s).collect();
+        dur.iter().filter(|(_, &d)| d >= threshold).map(|(&s, _)| s).collect();
     if realset.len() < 2 {
         return single(); // реально один голос -> single-speaker путь
     }
@@ -986,6 +994,35 @@ mod diar_word_tests {
         let d = merge_turns(&raw, 0.8, 2.5);
         assert_eq!(d.n_speakers, 2);
         assert!(d.turns.iter().all(|t| t.speaker == 0 || t.speaker == 1));
+    }
+
+    #[test]
+    fn merge_turns_keeps_short_clip_speaker_with_two_lines() {
+        // Реальный 22-с ролик: второй человек сказал две фразы (2.2 с) против монолога 10.6 с.
+        let raw = vec![
+            turn(0.9, 1.7, 0), turn(1.9, 3.2, 1), turn(3.6, 5.2, 1), turn(6.2, 7.7, 0), turn(7.4, 8.9, 1),
+            turn(10.2, 11.8, 1), turn(12.2, 13.6, 1), turn(14.9, 15.7, 1), turn(16.7, 17.3, 1), turn(17.8, 19.6, 1),
+        ];
+        let d = merge_turns(&raw, 0.8, 2.5);
+        assert_eq!(d.n_speakers, 2);
+    }
+
+    #[test]
+    fn merge_turns_drops_sub_second_fragments() {
+        // Обрывки 0.2 с и 0.7 с рядом с тремя настоящими голосами — не спикеры.
+        let raw = vec![
+            turn(0.0, 3.5, 0), turn(3.8, 7.3, 1), turn(7.6, 11.1, 2), turn(11.4, 11.6, 3),
+            turn(11.9, 15.4, 0), turn(15.7, 19.2, 1), turn(19.5, 20.2, 4), turn(20.5, 24.0, 2),
+        ];
+        let d = merge_turns(&raw, 0.8, 2.5);
+        assert_eq!(d.n_speakers, 3);
+    }
+
+    #[test]
+    fn long_clip_keeps_fixed_threshold() {
+        assert_eq!(speaker_dur_threshold(600.0, 2.5), 2.5);
+        assert_eq!(speaker_dur_threshold(12.8, 2.5), 1.5);
+        assert!((speaker_dur_threshold(20.0, 2.5) - 2.0).abs() < 1e-9);
     }
 
     #[test]

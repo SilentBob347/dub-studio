@@ -310,24 +310,24 @@ pub fn recluster_segments(paths: &AnalyzePaths, segments: &mut [Segment], progre
         .collect::<std::collections::HashSet<&String>>()
         .len();
     if k <= 1 || k <= orig_count {
-        // Кластеризация не дала БОЛЬШЕ персонажей, чем Sortformer -> не переразмечаем (не рискуем).
+        // Кластеризация не дала БОЛЬШЕ персонажей, чем диаризация -> не переразмечаем (не рискуем).
         return 0;
     }
-    // Sortformer УВЕРЕННО сказал один спикер (orig_count<=1): дробим ТОЛЬКО если новые кластеры реально
-    // населены. Настоящий второй голос имеет заметную долю реплик; горстка сегментов в отдельном кластере —
-    // это разброс просодии ОДНОГО человека (крик/шёпот), а не второй персонаж. Иначе монолог рвётся на
-    // v0/v1 и озвучивается двумя голосами (регресс снятия n_spk-гейта). Требуем 2-й кластер >=2 и >=15%.
-    if orig_count <= 1 {
-        let mut sizes = vec![0usize; k];
-        for &l in &labels {
-            sizes[l] += 1;
-        }
-        sizes.sort_unstable_by(|a, b| b.cmp(a));
-        let second = sizes.get(1).copied().unwrap_or(0);
-        let min_needed = 2.max((labels.len() as f64 * 0.15).ceil() as usize);
-        if second < min_needed {
-            return 0; // разброс просодии одного спикера, не второй голос
-        }
+    // Персонаж по голосу — только населённый кластер: настоящий голос имеет заметную долю реплик, а горстка
+    // сегментов в отдельном кластере — разброс просодии одного человека (крик/шёпот). Переразмечаем, только
+    // если населённых кластеров больше, чем спикеров у диаризации; одиночки доливаем в ближайший населённый.
+    let min_needed = 2.max((labels.len() as f64 * 0.15).ceil() as usize);
+    let mut sizes = vec![0usize; k];
+    for &l in &labels {
+        sizes[l] += 1;
+    }
+    let populated = sizes.iter().filter(|&&n| n >= min_needed).count();
+    if populated <= orig_count.max(1) {
+        return 0;
+    }
+    if populated < k {
+        labels = merge_smallest_into_nearest(&embs, labels, populated);
+        k = labels.iter().copied().max().map(|m| m + 1).unwrap_or(0);
     }
     // seg_idx -> голосовая метка (для эмбеддированных).
     let mut seg_label: HashMap<usize, usize> = HashMap::new();
@@ -353,7 +353,7 @@ pub fn recluster_segments(paths: &AnalyzePaths, segments: &mut [Segment], progre
     emit(
         progress,
         "asr",
-        &format!("голосовая переразметка: {k} персонажей по голосу (Sortformer нашёл {orig_count})"),
+        &format!("голосовая переразметка: {k} персонажей по голосу (диаризация нашла {orig_count})"),
     );
     k
 }

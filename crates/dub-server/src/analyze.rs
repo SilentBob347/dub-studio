@@ -430,6 +430,12 @@ fn win_target_sec() -> f64 {
 }
 
 const EXTRACT_VER: &str = "extract-16kmono-v1";
+/// В тексте сегмента есть хоть одна буква или цифра: сегмент из одной пунктуации («.») — остаток
+/// ASR на хвосте тишины, переводить и озвучивать его нельзя.
+fn has_speech_text(text: &str) -> bool {
+    text.chars().any(char::is_alphanumeric)
+}
+
 const DIAR_VER: &str = "nemotron3-diar-v3 · offline · merge_gap=0.8 · min_spk=2.5";
 const ASR_VER: &str = "asr-v1";
 const TRANSLATE_VER: &str = "gemma-ctx-v1";
@@ -888,7 +894,11 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     proj.meta.extra.insert("src_lang".into(), Value::String(args.src_lang.clone()));
     proj.subs.mode = subs_mode;
     proj.subs.burn = args.burn; // композируемость: вжигать субтитры/титры или нет
-    proj.segments = segments;
+    let before = segments.len();
+    proj.segments = segments.into_iter().filter(|s| has_speech_text(&s.src_text)).collect();
+    if proj.segments.len() < before {
+        emit(progress, "asr", &format!("убрано сегментов без слов: {}", before - proj.segments.len()));
+    }
     proj.work_dir = Some(paths.work_dir.to_string_lossy().into_owned());
     if !args.rewrite.is_empty() {
         proj.audio.rewrite = Some(args.rewrite.clone());
@@ -1021,4 +1031,18 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     bench.finish(|m| emit(progress, "bench", m));
 
     Ok(proj)
+}
+
+#[cfg(test)]
+mod speech_text_tests {
+    use super::has_speech_text;
+
+    #[test]
+    fn punctuation_only_segment_is_not_speech() {
+        assert!(!has_speech_text("."));
+        assert!(!has_speech_text(" … — "));
+        assert!(has_speech_text("Где твоя форма?"));
+        assert!(has_speech_text("42"));
+        assert!(has_speech_text("好"));
+    }
 }
