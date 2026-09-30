@@ -6,7 +6,7 @@
 //! n_gpu_layers=-1 (все слои на GPU), n_ctx=12288, flash_attn=true — как в Llama(...) там.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -15,13 +15,25 @@ use std::time::{Duration, Instant};
 
 use crate::LlmError;
 
+/// Микробатч vision-режима по умолчанию: с запасом больше потолка токенов кадра Gemma 4 (~1100).
+const VISION_UBATCH: u32 = 2048;
+/// Логический батч llama-server по умолчанию (--batch-size); не меньше микробатча.
+const DEFAULT_BATCH: u32 = 2048;
+
 /// Последние N строк stderr — для внятной диагностики, если сервер упал/не поднялся.
 type LogTail = Arc<Mutex<VecDeque<String>>>;
 
-fn drain_to_tail<R: std::io::Read + Send + 'static>(reader: R, tail: LogTail) {
+type LogFile = Option<Arc<Mutex<std::fs::File>>>;
+
+fn drain_to_tail<R: std::io::Read + Send + 'static>(reader: R, tail: LogTail, file: LogFile) {
     std::thread::spawn(move || {
         let r = BufReader::new(reader);
         for line in r.lines().map_while(Result::ok) {
+            if let Some(f) = &file {
+                if let Ok(mut f) = f.lock() {
+                    let _ = writeln!(f, "{line}");
+                }
+            }
             if let Ok(mut t) = tail.lock() {
                 if t.len() >= 40 {
                     t.pop_front();
@@ -60,6 +72,8 @@ pub struct ServerOpts {
     pub ubatch: Option<u32>,
     /// Секунд ждать готовности (загрузка 7ГБ GGUF в VRAM небыстрая).
     pub ready_timeout_secs: u64,
+    /// Файл, куда дописывается весь вывод сервера (stdout+stderr); None — только хвост в памяти.
+    pub log_file: Option<PathBuf>,
 }
 
 impl ServerOpts {
@@ -72,11 +86,17 @@ impl ServerOpts {
             ctx_size: 12288,
             ubatch: None,
             ready_timeout_secs: 300,
+            log_file: None,
         }
     }
 
     pub fn with_mmproj(mut self, mmproj: impl Into<PathBuf>) -> Self {
         self.mmproj = Some(mmproj.into());
+        self
+    }
+
+    pub fn with_log_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.log_file = Some(path.into());
         self
     }
 
@@ -158,16 +178,26 @@ impl LlamaServer {
         // Лимит батча prefill против OOM «prefill graph» на слабой RAM. Приоритет: настройка UI
         // (opts.ubatch) -> env DUB_STUDIO_LLAMA_UBATCH -> дефолт llama (не передаём флаг).
         let ubatch = opts.ubatch.or_else(|| env_u32_pos("DUB_STUDIO_LLAMA_UBATCH"));
-        if let Some(v) = ubatch {
-            cmd.arg("-ub").arg(v.to_string());
-        }
-        if let Some(v) = env_u32_pos("DUB_STUDIO_LLAMA_BATCH") {
-            cmd.arg("-b").arg(v.to_string());
-        }
-        if let Some(mmproj) = &opts.mmproj {
-            if mmproj.is_file() {
-                // --mmproj + дефолтный offload на GPU (быстрее); проектор Gemma лёгкий (~175МБ).
+        let batch = env_u32_pos("DUB_STUDIO_LLAMA_BATCH");
+        let vision = opts.mmproj.as_ref().is_some_and(|m| m.is_file());
+        if vision {
+            // Картинка кодируется некаузальным вниманием и обязана целиком влезать в один микробатч
+            // (иначе GGML_ASSERT n_ubatch >= n_tokens роняет сервер на первом кадре). Кадр Gemma 4 — до
+            // ~1100 токенов, поэтому потолок токенов картинки всегда равен микробатчу.
+            let ub = ubatch.unwrap_or(VISION_UBATCH);
+            cmd.arg("-ub").arg(ub.to_string());
+            cmd.arg("-b").arg(batch.unwrap_or(DEFAULT_BATCH).max(ub).to_string());
+            cmd.arg("--image-max-tokens").arg(ub.to_string());
+            // --mmproj + дефолтный offload на GPU (быстрее); проектор Gemma лёгкий (~175МБ).
+            if let Some(mmproj) = &opts.mmproj {
                 cmd.arg("--mmproj").arg(mmproj);
+            }
+        } else {
+            if let Some(v) = ubatch {
+                cmd.arg("-ub").arg(v.to_string());
+            }
+            if let Some(v) = batch {
+                cmd.arg("-b").arg(v.max(ubatch.unwrap_or(0)).to_string());
             }
         }
 
@@ -183,11 +213,28 @@ impl LlamaServer {
 
         let base_url = format!("http://127.0.0.1:{port}");
         let log_tail: LogTail = Arc::new(Mutex::new(VecDeque::new()));
+        let log_file: LogFile = match &opts.log_file {
+            Some(path) => {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| {
+                        LlmError::Spawn(format!("лог llama-server {}: {e}", dir.display()))
+                    })?;
+                }
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(|e| LlmError::Spawn(format!("лог llama-server {}: {e}", path.display())))?;
+                let _ = writeln!(f, "==== {:?} (порт {port})", cmd);
+                Some(Arc::new(Mutex::new(f)))
+            }
+            None => None,
+        };
         if let Some(out) = child.stdout.take() {
-            drain_to_tail(out, log_tail.clone());
+            drain_to_tail(out, log_tail.clone(), log_file.clone());
         }
         if let Some(err) = child.stderr.take() {
-            drain_to_tail(err, log_tail.clone());
+            drain_to_tail(err, log_tail.clone(), log_file.clone());
         }
 
         let mut srv = LlamaServer {

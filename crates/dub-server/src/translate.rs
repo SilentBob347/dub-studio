@@ -44,7 +44,8 @@ pub fn classify_content_type_standalone(
     }
     let opts = ServerOpts::new(&paths.llama_bin, &paths.mt_model)
         .with_ubatch(crate::models::sel_num(&paths.models_root, "llama_ubatch").map(|f| f as u32))
-        .with_mmproj(&paths.mmproj);
+        .with_mmproj(&paths.mmproj)
+        .with_log_file(crate::llm_provider::llama_log_path(&paths.models_root));
     let srv = LlamaServer::start(&opts).ok()?;
     let client = ChatClient::new(srv.base_url()).ok()?;
     let tmp = paths.work_dir.join("ctype_frame.png");
