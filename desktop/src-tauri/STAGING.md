@@ -17,8 +17,9 @@ mkdir -p "$STAGE/models/higgs-engine" "$STAGE/models/ocr" "$STAGE/frontend"
 cp target/release/dub-server.exe          "$STAGE/dub-server.exe"
 cp -r frontend/dist                       "$STAGE/frontend/dist"
 cp -r fonts                               "$STAGE/fonts"
-# Бандл: VC++ runtime (delivery=Bundled)
-cp models/higgs-engine/MSVCP140.dll models/higgs-engine/VCOMP140.DLL \
+# Бандл: VC++ runtime (delivery=Bundled). Все пять — из одного VC++ Redistributable (например,
+# VC/Redist/MSVC/<версия>/x64/Microsoft.VC145.CRT и .OpenMP из Build Tools); MSVCP140_1.dll нужен onnxruntime 1.28.
+cp models/higgs-engine/MSVCP140.dll models/higgs-engine/MSVCP140_1.dll models/higgs-engine/VCOMP140.DLL \
    models/higgs-engine/VCRUNTIME140.dll models/higgs-engine/VCRUNTIME140_1.dll \
    "$STAGE/models/higgs-engine/"
 # Бандл: OCR-модели (delivery=Bundled)

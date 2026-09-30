@@ -65,12 +65,41 @@ export type SetupComponent = {
   requirement: "required" | "recommended" | "optional";
   delivery: "download" | "bundled" | "external";
   size: number; installed: boolean; bytesOnDisk: number;
+  spaceNeeded: number;   // место на томе моделей под докачку (остаток + распаковка архивов)
   missing: string[]; detail?: string | null; externalUrl?: string | null; vram?: number;
+};
+// Фоновая закачка (мимо GPU-очереди): её состояние приходит в /setup/status.active, опрос вместо SSE.
+export type DownloadStatus = "downloading" | "completed" | "paused" | "interrupted" | "failed";
+export type DownloadPhase = "" | "waiting" | "verify" | "download" | "extract";
+export type DownloadJob = {
+  id: string; ids: string[]; status: DownloadStatus; phase: DownloadPhase;
+  downloaded: number; total: number; speedBps: number; waitingS: number;
+  parts: { id: string; done: number; total: number }[];
+  errorCode?: string | null; error?: string | null; startedAt: number; updatedAt: number;
+};
+// Видеокарта против требований CUDA 13 (драйвер 580+, compute capability 7.5+).
+export type GpuReason = "no_nvidia" | "no_device" | "cuda_init" | "driver_old" | "gpu_old";
+export type GpuReport = {
+  nvidia: boolean; name?: string | null; driverVersion?: string | null; cudaDriver?: string | null;
+  compute?: string | null; cuda13Ok: boolean; reason?: GpuReason | null; minDriver: number; minCompute: string;
 };
 export type SetupStatus = {
   components: SetupComponent[]; ready: boolean;
   downloadPending: number; driverOk: boolean; llamaBuild: string;
+  modelsDir: string; freeBytes: number | null; gpu: GpuReport; active: DownloadJob | null;
 };
+export type ImportResult = { imported: string[]; files: number; errors: string[]; status: SetupStatus };
+
+// Отказ маршрутов закачки/удаления: код для текста в UI + подробность для журнала.
+export class SetupError extends Error {
+  code: string;
+  detail: string;
+  constructor(code: string, detail: string) {
+    super(detail || code);
+    this.code = code;
+    this.detail = detail;
+  }
+}
 
 export type HwSnapshot = {
   gpuName: string; totalVram: number; usedVram: number; freeVram: number;
@@ -98,14 +127,24 @@ function _chain<T>(run: () => Promise<T>): Promise<T> {
 const getJson = <T>(path: string): Promise<T> => fetch(`${BASE}${path}`).then(j<T>);
 const postJson = <T>(path: string, body: unknown): Promise<T> =>
   fetch(`${BASE}${path}`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) }).then(j<T>);
+// POST маршрутов /setup/*: отказ приходит {code, detail} -> SetupError (тело не JSON — код по HTTP-статусу).
+async function setupPost<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(`${BASE}${path}`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) });
+  if (r.ok) return r.json() as Promise<T>;
+  const text = await r.text();
+  const parsed = ((): { code?: string; detail?: string } => { try { return JSON.parse(text); } catch { return {}; } })();
+  throw new SetupError(parsed.code ?? `http_${r.status}`, parsed.detail ?? text);
+}
 
 export const api = {
   capabilities: () => getJson<Capabilities>("/engine/capabilities"),
   setupStatus: () => getJson<SetupStatus>("/setup/status"),
-  setupDownload: (ids: string[]) => postJson<{ job_id: string }>("/setup/download", { ids }),
-  setupCancel: () => fetch(`${BASE}/setup/cancel`, { method: "POST" }).then(j<{ cancelled: boolean }>),
+  setupDownload: (ids: string[]) => setupPost<{ download: DownloadJob }>("/setup/download", { ids }),
+  setupCancel: () => setupPost<{ paused: boolean }>("/setup/cancel", {}),   // пауза: скачанное остаётся, «Продолжить» докачивает
+  setupRemove: (ids: string[]) => setupPost<{ removed: string[]; freedBytes: number; errors: string[]; status: SetupStatus }>("/setup/remove", { ids }),
+  setupOpenModels: () => setupPost<{ path: string }>("/setup/open-models", {}),
   hwSnapshot: () => getJson<HwSnapshot>("/hw/snapshot"),
-  setupBrowse: (id?: string) => postJson<{ picked: boolean; imported: string[]; status: SetupStatus }>("/setup/browse", id ? { id } : {}),
+  setupBrowse: (id?: string) => setupPost<ImportResult & { picked: boolean }>("/setup/browse", id ? { id } : {}),
   fonts: () => getJson<{ fonts: Record<string, string> }>("/fonts"),
   setOpts: (edit: Partial<ModelStack>) =>
     fetch(`${BASE}/engine/opts`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify(edit) }).then(j<{ models: ModelStack }>),

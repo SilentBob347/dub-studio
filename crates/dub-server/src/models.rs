@@ -33,6 +33,19 @@ pub fn set_selection(mroot: &Path, engine: &str, variant: &str) -> std::io::Resu
     std::fs::rename(&tmp, mroot.join("active.json"))
 }
 
+/// Снять слот выбора, если он указывает на этот вариант (вариант удалён — резолв возьмёт установленный).
+pub fn clear_selection_if(mroot: &Path, engine: &str, variant: &str) -> std::io::Result<()> {
+    let mut v = load_selection(mroot);
+    let obj = v.as_object_mut().expect("load_selection returns object");
+    if obj.get(engine).and_then(Value::as_str) != Some(variant) {
+        return Ok(());
+    }
+    obj.remove(engine);
+    let tmp = mroot.join("active.json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap_or_default())?;
+    std::fs::rename(&tmp, mroot.join("active.json"))
+}
+
 fn pick<'a>(sel: &'a Value, engine: &str) -> Option<&'a str> {
     sel.get(engine).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
 }
@@ -108,7 +121,8 @@ pub fn is_selection_key(key: &str) -> bool {
 }
 
 /// Backend конкретной локальной стадии по ключу (sep_backend/diar_backend/asr_backend): "cpu"/"gpu"
-/// перекрывают; "auto"/пусто -> сначала общий local_backend, затем по факту NVIDIA-драйвера.
+/// перекрывают; "auto"/пусто -> сначала общий local_backend, затем GPU, только если карта и драйвер годятся
+/// под CUDA 13 (hw::gpu_report) — на драйвере до 580 или Pascal «авто» идёт на CPU, а не падает на CUDA.
 /// Любой движок на любой инстанс — стадии независимы.
 pub fn stage_backend(mroot: &Path, key: &str) -> &'static str {
     let sel = load_selection(mroot);
@@ -121,7 +135,7 @@ pub fn stage_backend(mroot: &Path, key: &str) -> &'static str {
     };
     pick_bk(key)
         .or_else(|| if key == "local_backend" { None } else { pick_bk("local_backend") })
-        .unwrap_or(if crate::setup::detect_driver() { "gpu" } else { "cpu" })
+        .unwrap_or(if crate::hw::gpu_report().cuda13_ok { "gpu" } else { "cpu" })
 }
 
 /// Глобальный backend локальных стадий (обратная совместимость: пресеты/старые вызовы).
