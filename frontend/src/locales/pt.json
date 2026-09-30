@@ -721,5 +721,80 @@
     "copy": "Copiar",
     "copied": "Copiado",
     "failed": "Não foi possível ler o status do agente"
+  },
+  "confirm": {
+    "title": "Tem certeza?"
+  },
+  "a11y": {
+    "close": "Fechar",
+    "clearSelection": "Limpar a seleção",
+    "selectLine": "Marcar esta fala",
+    "selectBlur": "Marcar esta área de desfoque",
+    "selectTitle": "Marcar este título",
+    "deleteBlur": "Excluir esta área de desfoque",
+    "removeLang": "Remover este idioma",
+    "lanes": "Faixas do editor"
+  },
+  "montage": {
+    "split": "Cortar a fala no cursor de reprodução",
+    "mergeNext": "Juntar com a fala seguinte"
+  },
+  "bridge": {
+    "agent": "Agente",
+    "changedByAgent": "O agente alterou o projeto; desfazer começa daqui",
+    "changedByApi": "Outro programa alterou o projeto; desfazer começa daqui",
+    "changedByWindow": "O projeto foi alterado em outra janela; desfazer começa daqui",
+    "changedWhileAway": "O projeto mudou enquanto a janela estava desconectada; desfazer começa daqui",
+    "undoRefused": "Não aplicado: o agente ou outra janela salvou o projeto depois deste estado. O projeto atual é mostrado",
+    "syncFailed": "Não foi possível ler a alteração: {{error}}",
+    "jobStarted": "O agente iniciou: {{kind}}",
+    "jobDone": "Pronto: {{kind}}",
+    "jobFailed": "Falhou: {{kind}}: {{error}}",
+    "job": {
+      "analyze": "análise",
+      "render": "renderização",
+      "dub_audio": "locução",
+      "export_lang": "outro idioma",
+      "retranslate": "tradução",
+      "remix": "remix",
+      "resume": "tarefa retomada",
+      "download": "download dos modelos",
+      "voices_pack": "download do pacote de vozes",
+      "other": "uma tarefa"
+    },
+    "do": {
+      "screenshot": "olha a janela",
+      "click": "clica em «{{name}}»",
+      "type": "digita em «{{name}}»",
+      "select": "escolhe em «{{name}}»",
+      "press_key": "pressiona uma tecla",
+      "scroll": "rola a página",
+      "navigate": "abre uma tela",
+      "open_settings": "abre as configurações",
+      "open_help": "abre a ajuda",
+      "editor_open": "abre um projeto",
+      "editor_frame": "olha o quadro",
+      "editor_seek": "move o cursor de reprodução",
+      "editor_select": "mostra uma parte para você",
+      "editor_play": "reproduz a dublagem",
+      "editor_pause": "pausa",
+      "editor_lane": "troca de faixa",
+      "editor_segment_update": "edita uma fala",
+      "editor_segment_add": "adiciona uma fala",
+      "editor_segments_delete": "exclui falas",
+      "editor_segment_split": "corta uma fala em duas",
+      "editor_segments_merge": "junta falas",
+      "editor_segment_move": "move uma fala na linha do tempo",
+      "editor_mode": "troca o modo",
+      "editor_style": "muda o estilo das legendas",
+      "editor_preset": "aplica uma predefinição de legendas",
+      "editor_blur_add": "adiciona uma área de desfoque",
+      "editor_blur_update": "altera uma área de desfoque",
+      "editor_title_add": "adiciona um título",
+      "editor_title_update": "altera um título",
+      "editor_undo": "desfaz uma edição",
+      "editor_redo": "refaz uma edição",
+      "editor_export": "inicia a exportação"
+    }
   }
 }

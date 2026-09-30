@@ -713,8 +713,136 @@ pub fn apply(p: &mut Project, edit: &Value) -> PatchResult {
         "sub_blur" => op_sub_blur(p, edit),
         "keep_original" => op_keep_original(p, edit),
         "reorder_segments" => op_reorder_segments(p, edit),
+        "split_segment" => op_split_segment(p, edit),
+        "merge_segments" => op_merge_segments(p, edit),
         other => Err((400, format!("unknown op {other:?}"))),
     }
+}
+
+/// Самая короткая часть, которая остаётся от фразы при разрезе, в секундах.
+const MIN_PART: f64 = 0.1;
+
+/// Делит текст в доле `fraction`: по словам, а для письма без пробелов (китайский, японский) — по символам.
+/// Обе части непустые, пока в тексте есть хотя бы два слова или символа.
+fn split_text(text: &str, fraction: f64) -> (String, String) {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() >= 2 {
+        let cut = ((fraction * words.len() as f64).round() as usize).clamp(1, words.len() - 1);
+        return (words[..cut].join(" "), words[cut..].join(" "));
+    }
+    let chars: Vec<char> = text.trim().chars().collect();
+    if chars.len() >= 2 {
+        let cut = ((fraction * chars.len() as f64).round() as usize).clamp(1, chars.len() - 1);
+        let (head, tail): (String, String) = (chars[..cut].iter().collect(), chars[cut..].iter().collect());
+        return (head.trim().to_string(), tail.trim().to_string());
+    }
+    (text.trim().to_string(), String::new())
+}
+
+/// split_segment — разрезать фразу id в момент at (сек) на две, как ножницы монтажа. Пословные тайминги
+/// ASR делятся по времени; исходный текст — по ним, когда их столько же, сколько слов текста, иначе в той же
+/// доле, что время. Перевод берётся из tgt_text/tgt_text_2, если их прислали, иначе делится в доле исходного
+/// текста. Вторая часть получает new_id или свободный id вида `<id>.2`. Обе части dirty.
+fn op_split_segment(p: &mut Project, edit: &Value) -> PatchResult {
+    let sid = s(edit, "id").ok_or((400, "missing segment id".into()))?;
+    let at = f(edit, "at").ok_or((400, "missing split time 'at' (seconds)".into()))?;
+    let idx = p.segments.iter().position(|x| x.id == sid).ok_or((404, format!("segment {sid:?} not found")))?;
+    let (start, end) = (p.segments[idx].start, p.segments[idx].end);
+    if at < start + MIN_PART || at > end - MIN_PART {
+        return Err((400, format!("split time {at} is not inside segment {sid:?} ({start:.2}..{end:.2}) by {MIN_PART} s")));
+    }
+    let taken = |id: &str| p.segments.iter().any(|x| x.id == id);
+    let new_id = match s(edit, "new_id").filter(|x| !x.is_empty()) {
+        Some(id) if taken(&id) => return Err((409, format!("segment id {id:?} is taken"))),
+        Some(id) => id,
+        None => (2..).map(|n| format!("{sid}.{n}")).find(|id| !taken(id)).unwrap_or_default(),
+    };
+    let first = &p.segments[idx];
+    let words = first.extra.get("words").and_then(Value::as_array).cloned();
+    let (words_1, words_2): (Option<Vec<Value>>, Option<Vec<Value>>) = match &words {
+        Some(all) => {
+            let (head, tail): (Vec<Value>, Vec<Value>) = all.iter().cloned().partition(|word| word.get("start").and_then(Value::as_f64).is_some_and(|w| w < at));
+            (Some(head), Some(tail))
+        }
+        None => (None, None),
+    };
+    let src_words: Vec<&str> = first.src_text.split_whitespace().collect();
+    let time_fraction = (at - start) / (end - start);
+    let src_fraction = match (&words, &words_1) {
+        (Some(all), Some(head)) if !src_words.is_empty() && all.len() == src_words.len() => head.len() as f64 / all.len() as f64,
+        _ => time_fraction,
+    };
+    let divide = |text: &str| match src_fraction {
+        share if share <= 0.0 => (String::new(), text.trim().to_string()),
+        share if share >= 1.0 => (text.trim().to_string(), String::new()),
+        share => split_text(text, share),
+    };
+    let (src_1, src_2) = divide(&first.src_text);
+    let (auto_1, auto_2) = divide(&first.tgt_text);
+    let tgt_1 = s(edit, "tgt_text").unwrap_or(auto_1);
+    let tgt_2 = s(edit, "tgt_text_2").unwrap_or(auto_2);
+
+    let mut second = p.segments[idx].clone();
+    second.id = new_id;
+    second.start = at;
+    second.src_text = src_2;
+    second.tgt_text = tgt_2;
+    second.dirty = true;
+    second.ckpt = None;
+    let first = &mut p.segments[idx];
+    first.end = at;
+    first.src_text = src_1;
+    first.tgt_text = tgt_1;
+    first.dirty = true;
+    first.ckpt = None;
+    for (segment, part) in [(&mut *first, words_1), (&mut second, words_2)] {
+        if let Some(part) = part {
+            segment.extra.insert("words".into(), Value::Array(part));
+        }
+    }
+    p.segments.insert(idx + 1, second);
+    Ok(())
+}
+
+/// merge_segments — склеить фразы ids в одну. Они должны стоять подряд в списке фраз; остаётся id первой
+/// по списку, её спикер и голос; время — от самого раннего начала до самого позднего конца, тексты и
+/// пословные тайминги — друг за другом. Результат dirty.
+fn op_merge_segments(p: &mut Project, edit: &Value) -> PatchResult {
+    let wanted = ids(edit);
+    if wanted.len() < 2 {
+        return Err((400, "merge_segments needs at least two segment ids".into()));
+    }
+    let mut places: Vec<usize> = Vec::with_capacity(wanted.len());
+    for id in &wanted {
+        let at = p.segments.iter().position(|x| &x.id == id).ok_or((404, format!("segment {id:?} not found")))?;
+        if !places.contains(&at) {
+            places.push(at);
+        }
+    }
+    places.sort_unstable();
+    if places.len() < 2 {
+        return Err((400, "merge_segments needs at least two different segments".into()));
+    }
+    if places.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+        return Err((400, "segments to merge must follow one another in the list".into()));
+    }
+    let parts: Vec<dub_core::Segment> = p.segments.drain(places[0]..=places[places.len() - 1]).collect();
+    let join = |text: fn(&dub_core::Segment) -> &str| parts.iter().map(text).map(str::trim).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ");
+    let mut merged = parts[0].clone();
+    merged.start = parts.iter().map(|x| x.start).fold(f64::INFINITY, f64::min);
+    merged.end = parts.iter().map(|x| x.end).fold(f64::NEG_INFINITY, f64::max);
+    merged.src_text = join(|x| x.src_text.as_str());
+    merged.tgt_text = join(|x| x.tgt_text.as_str());
+    merged.dirty = true;
+    merged.ckpt = None;
+    let words: Vec<Value> = parts.iter().filter_map(|x| x.extra.get("words").and_then(Value::as_array)).flatten().cloned().collect();
+    if words.is_empty() {
+        merged.extra.remove("words");
+    } else {
+        merged.extra.insert("words".into(), Value::Array(words));
+    }
+    p.segments.insert(places[0], merged);
+    Ok(())
 }
 
 /// reorder_segments — изменить порядок сегментов согласно списку id в edit["ids"].
@@ -972,5 +1100,70 @@ mod tests {
         assert_eq!(p.captions.titles.len(), 1);
         apply(&mut p, &json!({"op":"del_blurs","idxs":[1]})).unwrap();
         assert_eq!(p.captions.blur_boxes.len(), 2);
+    }
+
+    fn line(id: &str, start: f64, end: f64, src: &str, tgt: &str) -> dub_core::Segment {
+        dub_core::Segment { id: id.into(), start, end, src_text: src.into(), tgt_text: tgt.into(), speaker: Some("1".into()), ..Default::default() }
+    }
+
+    #[test]
+    fn split_cuts_a_line_at_a_moment_by_its_words() {
+        let mut p = Project::default();
+        let mut s1 = line("s1", 1.0, 5.0, "one two three four", "раз два три четыре");
+        s1.ckpt = Some("k".into());
+        s1.extra.insert("words".into(), json!([
+            { "word": "one", "start": 1.0, "end": 1.5 }, { "word": "two", "start": 1.6, "end": 2.0 },
+            { "word": "three", "start": 3.1, "end": 3.6 }, { "word": "four", "start": 4.0, "end": 4.8 },
+        ]));
+        p.segments.push(s1);
+        p.segments.push(line("s2", 6.0, 7.0, "five", "пять"));
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":3.0})).unwrap();
+        let ids: Vec<&str> = p.segments.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, ["s1", "s1.2", "s2"]);
+        let (a, b) = (&p.segments[0], &p.segments[1]);
+        assert_eq!((a.start, a.end, b.start, b.end), (1.0, 3.0, 3.0, 5.0));
+        assert_eq!((a.src_text.as_str(), b.src_text.as_str()), ("one two", "three four"));
+        assert_eq!((a.tgt_text.as_str(), b.tgt_text.as_str()), ("раз два", "три четыре"));
+        assert_eq!(a.extra["words"].as_array().unwrap().len(), 2);
+        assert_eq!(b.extra["words"][0]["word"], "three");
+        assert!(a.dirty && b.dirty && a.ckpt.is_none() && b.ckpt.is_none());
+        assert_eq!(b.speaker.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn split_takes_the_translation_it_is_given_and_refuses_a_moment_outside() {
+        let mut p = Project::default();
+        p.segments.push(line("s1", 0.0, 4.0, "a b c d", "один два три четыре"));
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":1.0,"new_id":"x","tgt_text":"первая","tgt_text_2":"вторая"})).unwrap();
+        assert_eq!(p.segments[1].id, "x");
+        assert_eq!((p.segments[0].src_text.as_str(), p.segments[1].src_text.as_str()), ("a", "b c d"));
+        assert_eq!((p.segments[0].tgt_text.as_str(), p.segments[1].tgt_text.as_str()), ("первая", "вторая"));
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"x","at":1.05})).unwrap_err().0, 400, "too close to the start");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"x","at":9.0})).unwrap_err().0, 400, "after the end");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"s1","at":0.5,"new_id":"x"})).unwrap_err().0, 409, "an id in use");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"nope","at":0.5})).unwrap_err().0, 404);
+        assert_eq!(split_text("你好世界", 0.5), ("你好".to_string(), "世界".to_string()), "text without spaces is cut by characters");
+    }
+
+    #[test]
+    fn merge_joins_neighbouring_lines() {
+        let mut p = Project::default();
+        let mut s1 = line("s1", 1.0, 2.0, "one", "раз");
+        s1.extra.insert("words".into(), json!([{ "word": "one", "start": 1.0, "end": 1.4 }]));
+        let mut s2 = line("s2", 2.2, 3.0, "two", "два");
+        s2.speaker = Some("2".into());
+        s2.extra.insert("words".into(), json!([{ "word": "two", "start": 2.2, "end": 2.8 }]));
+        p.segments.extend([s1, s2, line("s3", 4.0, 5.0, "three", "три")]);
+        assert_eq!(apply(&mut p, &json!({"op":"merge_segments","ids":["s1","s3"]})).unwrap_err().0, 400, "not neighbours");
+        assert_eq!(apply(&mut p, &json!({"op":"merge_segments","ids":["s1"]})).unwrap_err().0, 400, "one line");
+        assert_eq!(apply(&mut p, &json!({"op":"merge_segments","ids":["s1","zz"]})).unwrap_err().0, 404);
+        apply(&mut p, &json!({"op":"merge_segments","ids":["s2","s1"]})).unwrap();
+        assert_eq!(p.segments.len(), 2);
+        let merged = &p.segments[0];
+        assert_eq!((merged.id.as_str(), merged.start, merged.end), ("s1", 1.0, 3.0));
+        assert_eq!((merged.src_text.as_str(), merged.tgt_text.as_str()), ("one two", "раз два"));
+        assert_eq!(merged.speaker.as_deref(), Some("1"));
+        assert_eq!(merged.extra["words"].as_array().unwrap().len(), 2);
+        assert!(merged.dirty);
     }
 }

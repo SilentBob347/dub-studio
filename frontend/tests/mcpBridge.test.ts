@@ -1,0 +1,105 @@
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { WINDOW_ID } from "../src/lib/api";
+import { PROJECT_CHANGED, SETTINGS_CHANGED, readPage, startBridge, takeArgs } from "../src/lib/mcpBridge";
+
+/** The stream the studio opens to the page, driven by the test. */
+class FakeStream {
+  static last: FakeStream | null = null;
+  onmessage: ((message: { data: string }) => void | Promise<void>) | null = null;
+  onerror: (() => void) | null = null;
+  url: string;
+  constructor(url: string) {
+    this.url = url;
+    FakeStream.last = this;
+  }
+  close() {}
+  async send(data: unknown) {
+    await this.onmessage?.({ data: JSON.stringify(data) });
+  }
+}
+
+const posted: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+beforeAll(() => {
+  // happy-dom lays nothing out: every element has a size, so the page reads as visible
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, width: 10, height: 10, top: 0, left: 0, right: 10, bottom: 10, toJSON: () => ({}) });
+  vi.stubGlobal("EventSource", FakeStream);
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    posted.push({ url, body: JSON.parse(String(init?.body ?? "null")) });
+    return new Response(null, { status: 204 });
+  }));
+  startBridge();
+});
+
+afterAll(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("the page's side of the bridge", () => {
+  it("answers a command for its window by the command's id, and ignores another window's", async () => {
+    const stream = FakeStream.last!;
+    expect(stream.url.endsWith("/mcp/window")).toBe(true);
+    await stream.send({ window: 7 });
+    document.body.innerHTML = `<button title="Export">x</button>`;
+    posted.length = 0;
+    await stream.send({ id: "w1", window: 8, command: "read_page", args: {} });
+    expect(posted.filter((p) => p.url.endsWith("/mcp/window/result"))).toEqual([]);
+    await stream.send({ id: "w2", window: 7, command: "read_page", args: {} });
+    const answer = posted.find((p) => p.url.endsWith("/mcp/window/result"))!;
+    expect(answer.body.id).toBe("w2");
+    expect(String((answer.body.result as { text: string }).text)).toContain('button "Export"');
+  });
+
+  it("says which command it cannot do on this screen, and refuses a field a command does not take", async () => {
+    const stream = FakeStream.last!;
+    posted.length = 0;
+    await stream.send({ id: "w3", window: 7, command: "editor_segment_split", args: {} });
+    expect(String(posted.at(-1)!.body.error)).toContain("cannot do \"editor_segment_split\"");
+    await stream.send({ id: "w4", window: 7, command: "read_page", args: { verbose: true } });
+    expect(posted.at(-1)!.body).toEqual({ id: "w4", error: "ui_read_page does not take verbose; it takes nothing." });
+  });
+
+  it("clicks a control by its label and reports it", async () => {
+    const stream = FakeStream.last!;
+    const clicked = vi.fn();
+    document.body.innerHTML = `<button aria-label="Delete project">x</button>`;
+    document.querySelector("button")!.addEventListener("click", clicked);
+    posted.length = 0;
+    await stream.send({ id: "w5", window: 7, command: "click", args: { text: "delete project" } });
+    expect(clicked).toHaveBeenCalledOnce();
+    expect(posted.at(-1)!.body).toEqual({ id: "w5", result: { text: "Clicked Delete project." } });
+  });
+
+  it("passes a change on to the screens, but not the window's own list changes", async () => {
+    const stream = FakeStream.last!;
+    const projects: unknown[] = [];
+    const settings: unknown[] = [];
+    window.addEventListener(PROJECT_CHANGED, (e) => projects.push((e as CustomEvent).detail));
+    window.addEventListener(SETTINGS_CHANGED, (e) => settings.push((e as CustomEvent).detail));
+    await stream.send({ changed: "project", pid: "p1", rev: 3, by: "agent" });
+    await stream.send({ changed: "settings", by: `window:${WINDOW_ID}` });
+    await stream.send({ changed: "settings", by: "agent" });
+    expect(projects).toEqual([{ changed: "project", pid: "p1", rev: 3, by: "agent" }]);
+    expect(settings).toEqual([{ changed: "settings", by: "agent" }]);
+  });
+});
+
+describe("what the agent reads of the page", () => {
+  it("lists an open dialog first and a list's row as one line with its fields' values", () => {
+    document.body.innerHTML = `
+      <div data-mcp-context="segment s1 0:01.0→0:02.0 SPK 1: Hi"><button title="Play">p</button><textarea>Привет</textarea></div>
+      <div role="dialog" aria-modal="true"><button>Cancel</button><button>Delete project</button></div>`;
+    const page = readPage();
+    const lines = page.split("\n");
+    expect(lines[0]).toContain("A dialog is open");
+    expect(lines[1]).toMatch(/button "Cancel"$/);
+    const row = lines.find((line) => line.startsWith("segment s1"))!;
+    expect(row).toMatch(/: e\d+ open, e\d+ Play, e\d+ textarea="Привет"$/);
+  });
+
+  it("refuses unknown arguments by name", () => {
+    expect(() => takeArgs("editor_seek", { secs: 3 }, ["seconds", "segment_id"])).toThrow("editor_seek does not take secs; it takes seconds, segment_id.");
+    expect(takeArgs("editor_seek", { seconds: 3 }, ["seconds"])).toEqual({ seconds: 3 });
+  });
+});

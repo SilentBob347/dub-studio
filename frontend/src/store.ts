@@ -3,7 +3,10 @@ import type { Project } from "./lib/api";
 
 type Stage = "boot" | "setup" | "empty" | "analyzing" | "editor" | "batch" | "multilang";
 export type ExportItem = { id: string; name: string; status: "rendering" | "done" | "error"; msg: string; url?: string; pid?: string };
-export type Activity = { t: number; text: string; kind: "work" | "done" | "error" };   // строка лога «что делает приложение»
+export type Activity = { t: number; text: string; kind: "work" | "done" | "error" | "agent" };   // строка лога «что делает приложение»; agent — действие агента по MCP
+// Вопрос перед необратимым действием — диалог страницы (ConfirmDialog), не window.confirm: тот останавливает скрипт
+// страницы вместе с мостом агента.
+export type ConfirmRequest = { message: string; confirmLabel: string; danger?: boolean };
 
 type State = {
   stage: Stage;
@@ -40,6 +43,10 @@ type State = {
   setSelBlur: (i: number | null) => void;
   setSelTitle: (i: number | null) => void;
   pushActivity: (text: string, kind?: Activity["kind"]) => void;   // добавить строку в журнал
+  resetHistory: () => void;         // проект изменили агент или другое окно: старые снимки undo затёрли бы их правки
+  confirmAsk: (ConfirmRequest & { resolve: (ok: boolean) => void }) | null;
+  askConfirm: (request: ConfirmRequest) => Promise<boolean>;
+  answerConfirm: (ok: boolean) => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -108,4 +115,16 @@ export const useStore = create<State>((set, get) => ({
     if (last && last.text === clean && last.kind === kind) return {};   // дедуп повторов
     return { activities: [...s.activities, { t: Date.now(), text: clean, kind }].slice(-200) };
   }),
+  resetHistory: () => set({ past: [], future: [] }),
+  confirmAsk: null,
+  askConfirm: (request) => new Promise<boolean>((resolve) => {
+    get().confirmAsk?.resolve(false);
+    set({ confirmAsk: { ...request, resolve } });
+  }),
+  answerConfirm: (ok) => {
+    const asked = get().confirmAsk;
+    if (!asked) return;
+    set({ confirmAsk: null });
+    asked.resolve(ok);
+  },
 }));

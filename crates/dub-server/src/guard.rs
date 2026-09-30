@@ -72,6 +72,7 @@ pub(crate) fn cors() -> CorsLayer {
         .allow_origin(AllowOrigin::predicate(|origin, _| local_origin_value(origin)))
         .allow_methods(Any)
         .allow_headers(Any)
+        .expose_headers([header::HeaderName::from_static(crate::mcp::REV_HEADER)])
 }
 
 #[cfg(test)]

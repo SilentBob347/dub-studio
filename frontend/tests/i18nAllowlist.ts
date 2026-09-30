@@ -10,7 +10,8 @@ export const ALLOW: Allow = {
     "Bahasa Indonesia", "Bahasa Melayu", "Basa Jawa", "Basa Sunda",
   ]),
   cyrillicFiles: new Set(["lib/i18n.ts"]),
-  skipFiles: new Set(["i18next.d.ts"]),
+  // lib/mcpBridge.ts speaks only to the agent over MCP, in English: none of its text reaches the UI.
+  skipFiles: new Set(["i18next.d.ts", "lib/mcpBridge.ts"]),
 };
 
 /**
@@ -30,11 +31,11 @@ export const SAME_AS_EN: Record<"*" | "ru" | "zh" | "es" | "pt" | "fr", string[]
   pt: [
     "voice.g_female", "voice.g_male", "remix.title", "compare.original", "multilang.openEditor",
     "settings.auto", "settings.sec", "transcribe.sec", "comp.subsOriginal", "trStyle.normal", "casting.contentAuto",
-    "units.gb", "units.mb", "units.kb", "units.b", "units.watt", "cloud.beta", "proxy.title", "hwPreset.ram",
+    "units.gb", "units.mb", "units.kb", "units.b", "units.watt", "cloud.beta", "proxy.title", "hwPreset.ram", "bridge.job.remix",
   ],
   fr: [
     "editor.style", "voice.recordStop", "voice.g_female", "remix.title", "compare.original", "settings.vision",
     "settings.auto", "settings.sec", "help.sectionsTitle", "common.pause", "comp.audioLabel", "comp.subsOriginal",
-    "trStyle.normal", "casting.contentAuto", "units.watt", "proxy.title", "proxy.services",
+    "trStyle.normal", "casting.contentAuto", "units.watt", "proxy.title", "proxy.services", "bridge.agent", "bridge.job.remix",
   ],
 };

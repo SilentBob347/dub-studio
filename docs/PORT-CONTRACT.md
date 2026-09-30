@@ -14,6 +14,14 @@
 - Снапшот `OPTS` берётся в момент постановки джобы (иммунитет к конкурентному `PATCH /engine/opts`).
 - В Rust: `crates/dub-server/src/jobs.rs` — единый воркер (`spawn_blocking`), broadcast-канал на SSE,
   oneshot для синхронного ожидания (preview/original). Реап терминальной джобы через 300с.
+- Автор и ревизия (mcp/window.rs::track, слой на весь `api`): запрос окна несёт `x-dub-window: <метка окна>`,
+  вызов MCP-инструмента — `x-dub-agent`; остальное — `api`. Каждая запись project.json (`save_project_atomic`)
+  поднимает ревизию проекта и оповещает окна `{changed:"project", pid, rev, by, job}`; запись джобы вне запроса
+  приписывается тому, кто её запустил (`job: true`). Ответы, которые и есть проект (GET/PATCH/PUT
+  `/projects/{pid}`, POST `/projects/{pid}/align`), несут `x-project-rev`. PUT `/projects/{pid}` с
+  `x-project-rev` старее сохранённой → 409 `{error:"project_changed", detail}`: undo окна не затирает правки агента
+  или другого окна. Создание/удаление проектов, настройки, голоса, кастинг и старт джоб (`{changed:"jobs", job_id,
+  kind, pid}`) тоже оповещают окна.
 
 ## SSE — формат событий (`GET /jobs/{id}/events`)  — **done**
 
@@ -49,7 +57,10 @@ data: {"type":"error", "error": "..."}
 | GET | `/projects/{pid}/files` | **done** | Пути файлов проекта на диске: папка, исходник, output (mkv раньше mp4) и проигрываемый output, dub_audio.m4a, project.json, casting.json, записанные SRT/TXT; null — ещё не сделан (project_files.rs::files) |
 | POST | `/projects/{pid}/export-text` | **done** | {format: srt\|txt, text?: tgt\|src, dir?, name?, speaker_label?} — строки проекта файлом, как кнопки окна (SRT перевода: все строки, tgt иначе src; транскрипт: строки с src). Без dir — в папку проекта под фиксированным именем вида (subtitles.srt, transcript.srt, translation.txt, transcript.txt) с перезаписью, своё name без dir — 400 (служебные source.txt, name.txt, import_subs.* не перезаписать); в dir — занятое имя получает (2), (3); Проводник не открывает. Вернуть {ok, path, lines} (project_files.rs::export_text) |
 | POST | `/mcp` | **done** | MCP-сервер (Streamable HTTP, stateless JSON-RPC): каждый tool зовёт маршрут этой таблицы внутри процесса; skill — docs/mcp-skill.md (mcp.rs::handle). Порядок в build_router как в YuE2: `mcp::install(api.clone())` до гарда Origin/Host, гард — снаружи `api` вместе с `/mcp` и `/mcp/status`; внутренние запросы инструментов несут `Host: 127.0.0.1` (mcp.rs::call_route_raw) и проходят гард, где бы он ни стоял |
-| GET | `/mcp/status` | **done** | {agent_connected, agent_last_call, agent_seconds_ago, agent_calls} для раздела настроек «Агент (MCP)» (mcp.rs::status) |
+| GET | `/mcp/status` | **done** | {agent_connected, agent_last_call, agent_seconds_ago, agent_calls, window_open} для раздела настроек «Агент (MCP)» (mcp.rs::status) |
+| GET | `/mcp/window` | **done** | SSE окна: первое событие `{window: n}`, дальше команды `{id, window, command, args}` для окна, к которому пользователь повернулся последним, и оповещения `{changed, pid?, rev?, by, job?, job_id?, kind?, project_id?}` всем окнам (mcp/window.rs::window_events). Отставшее окно получает `{changed: "everything"}` |
+| POST | `/mcp/window/result` | **done** | ответ окна на команду: `{id, result}` или `{id, error}` → 204; неизвестный id → 404 (window_result). Инструменты ui_* / editor_* ждут его 15–30 с; окна нет — сразу понятная ошибка инструмента |
+| POST | `/mcp/window/focus` | **done** | `{window}` — окно, к которому повернулся пользователь, получает следующие команды (window_focus) |
 | — (fallback) | `/{spa_path}` | **done** | SPA: реальный статик-файл (с защитой от path-traversal), иначе index.html |
 
 ## PATCH `/projects/{pid}` — операции `op` (все синхронные, без GPU) — **todo**
@@ -84,6 +95,8 @@ data: {"type":"error", "error": "..."}
 | `recast` | voice_mode?, voice_name? | recast (сменить режим/голос дубляжа) |
 | `regen` | id | пометить сегмент dirty → ре-TTS только его на /render |
 | `regen_all` | — | пометить все dirty → ре-TTS всего дубляжа |
+| `split_segment` ✅ | id, at, tgt_text?, tgt_text_2?, new_id? | разрезать фразу в момент at: слова ASR и исходный текст — по времени, перевод — из полей или в той же доле; вторая часть `<id>.2`; обе dirty; at не внутри фразы → 400, занятый new_id → 409 |
+| `merge_segments` ✅ | ids[] | склеить соседние по списку фразы: id, спикер и голос первой, время от раннего начала до позднего конца, тексты и слова подряд; не соседи → 400 |
 
 ## Защита от path-traversal (SPA)  — **done**
 

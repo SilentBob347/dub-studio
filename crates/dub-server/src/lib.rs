@@ -316,10 +316,12 @@ fn save_project_atomic(dir: &Path, proj: &Project) -> Result<(), String> {
     let json = proj
         .to_json_pretty()
         .map_err(|e| format!("сериализация project.json: {e}"))?;
-    let tmp = dir.join("project.json.tmp");
-    std::fs::write(&tmp, json.as_bytes()).map_err(|e| format!("запись tmp: {e}"))?;
-    std::fs::rename(&tmp, dir.join("project.json")).map_err(|e| format!("rename: {e}"))?;
-    Ok(())
+    // Каждая запись — новая ревизия проекта, и окна узнают, кто её сделал (mcp::save_with_revision).
+    mcp::save_with_revision(dir, || {
+        let tmp = dir.join("project.json.tmp");
+        std::fs::write(&tmp, json.as_bytes()).map_err(|e| format!("запись tmp: {e}"))?;
+        std::fs::rename(&tmp, dir.join("project.json")).map_err(|e| format!("rename: {e}"))
+    })
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -401,12 +403,17 @@ pub fn build_router(state: AppState) -> Router {
         // Видео-аплоад — большие тела. axum по дефолту режет на 2МБ (multipart ломается на
         // реальном ролике). Питон (Starlette) лимита не ставит -> снимаем и мы.
         .layer(axum::extract::DefaultBodyLimit::disable())
+        // Автор запроса (окно, агент, API), ревизия проекта в ответе и оповещение окон о переменах.
+        .layer(axum::middleware::from_fn(mcp::track))
         .with_state(state);
     // MCP-инструменты зовут те же маршруты внутри процесса. Гард Origin/Host вешается ниже этой точки,
     // снаружи /mcp и /mcp/status, а не внутри `api`.
     mcp::install(api.clone());
     api.route("/mcp", post(mcp::handle))
         .route("/mcp/status", get(mcp::status))
+        .route("/mcp/window", get(mcp::window_events))
+        .route("/mcp/window/result", post(mcp::window_result).layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)))
+        .route("/mcp/window/focus", post(mcp::window_focus))
         .layer(guard::cors())
         // Снаружи всех слоёв: чужой Origin/Host получает 403 раньше CORS, SPA и любой ручки.
         .layer(axum::middleware::from_fn(guard::origin_guard))
@@ -778,11 +785,11 @@ async fn voice_slots_assign(
 
     let slots = voice_slots::Slots { male, female };
     let dir_job = dir.clone();
-    let res = tokio::task::spawn_blocking(move || {
+    let res = tokio::task::spawn_blocking(mcp::carry(move || {
         let assigns = voice_slots::assign(&mut proj, &vocals, &dir_job, &slots);
         save_project_atomic(&dir_job, &proj)?;
         Ok::<_, String>((assigns, proj))
-    })
+    }))
     .await;
     match res {
         Ok(Ok((assigns, proj))) => {
@@ -2361,7 +2368,7 @@ pub async fn align_project(State(st): State<AppState>, AxPath(pid): AxPath<Strin
         }
     }
 
-    let res = tokio::task::spawn_blocking(move || {
+    let res = tokio::task::spawn_blocking(mcp::carry(move || {
         let mut count = 0usize;
         let mut wav_path = audio_file;
         let voc16 = d.join("vocals16_align.wav");
@@ -2414,7 +2421,7 @@ pub async fn align_project(State(st): State<AppState>, AxPath(pid): AxPath<Strin
         }
         let _ = save_project_atomic(&d, &proj);
         (count, proj)
-    }).await;
+    })).await;
 
     match res {
         Ok((_count, fresh_proj)) => Json(fresh_proj).into_response(),
