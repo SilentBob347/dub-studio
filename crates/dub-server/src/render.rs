@@ -136,6 +136,7 @@ pub fn run(
     if vw <= 0 || vh <= 0 {
         let out_wav = paths.output.with_extension("wav");
         media::to_wav(&new_audio, &out_wav)?;
+        discard_mix(&new_audio, wd);
         // Прибрать stale output.mp4/.mkv от прошлого прогона: find_output отдаёт их приоритетнее wav (#116).
         for ext in ["mp4", "mkv"] {
             let stale = paths.output.with_extension(ext);
@@ -252,9 +253,23 @@ pub fn run(
         }
     }
 
+    discard_mix(&new_audio, wd);
     emit(progress, "done", &format!("готово -> {}", out_path.display()));
     bench.finish(|m| emit(progress, "bench", m));
     Ok(RenderResult { output: out_path })
+}
+
+/// Несжатые файлы микса (media::lossless_out), которые после финального кодирования больше не нужны:
+/// float-стерео длинного ролика занимает сотни МБ на каждый проект.
+const MIX_TEMPS: [&str; 4] = ["new_audio.wav", "orig_ducked.wav", "final_audio.wav", "gained_audio.wav"];
+
+/// Удалить отработавший файл микса. Исходник, дорожку дубля и всё вне каталога проекта не трогает.
+fn discard_mix(path: &Path, wd: &Path) {
+    let ours = path.parent() == Some(wd)
+        && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| MIX_TEMPS.contains(&n));
+    if ours {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Человекочитаемое имя языка для title дорожки. Нативных имён в проекте нет — берём английское имя из
@@ -296,6 +311,7 @@ pub fn dub_audio(
     let out = wd.join("dub_audio.m4a");
     // browser-playable aac/m4a: build_dub отдаёт несжатый WAV, nodub — звук оригинала.
     media::encode_preview_aac(&src, &out)?;
+    discard_mix(&src, wd);
     emit(progress, "done", "дуб-аудио готово");
     Ok(out)
 }
@@ -1352,9 +1368,7 @@ fn build_dub(
                 }
             };
             media::mix(&dub, &bed, &new_audio)?;
-            if bed != audio_hq {
-                let _ = std::fs::remove_file(&bed);
-            }
+            discard_mix(&bed, wd);
         }
         new_audio
     } else if let Some(inst) = instrumental {
@@ -1381,22 +1395,19 @@ fn build_dub(
         }
         new_audio
     } else {
-        dub.clone()
+        dub
     };
     // 7) финальная нормализация программы EBU R128 + true-peak лимитер (-1 dBTP). РЕШЕНИЕ ЮЗЕРА
     // (best-practice, НЕ питон — приказ 2026-07-12): пофразный normalize_voice выровнял спикеров (и
     // опустил лимитером редкие пики фразы к 0.985), здесь программа приводится к целевой громкости соцсетей
     // (-14 LUFS); финальный true-peak лимитер держит межфразовые суммы и микс с фоном.
     // Все промежуточные стадии — несжатый float WAV (media::lossless_out); единственное кодирование с
-    // потерями — в mux (AAC 256k) либо превью dub_audio.m4a. Отработавший промежуточный файл удаляется:
-    // стерео-float занимает сотни МБ на длинном ролике.
+    // потерями — в mux (AAC 256k) либо превью dub_audio.m4a.
     emit(progress, "mix", "нормализация громкости (EBU R128, true-peak)");
     let final_audio = wd.join("final_audio.wav");
     let normalized = match media::loudnorm(&mixed, &final_audio, -14.0, -1.0, 11.0) {
         Ok(()) => {
-            if mixed != dub {
-                let _ = std::fs::remove_file(&mixed);
-            }
+            discard_mix(&mixed, wd);
             final_audio
         }
         Err(e) => {
@@ -1411,9 +1422,7 @@ fn build_dub(
         let gained = wd.join("gained_audio.wav");
         match media::gain(&normalized, &gained, gain_db) {
             Ok(()) => {
-                if normalized != dub {
-                    let _ = std::fs::remove_file(&normalized);
-                }
+                discard_mix(&normalized, wd);
                 Ok(gained)
             }
             Err(_) => Ok(normalized),
@@ -2447,6 +2456,22 @@ mod tests {
         // плашка обнимает текст: S-style несёт BorderStyle=3 (плашка = обводка вокруг текста той же строки).
         let s_style = ass.lines().find(|l| l.starts_with("Style: S,")).unwrap();
         assert!(s_style.contains(",3,11,"), "плашка = BorderStyle=3 в стиле строки: {s_style}");
+    }
+
+    #[test]
+    fn only_mix_temporaries_of_the_project_are_discarded() {
+        let wd = std::env::temp_dir().join(format!("render_discard_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wd);
+        std::fs::create_dir_all(&wd).unwrap();
+        for n in ["final_audio.wav", "dub_vocals.wav", "source.mp4"] {
+            std::fs::write(wd.join(n), b"x").unwrap();
+        }
+        discard_mix(&wd.join("final_audio.wav"), &wd);
+        discard_mix(&wd.join("dub_vocals.wav"), &wd);
+        discard_mix(&wd.join("source.mp4"), &wd);
+        assert!(!wd.join("final_audio.wav").exists());
+        assert!(wd.join("dub_vocals.wav").exists() && wd.join("source.mp4").exists());
+        let _ = std::fs::remove_dir_all(&wd);
     }
 
     #[test]
