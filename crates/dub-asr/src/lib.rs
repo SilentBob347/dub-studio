@@ -2,16 +2,19 @@
 //!
 //! Движок: Parakeet-TDT-0.6B-v3 (мультиязычный, авто-определение языка) + Sortformer v2 для диаризации,
 //! оба через ONNX Runtime (провайдер CPU по умолчанию). parakeet-rs требует ровно 16 кГц моно —
-//! входной WAV приводится к 16k/mono здесь (даунмикс + линейный ресемпл).
+//! входной WAV приводится к 16k/mono здесь (даунмикс + ресемплинг с ограничением полосы).
 //!
 //! Сегментация словного потока (_segment), transcribe / diarize / transcribe_turns — порт
 //! dubengine/asr.py и dubengine/diarize.py: паузы >0.6с, конец предложения .!?…, макс 8.0с.
 
+mod hallucination;
 mod reconcile;
+mod resample;
 mod segment;
 mod speaker_global;
 mod whisper;
 mod window;
+pub use hallucination::{is_hallucination, HallucinationRules};
 pub use reconcile::{speaker_for_overlap, DiarIndex};
 pub use speaker_global::{
     cluster_embeddings, cosine, map_local_to_global, Embedding, LocalSpeaker, NullEmbedder,
@@ -138,6 +141,8 @@ pub enum AsrError {
     WavRead(String, String),
     #[error("io: {0}")]
     Io(String),
+    #[error("ресемплинг: {0}")]
+    Resample(String),
 }
 
 /// Одна реплика диаризации: [start, end] в секундах, speaker — контиг. id (0..k-1).
@@ -175,6 +180,15 @@ pub trait AsrEngine {
                     .ok()
                     .map(|segs| segs.into_iter().map(|s| s.text).collect::<Vec<_>>().join(" "))
             })
+            .collect()
+    }
+    /// Пакетная транскрипция МНОГИХ коротких файлов со словными таймингами (секунды от начала файла).
+    /// Ошибка распознавания файла — Err с причиной (вызывающий решает, как показать её пользователю).
+    /// Субтитры дубляжа берут отсюда, где в уложенной фразе реально звучит каждое слово.
+    fn transcribe_many_words(&mut self, files: &[std::path::PathBuf], lang: &str) -> Vec<Result<Vec<Word>, AsrError>> {
+        files
+            .iter()
+            .map(|f| self.transcribe(f, lang).map(|segs| segs.into_iter().flat_map(|s| s.words).collect()))
             .collect()
     }
 }
@@ -779,31 +793,8 @@ pub(crate) fn load_wav_16k_mono(path: &Path) -> Result<(Vec<f32>, u32), AsrError
             .collect()
     };
 
-    let out = if spec.sample_rate == TARGET_SR {
-        mono
-    } else {
-        resample_linear(&mono, spec.sample_rate, TARGET_SR)
-    };
+    let out = resample::mono(&mono, spec.sample_rate, TARGET_SR)?;
     Ok((out, TARGET_SR))
-}
-
-/// Линейный ресемпл. Для извлечения мел-фич ASR этого достаточно; тяжёлый sinc не нужен.
-fn resample_linear(input: &[f32], src_sr: u32, dst_sr: u32) -> Vec<f32> {
-    if input.is_empty() || src_sr == dst_sr {
-        return input.to_vec();
-    }
-    let ratio = dst_sr as f64 / src_sr as f64;
-    let out_len = ((input.len() as f64) * ratio).round() as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for i in 0..out_len {
-        let src_pos = i as f64 / ratio;
-        let idx = src_pos.floor() as usize;
-        let frac = (src_pos - idx as f64) as f32;
-        let a = input.get(idx).copied().unwrap_or(0.0);
-        let b = input.get(idx + 1).copied().unwrap_or(a);
-        out.push(a + (b - a) * frac);
-    }
-    out
 }
 
 #[cfg(test)]
