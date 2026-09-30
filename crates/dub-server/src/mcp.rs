@@ -341,6 +341,7 @@ fn redact(value: Value) -> Value {
 fn shape(name: &str, args: &Value, value: Value) -> Value {
     let detailed = args.get("response_format").and_then(Value::as_str) == Some("detailed");
     match name {
+        "url_probe" => compact_probe(value),
         _ if detailed => value,
         "project_get" => compact_project(&value, args),
         _ if is_project(&value) => compact_change(name, args, &value),
@@ -384,6 +385,27 @@ fn shape(name: &str, args: &Value, value: Value) -> Value {
         }
         _ => value,
     }
+}
+
+/// A probe as an agent chooses from it, whatever response_format says: the preview picture's base64
+/// is the window's, the automatic subtitles are only their languages, and no track names its file
+/// formats, which the download picks itself.
+fn compact_probe(mut value: Value) -> Value {
+    if let Value::Object(fields) = &mut value {
+        fields.remove("thumbnail_data");
+        fields.remove("thumbnail_error");
+        if let Some(Value::Array(tracks)) = fields.get_mut("subtitles") {
+            for track in tracks.iter_mut() {
+                *track = json!({ "lang": track["lang"], "name": track["name"] });
+            }
+        }
+        if let Some(Value::Array(tracks)) = fields.get_mut("auto_subtitles") {
+            for track in tracks.iter_mut() {
+                *track = track["lang"].take();
+            }
+        }
+    }
+    value
 }
 
 // ---------------------------------------------------------------- waiting
@@ -1100,7 +1122,7 @@ fn tools() -> &'static [Tool] {
             // ---------------------------------------------------------------- videos by link
             Tool {
                 name: "url_probe",
-                description: "Look at a video link before downloading it (YouTube and the other sites yt-dlp knows): title, length, uploader, the highest height, the qualities worth offering, the site's subtitles made by people (subtitles, each with lang) apart from the automatic ones (auto_subtitles), the expected size. cookies is the path of a cookies.txt for videos that need a signed-in browser (age, members, bot checks). A refusal names its code and what to do (hint). Needs the component ytdlp (models_download).",
+                description: "Look at a video link before downloading it (YouTube and the other sites yt-dlp knows): title, length, uploader, the highest height, the qualities worth offering, the site's subtitles made by people (subtitles, each with lang and name) apart from the languages of the automatic ones (auto_subtitles), the expected size and the preview's link (thumbnail). cookies is the path of a cookies.txt for videos that need a signed-in browser (age, members, bot checks). A refusal names its code and what to do (hint). Needs the component ytdlp (models_download).",
                 schema: || object(json!({ "url": { "type": "string", "description": "link of one video" }, "cookies": { "type": "string", "description": "path of a Netscape cookies.txt" } }), &["url"]),
                 call: |args| get(format!("/url/probe{}", query(&[("url", Some(text(args, "url")?)), ("cookies", given(args, "cookies"))]))),
             },
@@ -2186,6 +2208,17 @@ mod tests {
                     None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response(),
                 }
             }))
+            .route("/url/probe", get(|| async {
+                let formats = json!(["json3", "srv1", "srv2", "srv3", "ttml", "srt", "vtt"]);
+                let auto: Vec<Value> = (0..157).map(|n| json!({ "lang": format!("l{n:03}"), "name": format!("Language {n} from English"), "formats": formats })).collect();
+                Json(json!({
+                    "url": "https://www.youtube.com/watch?v=abc", "title": "A long clip", "duration": 600.0, "thumbnail": "https://i.ytimg.com/vi/abc/hqdefault.jpg",
+                    "thumbnail_data": format!("data:image/jpeg;base64,{}", "A".repeat(60_000)), "thumbnail_error": null, "uploader": "Someone", "extractor": "Youtube",
+                    "max_height": 2160, "has_video": true, "has_audio": true, "qualities": ["best", "1080", "720", "480", "audio"],
+                    "subtitles": [{ "lang": "en", "name": "English", "formats": formats }, { "lang": "ru", "name": "Russian", "formats": formats }],
+                    "auto_subtitles": auto, "expected_bytes": 123456789, "tool_version": "2026.09.01",
+                }))
+            }))
             .route("/engine/capabilities", get(|| async { Json(json!({ "selection": { "or_key": "sk-or-secret", "proxy_url": "http://user:pass@host:8080", "bench": "1" }, "asr_engines": ["parakeet", "whisper"] })) }))
             .route("/projects/{pid}", get(|| async { Json(a_project()) }).patch(|| async { Json(a_project()) }))
             .route("/projects/{pid}/preview", get(|| async { ([(header::CONTENT_TYPE, "image/jpeg")], vec![0xFFu8, 0xD8, 0xFF, 0xD9]).into_response() }))
@@ -2628,6 +2661,22 @@ mod tests {
         let missing = call_tool("openrouter_status", json!({})).await;
         assert_eq!(missing["result"]["isError"], true);
         assert!(answer_text(&missing).contains("no route GET /engine/openrouter/settings"), "{missing}");
+    }
+
+    #[tokio::test]
+    async fn a_probe_is_what_the_agent_chooses_from() {
+        stub();
+        for args in [json!({ "url": "https://www.youtube.com/watch?v=abc" }), json!({ "url": "https://www.youtube.com/watch?v=abc", "response_format": "detailed" })] {
+            let reply = call_tool("url_probe", args).await;
+            let text = answer_text(&reply);
+            assert!(text.len() < 8_000, "{} characters", text.len());
+            assert!(!text.contains("thumbnail_data") && !text.contains("base64") && !text.contains("vtt"), "{text}");
+            let probe = &reply["result"]["structuredContent"];
+            assert_eq!((probe["title"].clone(), probe["tool_version"].clone(), probe["thumbnail"].clone()), (json!("A long clip"), json!("2026.09.01"), json!("https://i.ytimg.com/vi/abc/hqdefault.jpg")), "{reply}");
+            assert_eq!(probe["subtitles"], json!([{ "lang": "en", "name": "English" }, { "lang": "ru", "name": "Russian" }]));
+            let auto = probe["auto_subtitles"].as_array().unwrap();
+            assert_eq!((auto.len(), auto[0].clone()), (157, json!("l000")));
+        }
     }
 
     #[tokio::test]

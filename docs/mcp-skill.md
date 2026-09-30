@@ -95,7 +95,8 @@ connected and the address to paste.
 1. `url_tool_status`: the component `ytdlp` must be installed (`models_download` with
    `ids: ["ytdlp"]` otherwise).
 2. `url_probe` with the `url`: the title, the length, the qualities and the site's
-   subtitles made by people (`subtitles`, apart from `auto_subtitles`). A refusal names its
+   subtitles made by people (`subtitles`, apart from the languages of the automatic ones in
+   `auto_subtitles`); the preview is its link, `thumbnail`. A refusal names its
    code and a `hint`: a proxy for a geo block, `cookies` (the path of a cookies.txt) for an
    age check, a members' video or a bot check.
 3. `project_create_from_url` with `url`, `quality` and, to take the site's subtitles as the
