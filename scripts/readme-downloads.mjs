@@ -22,7 +22,7 @@ const TEXT = {
   en: {
     head: ["Component", "Need", "Files (direct links)", "Size", "Put it in"],
     need: { required: "required", recommended: "recommended", optional: "optional" },
-    none: "as is, into",
+    none: "as is, to the path after the arrow",
     zipflat: "unzip the files, without subfolders, into",
     ziptree: "unzip with its folder tree into",
     zippick: "take ffmpeg.exe and ffprobe.exe from the archive into",
@@ -31,7 +31,7 @@ const TEXT = {
   ru: {
     head: ["Компонент", "Нужен", "Файлы (прямые ссылки)", "Размер", "Куда положить"],
     need: { required: "обязателен", recommended: "рекомендуется", optional: "по желанию" },
-    none: "как есть, в",
+    none: "как есть, по пути после стрелки",
     zipflat: "распаковать файлы без подпапок в",
     ziptree: "распаковать с деревом папок в",
     zippick: "взять ffmpeg.exe и ffprobe.exe из архива в",
@@ -40,7 +40,7 @@ const TEXT = {
   zh: {
     head: ["组件", "必要性", "文件（直接链接）", "大小", "存放位置"],
     need: { required: "必需", recommended: "推荐", optional: "可选" },
-    none: "原样放入",
+    none: "原样放入，路径见箭头后",
     zipflat: "解压文件（不含子文件夹）到",
     ziptree: "保留文件夹结构解压到",
     zippick: "从压缩包中取出 ffmpeg.exe 和 ffprobe.exe 放入",
@@ -49,7 +49,7 @@ const TEXT = {
   es: {
     head: ["Componente", "Necesidad", "Archivos (enlaces directos)", "Tamaño", "Dónde ponerlo"],
     need: { required: "obligatorio", recommended: "recomendado", optional: "opcional" },
-    none: "tal cual, en",
+    none: "tal cual, en la ruta tras la flecha",
     zipflat: "descomprimir los archivos, sin subcarpetas, en",
     ziptree: "descomprimir con su árbol de carpetas en",
     zippick: "tomar ffmpeg.exe y ffprobe.exe del archivo y ponerlos en",
@@ -58,7 +58,7 @@ const TEXT = {
   fr: {
     head: ["Composant", "Besoin", "Fichiers (liens directs)", "Taille", "Où le placer"],
     need: { required: "obligatoire", recommended: "recommandé", optional: "facultatif" },
-    none: "tel quel, dans",
+    none: "tel quel, au chemin indiqué après la flèche",
     zipflat: "décompresser les fichiers, sans sous-dossiers, dans",
     ziptree: "décompresser avec son arborescence dans",
     zippick: "prendre ffmpeg.exe et ffprobe.exe de l'archive et les mettre dans",
@@ -67,7 +67,7 @@ const TEXT = {
   pt: {
     head: ["Componente", "Necessidade", "Arquivos (links diretos)", "Tamanho", "Onde colocar"],
     need: { required: "obrigatório", recommended: "recomendado", optional: "opcional" },
-    none: "como está, em",
+    none: "como está, no caminho após a seta",
     zipflat: "descompactar os arquivos, sem subpastas, em",
     ziptree: "descompactar com a árvore de pastas em",
     zippick: "pegar ffmpeg.exe e ffprobe.exe do arquivo e colocar em",
@@ -148,6 +148,10 @@ function human(bytes) {
   return Math.max(1, Math.round(bytes / 1e3)) + " KB";
 }
 
+function winPath(rel) {
+  return rel.replace(/\//g, "\\");
+}
+
 function folderOf(rel) {
   const i = rel.lastIndexOf("/");
   return (i < 0 ? "" : rel.slice(0, i + 1)).replace(/\//g, "\\");
@@ -161,8 +165,8 @@ function table(manifest, lang) {
     const name = NAMES[c.id];
     if (!name) throw new Error(`component "${c.id}" has no name in scripts/readme-downloads.mjs`);
     const label = typeof name === "string" ? name : name[lang];
-    const links = c.files.map((f) => `[${f.url.split("/").pop()}](${f.url})`).join("<br>");
-    const places = [...new Set(c.files.map((f) => `${T[f.extract === "none" ? "none" : f.extract]} \`${folderOf(f.destRel)}\``))];
+    const links = c.files.map((f) => `[${f.url.split("/").pop()}](${f.url})${f.extract === "none" ? ` → \`${winPath(f.destRel)}\`` : ""}`).join("<br>");
+    const places = [...new Set(c.files.map((f) => (f.extract === "none" ? T.none : `${T[f.extract]} \`${folderOf(f.destRel)}\``)))];
     rows.push(`| ${label} | ${T.need[c.requirement]} | ${links} | ${human(c.size)} | ${places.join("<br>")} |`);
   }
   return rows.join("\n");
@@ -199,6 +203,15 @@ for (const [lang, file] of Object.entries(FILES)) {
     continue;
   }
   const have = text.slice(blk.a, blk.b);
+  for (const c of manifest) {
+    if (c.delivery !== "Download") continue;
+    for (const f of c.files) {
+      if (f.extract === "none" && !have.includes(`${f.url.split("/").pop()}](${f.url}) → \`${winPath(f.destRel)}\``)) {
+        console.error(`[ERROR] ${file}: no destination ${winPath(f.destRel)} next to ${f.url}`);
+        failed = true;
+      }
+    }
+  }
   const present = urlsOf(have);
   const missing = [...wanted].filter((u) => !present.has(u));
   const extra = [...present].filter((u) => !wanted.has(u));
