@@ -85,6 +85,29 @@ pub struct Sub {
     /// Услышанные слова этой реплики (текст, начало, конец; секунды таймлайна): пословная подсветка
     /// (karaoke/highlight/word/pop) и перелистывание страниц идут по ним. None — раскладка по длине слов.
     pub words: Option<Vec<(String, f64, f64)>>,
+    /// Вторая строка двуязычного субтитра (оригинал реплики): те же страницы и тайминги, что у основной,
+    /// без пословной подсветки. None — субтитр в одну строку.
+    pub secondary: Option<String>,
+}
+
+/// Вид второй строки двуязычных субтитров. По умолчанию — производная основной: тот же стиль, кегль
+/// 70 %, цвет и непрозрачность основной.
+#[derive(Clone, Debug)]
+pub struct Secondary {
+    /// true — основная строка сверху, вторая под ней; false — вторая над основной.
+    pub below: bool,
+    /// Кегль в процентах основной строки.
+    pub size_pct: i64,
+    /// Цвет текста #RRGGBB; None — цвет основной строки.
+    pub color: Option<String>,
+    /// Непрозрачность 0..=100; None — как у основной строки.
+    pub opacity: Option<i64>,
+}
+
+impl Default for Secondary {
+    fn default() -> Self {
+        Secondary { below: true, size_pct: 70, color: None, opacity: None }
+    }
 }
 
 /// Blur-бокс для burn: (x,y,w,h,t0,t1,fill).

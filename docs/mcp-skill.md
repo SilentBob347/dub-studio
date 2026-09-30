@@ -102,11 +102,17 @@ connected and the address to paste.
 
 1. `project_analyze` with `mode: nodub` (translated subtitles over the original audio) or
    `mode: transcribe` (the transcript in the original language).
-2. `project_export_text` with `format: srt` (or `txt`) and `dir` - `text: src` for the
-   original words, `tgt` for the translation; `name` goes with `dir` only (without `dir`
-   the file lands in the project's folder as subtitles.srt, transcript.srt, translation.txt
-   or transcript.txt). `project_render` burns the subtitles in
+2. `project_export_text` with `format: srt` (or `vtt`, `txt`) and `dir` - `text: src` for
+   the original words, `tgt` for the translation, `both` for bilingual srt or vtt (the
+   translation and the original as two lines of each subtitle, `order` says which is on
+   top); `name` goes with `dir` only (without `dir` the file lands in the project's folder
+   as subtitles.srt, transcript.srt, bilingual.srt, the same .vtt, translation.txt or
+   transcript.txt). `project_render` burns the subtitles in
    instead, `subtitles_burn_set` with `on: false` leaves the picture clean.
+   `subtitles_content_set` chooses what they say apart from what is heard: `transcribe`
+   (a dub with subtitles in the original language), `translate`, or `bilingual` (the
+   translation with the original as a smaller second line, `order` and `secondary` style
+   it); an mkv output also carries them as subtitle tracks with their languages.
 3. Subtitles the user already has: `project_create` with `subtitles_path` (.srt, .ass,
    .ssa); `project_analyze` takes their text and timing instead of recognising speech, and
    `import_translated: true` when they are already in `tgt_lang`.
@@ -172,7 +178,7 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
   `project_align`, `project_dub_audio`, `project_render`, `project_export_lang`,
   `project_put`, `project_patch` (any edit by its op), `project_delete`,
   `project_waveform`, `project_frame`.
-- **files**: `project_files`, `project_export_text` (SRT, TXT), `project_save_output`,
+- **files**: `project_files`, `project_export_text` (SRT, VTT, TXT; bilingual), `project_save_output`,
   `project_open_output`, `project_reveal`.
 - **lines**: `segment_update`, `segment_add`, `segments_delete`, `segments_hide`,
   `segments_keep_original`, `segments_reorder`, `segment_regen`, `segments_regen_all`.

@@ -46,6 +46,8 @@ mod spa;
 mod studio_settings;
 mod subalign;
 mod subimport;
+mod subs_text;
+mod subtracks;
 mod translate;
 mod voice_slots;
 mod wavio;

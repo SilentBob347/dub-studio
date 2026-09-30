@@ -844,7 +844,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "launch_defaults_get",
-                description: "What the start screen's dubbing form opens with, shared by every window: audio (nodub, dub, voiceover, transcribe), subs (none, transcribe, translate), burn, detect_text, src_lang, tgt_lang (null: the window's language), casting, casting_ref, content_type, vo_gain_db (-24..0), tr_style, tr_style_custom, sub_blur, keep_orig, container (mp4, mkv), voice_src (clone, library), voice_slots_m, voice_slots_f; saved says whether they were ever changed.",
+                description: "What the start screen's dubbing form opens with, shared by every window: audio (nodub, dub, voiceover, transcribe), subs (none, transcribe, translate, bilingual: the translation with the original as a second line), burn, detect_text, src_lang, tgt_lang (null: the window's language), casting, casting_ref, content_type, vo_gain_db (-24..0), tr_style, tr_style_custom, sub_blur, keep_orig, container (mp4, mkv), voice_src (clone, library), voice_slots_m, voice_slots_f; saved says whether they were ever changed.",
                 schema: nothing,
                 call: |_| get("/settings/launch".into()),
             },
@@ -1060,7 +1060,7 @@ fn tools() -> &'static [Tool] {
                             "tgt_lang": { "type": "string", "description": "language code to dub into (studio://languages); not needed for mode transcribe" },
                             "mode": { "type": "string", "enum": ["auto", "dub", "voiceover", "nodub", "transcribe"] },
                             "src_lang": { "type": "string" },
-                            "subs": { "type": "string", "enum": ["auto", "none", "transcribe", "translate"] },
+                            "subs": { "type": "string", "enum": ["auto", "none", "transcribe", "translate", "bilingual"] },
                             "burn": { "type": "boolean" },
                             "detect": { "type": "boolean", "description": "read on-screen text to blur and translate it (default on)" },
                             "rewrite": { "type": "string" },
@@ -1197,13 +1197,14 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_export_text",
-                description: "Write the project's lines as a text file, as the window's export buttons do: format srt (numbered subtitles with timing) or txt (one line per phrase with its speaker); text tgt (the translation, the recognised text where a line has none) or src (the recognised original: the transcript). Without dir the file goes into the project's own folder under the fixed name of its kind (subtitles.srt, transcript.srt, translation.txt, transcript.txt), replacing the earlier one; a name of your own needs dir, a folder on this computer, where a name already there gets (2), (3). Answers the path.",
+                description: "Write the project's lines as a text file, as the window's export buttons do: format srt (numbered subtitles with timing), vtt (WebVTT) or txt (one line per phrase with its speaker); text tgt (the translation, the recognised text where a line has none), src (the recognised original: the transcript) or both (bilingual srt or vtt: the translation and the original as two lines of each subtitle, order translation_top or original_top). Without dir the file goes into the project's own folder under the fixed name of its kind (subtitles.srt, transcript.srt, bilingual.srt, the same .vtt, translation.txt, transcript.txt), replacing the earlier one; a name of your own needs dir, a folder on this computer, where a name already there gets (2), (3). Answers the path.",
                 schema: || {
                     object(
                         json!({
                             "pid": pid(),
-                            "format": { "type": "string", "enum": ["srt", "txt"] },
-                            "text": { "type": "string", "enum": ["tgt", "src"] },
+                            "format": { "type": "string", "enum": ["srt", "vtt", "txt"] },
+                            "text": { "type": "string", "enum": ["tgt", "src", "both"] },
+                            "order": { "type": "string", "enum": ["translation_top", "original_top"], "description": "for text both" },
                             "dir": { "type": "string", "description": "folder on this computer" },
                             "name": { "type": "string", "description": "the file's name, only together with dir" },
                             "speaker_label": { "type": "string", "description": "the word before each speaker's number in txt, Speaker by default" },
@@ -1323,8 +1324,27 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "subtitles_content_set",
-                description: "What the subtitles say: none, transcribe (the original language) or translate.",
-                schema: || object(json!({ "pid": pid(), "value": { "type": "string", "enum": ["none", "transcribe", "translate"] }, "response_format": detail() }), &["pid", "value"]),
+                description: "What the subtitles say, apart from what is heard (a dub can carry subtitles in the original language): value none, transcribe (the original language), translate, or bilingual (the translation with the original as a second line). For bilingual, order puts the translation on top (translation_top, the default) or the original; secondary styles the original's line: size_pct (40-100, 70 by default) of the main line's size, color (#RRGGBB) and opacity (10-100), where null makes them the main line's again. Fields left out stay; value can be left out to restyle only.",
+                schema: || {
+                    object(
+                        json!({
+                            "pid": pid(),
+                            "value": { "type": "string", "enum": ["none", "transcribe", "translate", "bilingual"] },
+                            "order": { "type": "string", "enum": ["translation_top", "original_top"] },
+                            "secondary": {
+                                "type": "object",
+                                "properties": {
+                                    "size_pct": { "type": "integer", "minimum": 40, "maximum": 100 },
+                                    "color": { "type": ["string", "null"], "description": "#RRGGBB; null: the main line's colour" },
+                                    "opacity": { "type": ["integer", "null"], "minimum": 10, "maximum": 100, "description": "null: as the main line" },
+                                },
+                                "additionalProperties": false,
+                            },
+                            "response_format": detail(),
+                        }),
+                        &["pid"],
+                    )
+                },
                 call: |args| edit(args, "subs_content"),
             },
             Tool {
@@ -2301,6 +2321,26 @@ mod tests {
         assert!((find("settings_set").call)(&json!({ "key": "or_key", "value": "sk" })).is_err(), "the key goes through openrouter_set_key");
         assert!((find("settings_set").call)(&json!({ "key": "proxy_url", "value": "http://host:1" })).is_err(), "the proxy goes through proxy_settings_set");
         assert!((find("project_create").call)(&json!({ "path": "Z:/nowhere/clip.mp4" })).is_err(), "a file that is not there is refused before the upload");
+    }
+
+    #[test]
+    fn bilingual_subtitles_and_their_export_are_tools() {
+        let find = |name: &str| tools().iter().find(|tool| tool.name == name).expect("the tool");
+        let args = json!({ "pid": "p1", "value": "bilingual", "order": "original_top", "secondary": { "size_pct": 60, "color": null } });
+        let call = (find("subtitles_content_set").call)(&args).unwrap();
+        assert_eq!((call.method.clone(), call.path.as_str()), (Method::PATCH, "/projects/p1"));
+        match call.payload {
+            Payload::Json(body) => assert_eq!(body, json!({ "op": "subs_content", "value": "bilingual", "order": "original_top", "secondary": { "size_pct": 60, "color": null } })),
+            _ => panic!("a JSON body"),
+        }
+        let call = (find("project_export_text").call)(&json!({ "pid": "p1", "format": "vtt", "text": "both", "order": "translation_top" })).unwrap();
+        assert_eq!((call.method.clone(), call.path.as_str()), (Method::POST, "/projects/p1/export-text"));
+        match call.payload {
+            Payload::Json(body) => assert_eq!(body, json!({ "format": "vtt", "text": "both", "order": "translation_top" })),
+            _ => panic!("a JSON body"),
+        }
+        let schema = (find("project_analyze").schema)();
+        assert!(schema["properties"]["subs"]["enum"].as_array().unwrap().contains(&json!("bilingual")));
     }
 
     #[test]

@@ -14,6 +14,11 @@ export type Segment = {
   id: string; start: number; end: number; speaker?: string | null;
   src_text: string; tgt_text: string; voice?: string | null; dirty: boolean; hidden?: boolean; keep_original?: boolean;
 };
+// Двуязычные субтитры (subs.mode = bilingual): порядок строк и вид второй строки (null — как у основной).
+export type Bilingual = {
+  order: "translation_top" | "original_top";
+  secondary: { size_pct: number; color: string | null; opacity: number | null };
+};
 export type BlurBox = { x: number; y: number; w: number; h: number; t0: number; t1: number; hidden?: boolean; fill?: string | null };
 export type Title = {
   text: string; tgt: string; bbox?: number[] | null; color?: string | null; bg?: string | null;
@@ -26,7 +31,7 @@ export type Project = {
   mode: string; tgt_lang: string;
   audio: { keep_music: boolean; voice: { mode: string; name?: string | null }; rewrite?: string | null; gain_db?: number; voiceover_gain_db?: number; translate_style?: string; keep_original_track?: boolean; container?: string };
   segments: Segment[];
-  subs: { mode: string; burn?: boolean };
+  subs: { mode: string; burn?: boolean; bilingual?: Bilingual };
   captions: {
     sub_style?: SubStyle | null; sub_y?: number | null; overrides: unknown[];
     titles: Title[]; brands: unknown[]; blur_boxes: BlurBox[]; preset: Record<string, unknown>;
@@ -393,7 +398,7 @@ export const api = {
 export type ProjectListing = ProjectSummary & { created: number | null };
 export type LaunchDefaults = {
   audio: "nodub" | "dub" | "voiceover" | "transcribe";
-  subs: "none" | "transcribe" | "translate";
+  subs: "none" | "transcribe" | "translate" | "bilingual";
   burn: boolean; detect_text: boolean;
   src_lang: string; tgt_lang: string | null;   // tgt_lang null — язык интерфейса окна
   casting: boolean; casting_ref: string; content_type: "auto" | "real" | "anime";

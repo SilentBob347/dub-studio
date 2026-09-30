@@ -193,6 +193,29 @@ pub fn esc(s: &str) -> String {
     s.replace('{', "(").replace('}', ")")
 }
 
+/// Кегль экрана в луке и его ink-геометрия (ширина, верх и низ относительно центра строки) — как его
+/// нарисует emit_styled: размер нормализуется по шрифту и ужимается, если строка шире кадра.
+fn styled_geom(look: &ResolvedLook, screen: &[String], fs: i64, width: i64) -> (i64, f32, f32, f32) {
+    let fp = font_path_for(&look.font);
+    let mut fs_font = ((fs as f32 * look::font_scale(&look.font)) as i64).max(24);
+    let (mut ink_w, mut top_rel, mut bot_rel) = font::text_geom(screen, fs_font, &fp);
+    if ink_w > width as f32 * 0.90 {
+        fs_font = ((fs_font as f32 * width as f32 * 0.90 / ink_w) as i64).max(20);
+        let g = font::text_geom(screen, fs_font, &fp);
+        ink_w = g.0;
+        top_rel = g.1;
+        bot_rel = g.2;
+    }
+    (fs_font, ink_w, top_rel, bot_rel)
+}
+
+/// Верхний и нижний край экрана в луке вместе с плашкой, относительно центра строки.
+pub fn styled_extent(look: &ResolvedLook, screen: &[String], fs: i64, width: i64) -> (f32, f32) {
+    let (fs_font, _, top_rel, bot_rel) = styled_geom(look, screen, fs, width);
+    let pady = (fs_font as f32 * 0.30) as i64 as f32;
+    (top_rel - pady, bot_rel + pady)
+}
+
 /// Один субтитр-экран в разрешённом луке (плашка Layer 0 + текст Layer 1) — порт _emit_styled.
 /// `timed` — (начало, конец) каждого слова экрана по реальной речи (word_align); None — по длине слов.
 #[allow(clippy::too_many_arguments)]
@@ -211,17 +234,7 @@ pub fn emit_styled(
 ) {
     let (reveal0, plate, fontname) = (&look.reveal, &look.plate, &look.font);
     let (base6, accent6, plate6) = (&look.base, &look.accent6, &look.plate6);
-    let fp = font_path_for(fontname);
-    // Нормализуем визуальный размер по шрифту, потом ужимаем если переполняет ширину кадра.
-    let mut fs_font = ((fs as f32 * look::font_scale(fontname)) as i64).max(24);
-    let (mut ink_w, mut top_rel, mut bot_rel) = font::text_geom(screen, fs_font, &fp);
-    if ink_w > width as f32 * 0.90 {
-        fs_font = ((fs_font as f32 * width as f32 * 0.90 / ink_w) as i64).max(20);
-        let g = font::text_geom(screen, fs_font, &fp);
-        ink_w = g.0;
-        top_rel = g.1;
-        bot_rel = g.2;
-    }
+    let (fs_font, ink_w, top_rel, bot_rel) = styled_geom(look, screen, fs, width);
     let padx = (fs_font as f32 * 0.55) as i64;
     let pady = (fs_font as f32 * 0.30) as i64;
     let x0 = (cx - (ink_w as i64) / 2 - padx).max(6);

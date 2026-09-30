@@ -337,6 +337,16 @@ pub fn run(
     // «Сохранить» отдаёт mkv. Успешный mkv-mux -> ремукс лёгкого mp4; иначе mp4 уже основной выход.
     let mp4_companion = paths.output.with_extension("mp4");
     if mkv && muxed {
+        // Субтитры отдельными дорожками mkv (перевод и/или оригинал со своими языковыми метками).
+        let timing = crate::dub_timing::DubTiming::load(wd)?;
+        let src_code = proj.meta.extra.get("src_lang").and_then(|v| v.as_str()).unwrap_or("");
+        let tracks = crate::subtracks::tracks(proj, timing.as_ref(), &lang_display(&proj.tgt_lang), &lang_display(src_code));
+        if !tracks.is_empty() {
+            let names: Vec<&str> = tracks.iter().map(|t| t.title.as_str()).collect();
+            emit(progress, "mux", &format!("субтитры дорожками mkv: {}", names.join(" + ")));
+            crate::subtracks::add_to_mkv(&out_path, &tracks, wd, proj.subs.burn)
+                .map_err(|e| format!("субтитры дорожками mkv: {e}"))?;
+        }
         match media::remux_playable_mp4(&out_path, &mp4_companion) {
             Ok(()) => {} // валидный playable-компаньон рядом с output.mkv
             Err(e) => {
@@ -1669,8 +1679,9 @@ fn record_dub_timing(
         .collect();
     let preset = &proj.captions.preset;
     let caption_style = preset.name.as_deref().filter(|n| *n != "match");
+    // Слова дубля нужны только строке перевода: в режиме «оригинал» субтитр — не то, что звучит.
     let need_words = proj.subs.burn
-        && proj.subs.mode != "none"
+        && matches!(proj.subs.mode.as_str(), "translate" | "bilingual")
         && dub_captions::word_timed_reveal(caption_style, preset.plate.as_deref(), preset.reveal.as_deref(), preset.font.as_deref());
     if need_words {
         emit(progress, "mix", &format!("пословные тайминги субтитров: распознавание {} фраз дубляжа", laid.len()));
@@ -2409,13 +2420,18 @@ pub(crate) fn build_ass(
             };
             (s, tgt)
         })
-        .filter(|(_, tgt)| !tgt.trim().is_empty())
-        .map(|(s, tgt)| {
+        .map(|(s, tgt)| (s, crate::subs_text::lines(&proj.subs.mode, is_dub, s, &tgt)))
+        .filter(|(_, l)| !l.primary.is_empty())
+        .map(|(s, l)| {
             let (start, end, words) = match dub_timing.as_ref() {
-                // Дубляж: где фраза реально легла и слова, услышанные в самом дубле. Нет свежей записи —
-                // тайминг оригинала без слов (слова оригинала на другом языке, чем текст субтитра).
+                // Дубляж: где фраза реально легла и слова, услышанные в самом дубле (они — слова перевода,
+                // поэтому только у строки перевода). Нет свежей записи — тайминг оригинала без слов.
                 Some(t) => match t.fresh(s) {
-                    Some(st) => (st.at, st.at + st.dur, (!st.words.is_empty()).then(|| st.words.clone())),
+                    Some(st) => (
+                        st.at,
+                        st.at + st.dur,
+                        (l.primary_is_translation && !st.words.is_empty()).then(|| st.words.clone()),
+                    ),
                     None => (s.start, if s.end > 0.0 { s.end } else { total }, None),
                 },
                 // Без дубляжа звучит оригинал: слова ASR оригинала (word_align сам отбросит их, если
@@ -2425,12 +2441,14 @@ pub(crate) fn build_ass(
             Sub {
                 start,
                 end,
-                tgt,
+                tgt: l.primary,
                 y: Some(seg_y(start, end)),
                 words,
+                secondary: l.secondary,
             }
         })
         .collect() };
+    let secondary = (proj.subs.mode == "bilingual").then(|| secondary_look(&proj.subs.bilingual));
 
     let preset = proj.captions.preset.name.clone();
     let caption_style = preset.as_deref().filter(|n| *n != "match");
@@ -2450,8 +2468,19 @@ pub(crate) fn build_ass(
             .raw_plan
             .get("sub_px")
             .and_then(|v| v.as_i64()),
+        secondary: secondary.as_ref(),
     };
     dub_captions::build(vw, vh, out_ass, args)
+}
+
+/// Вид второй строки двуязычных субтитров из настроек проекта.
+fn secondary_look(b: &dub_core::Bilingual) -> dub_captions::Secondary {
+    dub_captions::Secondary {
+        below: b.order != dub_core::ORDER_ORIGINAL_TOP,
+        size_pct: b.secondary.size_pct,
+        color: b.secondary.color.clone(),
+        opacity: b.secondary.opacity,
+    }
 }
 
 /// Словные тайминги ASR оригинала из extra.words ({word,start,end}); нет или пусто — None.
@@ -2801,5 +2830,55 @@ mod tests {
         assert_eq!(seg_file_id("s12").as_deref(), Some("s12"));
         assert_eq!(seg_file_id("u-lk3.9").as_deref(), Some("ulk39"));
         assert_eq!(seg_file_id("--"), None);
+    }
+
+    fn dialogue_texts(ass: &str, style: &str) -> Vec<String> {
+        ass.lines()
+            .filter(|l| l.starts_with("Dialogue: 1,") && l.contains(&format!(",{style},,")))
+            .map(|l| l.rsplit('}').next().unwrap().to_string())
+            .collect()
+    }
+
+    fn two_language_project(mode: &str, subs: &str) -> Project {
+        let mut s = seg("s0", 1.0, 3.0, "Где ты был?");
+        s.src_text = "Where were you?".into();
+        Project {
+            mode: mode.into(),
+            subs: dub_core::Subs { mode: subs.into(), ..Default::default() },
+            segments: vec![s],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_dub_can_carry_subtitles_in_the_original_language() {
+        let ass = build_to_string(&two_language_project("dub", "transcribe"), 640, 360);
+        assert_eq!(dialogue_texts(&ass, "S"), ["Where were you?"], "{ass}");
+        let ass = build_to_string(&two_language_project("voiceover", "translate"), 640, 360);
+        assert_eq!(dialogue_texts(&ass, "S"), ["Где ты был?"], "{ass}");
+    }
+
+    #[test]
+    fn bilingual_burns_the_translation_with_the_original_line() {
+        let mut proj = two_language_project("dub", "bilingual");
+        proj.subs.bilingual.order = dub_core::ORDER_ORIGINAL_TOP.into();
+        let ass = build_to_string(&proj, 640, 360);
+        assert_eq!(dialogue_texts(&ass, "S"), ["Где ты был?"], "{ass}");
+        assert_eq!(dialogue_texts(&ass, "S2"), ["Where were you?"], "{ass}");
+        assert!(ass.contains("Style: S2,"));
+        let y = |style: &str| first_y(&ass, style);
+        assert!(y("S2") < y("S"), "оригинал сверху: {ass}");
+    }
+
+    #[test]
+    fn a_translate_project_has_no_second_line() {
+        let ass = build_to_string(&two_language_project("dub", "translate"), 640, 360);
+        assert!(!ass.contains("S2"), "{ass}");
+    }
+
+    fn first_y(ass: &str, style: &str) -> i64 {
+        let l = ass.lines().find(|l| l.starts_with("Dialogue: 1,") && l.contains(&format!(",{style},,"))).unwrap();
+        let rest = &l[l.find("\\pos(").unwrap() + 5..];
+        rest[..rest.find(')').unwrap()].split(',').nth(1).unwrap().trim().parse().unwrap()
     }
 }

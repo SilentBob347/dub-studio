@@ -23,9 +23,10 @@ fn copy_src_to_tgt(proj: &mut Project) {
     }
 }
 
-/// Нужно ли переводить: dub/voiceover-режим ИЛИ subs=translate (как do_translate в pipeline).
+/// Нужно ли переводить: dub/voiceover-режим ИЛИ субтитры с переводом (translate, bilingual) — как
+/// do_translate в pipeline.
 fn wants_translate(proj: &Project) -> bool {
-    proj.mode == "dub" || proj.mode == "voiceover" || proj.subs.mode == "translate"
+    proj.mode == "dub" || proj.mode == "voiceover" || matches!(proj.subs.mode.as_str(), "translate" | "bilingual")
 }
 
 /// Автономная классификация типа контента (real/anime) для кастинга. Нужна, когда translate-стадия

@@ -39,6 +39,8 @@ pub enum SubsMode {
     None,
     Transcribe,
     Translate,
+    /// Перевод и оригинал второй строкой.
+    Bilingual,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,6 +283,8 @@ mod tests {
         assert_eq!(d.vo_gain_db, -6.5);
         assert_eq!(d.tr_style, TrStyle::Normal);
         assert_eq!(d.voice_slots_m, vec!["RU_Male_A".to_string()]);
+        let d = apply_patch(&root, &obj(json!({ "subs": "bilingual" }))).unwrap();
+        assert_eq!(d.subs, SubsMode::Bilingual);
         let (loaded, saved) = load(&root).unwrap();
         assert!(saved);
         assert_eq!(loaded, d);

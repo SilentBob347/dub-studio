@@ -595,6 +595,7 @@
     "subsNone": "No subtitles",
     "subsOriginal": "Original",
     "subsTranslate": "Translated",
+    "subsBilingual": "Both",
     "audioNoneHint": "Keep the original soundtrack — no voice is generated.",
     "audioDubHint": "Replace the speech with a generated voice in the target language.",
     "audioVoiceoverHint": "Translated voice on top of the quieted original.",
@@ -602,11 +603,24 @@
     "subsNoneHint": "Don't show any subtitles.",
     "subsOriginalHint": "Subtitles in the source (spoken) language.",
     "subsTranslateHint": "Subtitles translated into the target language.",
+    "subsBilingualHint": "The translation with the original as a smaller second line.",
     "optionsHelp": "Hover an option to see what it does",
     "burn": "On video",
     "burnHint": "Burn subtitles/titles onto the video (off = clean video, e.g. dub without subtitles)",
     "funny": "Funny remix",
     "voiceHint": "Choose voice: clone / auto-cast / from pack"
+  },
+  "bilingual": {
+    "settings": "Second line settings",
+    "title": "Original line",
+    "translationTop": "Translation on top",
+    "originalTop": "Original on top",
+    "size": "Size",
+    "sizeValue": "{{pct}}% of the main line",
+    "color": "Text color",
+    "opacity": "Opacity",
+    "pct": "{{pct}}%",
+    "sameAsMain": "As the main line"
   },
   "audio": {
     "onlyTitle": "Audio-only project",
