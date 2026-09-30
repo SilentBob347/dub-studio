@@ -19,7 +19,7 @@ $desktopRoot = Join-Path $repoRoot 'desktop'
 $tauriRoot = Join-Path $desktopRoot 'src-tauri'
 $frontendRoot = Join-Path $repoRoot 'frontend'
 $stagingRoot = Join-Path $tauriRoot 'staging'
-$releaseConfigPath = Join-Path $tauriRoot 'tauri.release.conf.json'
+$bundleConfigPath = Join-Path $tauriRoot 'tauri.bundle.conf.json'
 
 $whereTheKeyIs = @'
 The updater signing key is read from the environment:
@@ -60,7 +60,7 @@ $endpoint = @($tauriConf.plugins.updater.endpoints)[0]
 if ($endpoint -notmatch '/releases/latest/download/latest\.json$') { Fail "unexpected updater endpoint: $endpoint" }
 $downloadBase = $endpoint -replace '/latest/download/latest\.json$', "/download/v$Version"
 
-if (-not (Test-Path $releaseConfigPath)) { Fail "missing $releaseConfigPath" }
+if (-not (Test-Path $bundleConfigPath)) { Fail "missing $bundleConfigPath" }
 
 $releaseDir = Join-Path $repoRoot "release\$Version"
 $targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $tauriRoot 'target' }
@@ -121,11 +121,11 @@ $frontendScripts = (Get-Content -Raw -Encoding UTF8 (Join-Path $frontendRoot 'pa
 $frontendHasTests = $null -ne $frontendScripts.PSObject.Properties['test']
 
 if ($DryRun) {
+    Write-Host ('[PLAN] frontend: npm ci (if node_modules is missing)' + $(if ($frontendHasTests) { ', npm run test' } else { ' (no test script)' }) + ', npm run build')
     Write-Host '[PLAN] cargo test --workspace'
     Write-Host '[PLAN] cargo test --manifest-path desktop/src-tauri/Cargo.toml'
-    Write-Host ('[PLAN] frontend: npm ci (if node_modules is missing), npm run build' + $(if ($frontendHasTests) { ', npm run test' } else { ' (no test script)' }))
     Write-Host "[PLAN] stage into $stagingRoot"
-    Write-Host "[PLAN] tauri build --config $releaseConfigPath (NSIS + MSI, signed)"
+    Write-Host "[PLAN] tauri build --config $bundleConfigPath (NSIS + MSI, signed)"
     Write-Host "[PLAN] release\${Version}: setup.exe (+.sig), msi (+.sig), portable zip, latest.json"
     Write-Host '[OK] dry run finished, nothing was built'
     return
@@ -138,9 +138,8 @@ foreach ($name in $binaryName, 'dub-studio-desktop') {
 
 Push-Location $repoRoot
 try {
-    Invoke-Step 'cargo test --workspace' { cargo test --workspace }
-    Invoke-Step 'cargo test (desktop shell)' { cargo test --manifest-path (Join-Path $tauriRoot 'Cargo.toml') }
-
+    # The frontend comes first: the desktop shell embeds frontend/dist at compile time (tauri-codegen
+    # refuses to build without it), and dist is not in git.
     if (-not (Test-Path (Join-Path $frontendRoot 'node_modules'))) {
         Invoke-Step 'frontend npm ci' { npm --prefix $frontendRoot ci }
     }
@@ -148,6 +147,8 @@ try {
         Invoke-Step 'frontend tests' { npm --prefix $frontendRoot run test }
     }
     Invoke-Step 'frontend build' { npm --prefix $frontendRoot run build }
+    Invoke-Step 'cargo test --workspace' { cargo test --workspace }
+    Invoke-Step 'cargo test (desktop shell)' { cargo test --manifest-path (Join-Path $tauriRoot 'Cargo.toml') }
 
     if (Test-Path $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force }
     $stagedHiggs = Join-Path $stagingRoot 'models\higgs-engine'
@@ -172,7 +173,7 @@ try {
     }
     Push-Location $desktopRoot
     try {
-        Invoke-Step 'tauri build' { npm exec tauri build -- --config $releaseConfigPath }
+        Invoke-Step 'tauri build' { npm exec tauri build -- --config $bundleConfigPath }
     }
     finally {
         Pop-Location
@@ -233,6 +234,14 @@ try {
             'windows-x86_64' = [ordered]@{
                 signature = $assets['.exe'].signature
                 url = "$downloadBase/$($assets['.exe'].name)"
+            }
+            'windows-x86_64-nsis' = [ordered]@{
+                signature = $assets['.exe'].signature
+                url = "$downloadBase/$($assets['.exe'].name)"
+            }
+            'windows-x86_64-msi' = [ordered]@{
+                signature = $assets['.msi'].signature
+                url = "$downloadBase/$($assets['.msi'].name)"
             }
         }
     }

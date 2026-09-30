@@ -29,6 +29,17 @@ jobs:
         run: cargo build --workspace
       - name: Test workspace
         run: cargo test --workspace
+      # The desktop shell embeds frontend/dist at compile time and dist is not in git.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend for the desktop shell
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
       - name: Test desktop shell
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
 

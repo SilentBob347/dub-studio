@@ -15,16 +15,19 @@ scripts\build-release.ps1 -ReleaseNotes "..." -ModelsSource "F:\AI\Dub Studio"
 
 Что делает полный прогон:
 
-1. Гейт: `cargo test --workspace`, `cargo test --manifest-path desktop/src-tauri/Cargo.toml`, фронт `npm run test`
-   (если такой скрипт есть) и `npm run build`.
+1. Гейт: фронт (`npm ci` при отсутствии `node_modules`, `npm run test` если такой скрипт есть, `npm run build`),
+   затем `cargo test --workspace` и `cargo test --manifest-path desktop/src-tauri/Cargo.toml`. Фронт идёт первым:
+   оболочка вшивает `frontend/dist` при компиляции, а `dist` в git не лежит.
 2. Staging в `desktop/src-tauri/staging/` (каталог генерируется, в git не попадает): `frontend/dist`, `fonts`,
    `models/higgs-engine` (только VC++-рантайм), `models/ocr` (PP-OCR), `tools/openrouter-helper`. Сервер встроен в
    exe оболочки, отдельный `dub-server.exe` в бандл не кладётся.
-3. `tauri build` с `tauri.release.conf.json` (он добавляет `bundle.resources` на staging): NSIS и MSI с подписью
+3. `tauri build --config tauri.bundle.conf.json` (он добавляет `bundle.resources` на staging, то же: `npm run bundle`
+   в `desktop/`): NSIS и MSI с подписью
    обновлений из `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Обычная сборка и `tauri dev`
    идут по `tauri.conf.json` и staging не требуют.
 4. `release/<версия>/`: `Dub.Studio_<версия>_x64-setup.exe` и `.sig`, MSI и `.sig`, портативный zip и
-   `latest.json` (UTF-8 без BOM, `url` с точками вместо пробелов).
+   `latest.json` (UTF-8 без BOM, `url` с точками вместо пробелов): платформы `windows-x86_64` (NSIS, запасная),
+   `windows-x86_64-nsis` и `windows-x86_64-msi` с подписью своего установщика.
 
 `models/higgs-engine` и `models/ocr` в git не лежат (gitignore): источник задаётся `-ModelsSource` (по умолчанию
 корень репозитория). Модели, движки, CUDA и ffmpeg в бандл не входят, их качает «Первый запуск»
@@ -41,8 +44,8 @@ scripts\build-release.ps1 -ReleaseNotes "..." -ModelsSource "F:\AI\Dub Studio"
 - портативная копия (файл `portable.flag` рядом с exe) запасного пути не имеет: недоступная для записи папка — ошибка.
 
 `TEMP`/`TMP` процесса переводятся в `<каталог данных>\temp`, `WEBVIEW2_USER_DATA_FOLDER` — в
-`<каталог данных>\webview-data` (если не задан). Автообновление установленной копии идёт в ту же папку (`/D=`),
-портатив только открывает страницу релиза.
+`<каталог данных>\webview-data` (если не задан). Автообновление ставит на лету только копию из NSIS-установщика и в ту же
+папку (`/D=`); портатив и копия из MSI (msiexec не принимает `/D=`) только открывают страницу релиза.
 
 ## NSIS
 

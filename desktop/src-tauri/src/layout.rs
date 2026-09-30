@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 pub const DATA_DIRECTORY_NAME: &str = "Dub Studio";
 pub const PORTABLE_MARKER: &str = "portable.flag";
 
-/// Ресурсы бандла (`bundle.resources` в tauri.release.conf.json): установщик кладёт их рядом с exe.
+/// Ресурсы бандла (`bundle.resources` в tauri.bundle.conf.json): установщик кладёт их рядом с exe.
 /// Когда данные уезжают в запасной каталог, сервер ищет их там же, где и скачанные модели, поэтому
 /// поставляемые файлы копируются туда.
 const BUNDLED_RESOURCES: [&str; 5] = [

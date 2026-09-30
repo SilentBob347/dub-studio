@@ -55,23 +55,28 @@ fn setup_server_env(repo_root: &PathBuf) {
 
 /// Проверка обновления на GitHub-релизе и (по согласию юзера) установка. Драйвится из Rust: фронт
 /// грузится с внешнего http-URL встроенного сервера, где Tauri JS-IPC ненадёжен, а Rust-апдейтер
-/// работает независимо от webview. Тихо выходит при отсутствии апдейта/сети. Портатив НЕ ставит на
-/// лету (нельзя перезаписать запущенный ~489-МБ каталог) — предлагает открыть страницу релиза.
+/// работает независимо от webview. Тихо выходит при отсутствии апдейта/сети. На лету ставится только
+/// копия из NSIS-установщика; портатив (нельзя перезаписать запущенный ~489-МБ каталог), MSI
+/// (msiexec не принимает /D=, а Program Files без повышения прав недоступен) и сборка без типа
+/// бандла получают предложение открыть страницу релиза.
 const RELEASES_URL: &str = "https://github.com/timoncool/dub-studio/releases/latest";
 fn spawn_update_check(app: tauri::AppHandle, portable: bool) {
+    use tauri::utils::config::BundleType;
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     use tauri_plugin_updater::UpdaterExt;
+    let install_in_place =
+        !portable && tauri::utils::platform::bundle_type() == Some(BundleType::Nsis);
     tauri::async_runtime::spawn(async move {
-        // Без /D= установщик, запущенный из студии, ставит копию в папку по умолчанию, а не в текущую;
-        // NSIS требует его последним аргументом и без кавычек.
         let cleanup = app.clone();
-        let install_directory = format!("/D={}", layout::executable_directory().display());
-        let updater = match app
+        let mut builder = app
             .updater_builder()
-            .installer_arg(install_directory)
-            .on_before_exit(move || cleanup.cleanup_before_exit())
-            .build()
-        {
+            .on_before_exit(move || cleanup.cleanup_before_exit());
+        if install_in_place {
+            // Без /D= установщик, запущенный из студии, ставит копию в папку по умолчанию, а не в
+            // текущую; NSIS требует его последним аргументом и без кавычек.
+            builder = builder.installer_arg(format!("/D={}", layout::executable_directory().display()));
+        }
+        let updater = match builder.build() {
             Ok(u) => u,
             Err(_) => return,
         };
@@ -80,7 +85,7 @@ fn spawn_update_check(app: tauri::AppHandle, portable: bool) {
             _ => return, // нет апдейта или ошибка сети -> тихо
         };
         let ver = update.version.clone();
-        if portable {
+        if !install_in_place {
             let open = app
                 .dialog()
                 .message(format!(
