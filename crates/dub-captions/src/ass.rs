@@ -116,6 +116,18 @@ pub fn word_spans(screen: &[String], a: f64, b: f64) -> Vec<(usize, String, f64,
     out
 }
 
+/// [(line_idx, word, ws, we)] по готовым временам слов экрана (word_align). Число времён не совпало со
+/// словами экрана — это ошибка сборки вызывающего, поэтому паника с причиной, а не тихая раскладка.
+fn timed_spans(screen: &[String], timed: &[(f64, f64)]) -> Vec<(usize, String, f64, f64)> {
+    let words: Vec<(usize, String)> = screen
+        .iter()
+        .enumerate()
+        .flat_map(|(li, ln)| ln.split_whitespace().map(move |w| (li, w.to_string())))
+        .collect();
+    assert_eq!(words.len(), timed.len(), "тайминги слов не совпали со словами экрана: {screen:?}");
+    words.into_iter().zip(timed).map(|((li, w), &(ws, we))| (li, w, ws, we)).collect()
+}
+
 /// Layer-0 плашка(и) на стиле KP — порт _plate_events. Непрозрачны, чтобы блюр оригинала не просвечивал.
 pub fn plate_events(
     plate: &str,
@@ -182,6 +194,7 @@ pub fn esc(s: &str) -> String {
 }
 
 /// Один субтитр-экран в разрешённом луке (плашка Layer 0 + текст Layer 1) — порт _emit_styled.
+/// `timed` — (начало, конец) каждого слова экрана по реальной речи (word_align); None — по длине слов.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_styled(
     out: &mut Vec<String>,
@@ -189,6 +202,7 @@ pub fn emit_styled(
     a: f64,
     b: f64,
     screen: &[String],
+    timed: Option<&[(f64, f64)]>,
     cx: i64,
     cy: i64,
     fs: i64,
@@ -226,7 +240,12 @@ pub fn emit_styled(
     }
     out.extend(plate_events(plate, x0 as f64, y0 as f64, x1 as f64, y1 as f64, plate6, accent6, a, b));
 
-    let spans = word_spans(screen, a, b);
+    let spans = match timed {
+        Some(t) => timed_spans(screen, t),
+        None => word_spans(screen, a, b),
+    };
+    // Пауза от появления экрана до первого слова (у равномерной раскладки её нет).
+    let lead_in = spans.first().map(|s| (s.2 - a).max(0.0)).unwrap_or(0.0);
     let mut reveal = reveal0.clone();
     if reveal != "whole" && spans.is_empty() {
         reveal = "whole".to_string();
@@ -241,6 +260,10 @@ pub fn emit_styled(
     match reveal.as_str() {
         "karaoke" => {
             let mut parts = String::new();
+            let pre = (lead_in * 100.0).round() as i64;
+            if pre > 0 {
+                parts.push_str(&format!("{{\\k{pre}}}"));
+            }
             let mut cur = 0usize;
             for (li, w, ws, we) in &spans {
                 nl(&mut parts, *li, &mut cur);
@@ -254,6 +277,14 @@ pub fn emit_styled(
             ));
         }
         "highlight" => {
+            if lead_in > 0.005 {
+                out.push(format!(
+                    "Dialogue: 1,{},{},KT,,0,0,0,,{{{lead}\\1c{base6}}}{}",
+                    ts(a),
+                    ts(spans[0].2),
+                    screen.join("\\N")
+                ));
+            }
             for (k, (_, _, ws, we)) in spans.iter().enumerate() {
                 let mut parts = String::new();
                 let mut cur = 0usize;

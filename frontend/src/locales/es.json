@@ -571,6 +571,10 @@
     "translated": "Los subtítulos ya están en el idioma de destino (sin traducción)",
     "translatedHint": "Ej.: vídeo en inglés + subtítulos en ruso → doblaje en ruso. El texto va directo a la voz; se omiten el reconocimiento y la traducción."
   },
+  "subalign": {
+    "label": "Alinear los tiempos con el habla",
+    "hint": "¿Subtítulos de otra versión o con margen de lectura? Reconocemos el habla y colocamos cada línea donde realmente se dice (se corrigen el desfase y la deriva). Requiere una pasada de reconocimiento de voz. Solo para subtítulos en el idioma del vídeo."
+  },
   "trStyle": {
     "label": "Estilo de traducción",
     "normal": "Normal",
@@ -903,6 +907,7 @@
       "dub_audio": "Voz del doblaje",
       "render": "Exportación",
       "export_lang": "Exportación a otro idioma",
+      "align": "Alinear con el habla",
       "download": "Descarga de modelos",
       "voices_pack": "Descarga de voces"
     },

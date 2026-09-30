@@ -20,8 +20,8 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 fn gen(caption_style: Option<&str>, sub_style: Option<&SubStyle>) -> String {
     set_fonts_dir(fonts_dir());
     let subs = vec![
-        Sub { start: 0.0, end: 2.0, tgt: "one two three".into(), y: Some(1500) },
-        Sub { start: 2.0, end: 4.0, tgt: "four five six seven".into(), y: Some(1500) },
+        Sub { start: 0.0, end: 2.0, tgt: "one two three".into(), y: Some(1500), words: None },
+        Sub { start: 2.0, end: 4.0, tgt: "four five six seven".into(), y: Some(1500), words: None },
     ];
     let uid = SEQ.fetch_add(1, Ordering::Relaxed);
     let out = std::env::temp_dir().join(format!("dc_test_{}_{uid}.ass", caption_style.unwrap_or("match")));
@@ -177,4 +177,83 @@ fn title_kegel_from_line_height_not_blur_stack() {
     let ass2 = gen_title(tight, 720, 1280);
     assert_eq!(title_fs(&ass2), fs, "кегль идентичен вне зависимости от h стопки");
     assert_eq!(title_lines(&ass2), nlines, "кол-во строк идентично вне зависимости от h стопки");
+}
+
+fn gen_with_words(caption_style: &str, subs: Vec<Sub>) -> String {
+    set_fonts_dir(fonts_dir());
+    let uid = SEQ.fetch_add(1, Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!("dc_words_{caption_style}_{uid}.ass"));
+    let args = BuildArgs { subs: &subs, sub_y: Some(1500), caption_style: Some(caption_style), ..Default::default() };
+    build(1080, 1920, &out, args).unwrap();
+    let s = std::fs::read_to_string(&out).unwrap();
+    let _ = std::fs::remove_file(&out);
+    s
+}
+
+fn heard(ws: &[(&str, f64, f64)]) -> Option<Vec<(String, f64, f64)>> {
+    Some(ws.iter().map(|&(w, s, e)| (w.to_string(), s, e)).collect())
+}
+
+#[test]
+fn karaoke_follows_the_heard_words() {
+    // «one» звучит с 0.5 с, «two» — с 1.5 с: полоса ждёт 50 сс, «one» заливается 100 сс, а не треть экрана.
+    let subs = vec![Sub {
+        start: 0.0,
+        end: 3.0,
+        tgt: "one two three".into(),
+        y: Some(1500),
+        words: heard(&[("one", 0.5, 0.9), ("two", 1.5, 1.9), ("three", 2.0, 2.6)]),
+    }];
+    let ass = gen_with_words("karaoke", subs);
+    assert!(ass.contains("{\\k50}{\\kf100}ONE ") || ass.contains("{\\k50}{\\kf100}one "), "{ass}");
+    assert!(ass.contains("{\\kf50}") && ass.contains("{\\kf100}"), "{ass}");
+}
+
+#[test]
+fn highlight_events_start_when_each_word_is_spoken() {
+    let subs = vec![Sub {
+        start: 0.0,
+        end: 3.0,
+        tgt: "one two three".into(),
+        y: Some(1500),
+        words: heard(&[("one", 0.5, 0.9), ("two", 1.5, 1.9), ("three", 2.0, 2.6)]),
+    }];
+    let ass = gen_with_words("hormozi", subs);
+    let starts: Vec<&str> = ass
+        .lines()
+        .filter(|l| l.starts_with("Dialogue: 1,") && l.contains(",KT,"))
+        .map(|l| l.split(',').nth(1).unwrap())
+        .collect();
+    assert_eq!(starts, vec!["0:00:00.00", "0:00:00.50", "0:00:01.50", "0:00:02.00"], "{ass}");
+}
+
+#[test]
+fn a_long_line_turns_the_page_when_the_voice_gets_there() {
+    // Две страницы (узкий кадр, max_lines=2): вторая начинается с первого своего слова, а не с середины.
+    let text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango";
+    let times: Vec<(&str, f64, f64)> = text
+        .split_whitespace()
+        .enumerate()
+        .map(|(i, w)| (w, if i < 16 { i as f64 * 0.1 } else { 5.0 + (i - 16) as f64 * 0.5 }, 0.0))
+        .map(|(w, s, _)| (w, s, s + 0.08))
+        .collect();
+    let subs = vec![Sub { start: 0.0, end: 8.0, tgt: text.into(), y: Some(1500), words: heard(&times) }];
+    let ass = gen_with_words("karaoke", subs);
+    let pages: Vec<(&str, &str)> = ass
+        .lines()
+        .filter(|l| l.starts_with("Dialogue: 1,") && l.contains(",KT,"))
+        .map(|l| {
+            let mut it = l.split(',').skip(1);
+            (it.next().unwrap(), it.next().unwrap())
+        })
+        .collect();
+    assert!(pages.len() >= 2, "{ass}");
+    assert_eq!(pages[0].0, "0:00:00.00");
+    let word_starts: Vec<String> = times
+        .iter()
+        .map(|&(_, s, _)| format!("0:00:{:02}.{:02}", s as i64, ((s - s.floor()) * 100.0).round() as i64))
+        .collect();
+    for (k, p) in pages.iter().enumerate().skip(1) {
+        assert!(word_starts.iter().any(|w| w == p.0), "страница {k} начинается не со слова: {pages:?}");
+    }
 }

@@ -68,10 +68,11 @@ pub enum JobKind {
     Download,
     VoicesPack,
     Frame,
+    Align,
 }
 
 impl JobKind {
-    const ALL: [JobKind; 9] = [
+    const ALL: [JobKind; 10] = [
         JobKind::Analyze,
         JobKind::Retranslate,
         JobKind::Remix,
@@ -81,6 +82,7 @@ impl JobKind {
         JobKind::Download,
         JobKind::VoicesPack,
         JobKind::Frame,
+        JobKind::Align,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -94,6 +96,7 @@ impl JobKind {
             JobKind::Download => "download",
             JobKind::VoicesPack => "voices_pack",
             JobKind::Frame => "frame",
+            JobKind::Align => "align",
         }
     }
 
@@ -105,7 +108,7 @@ impl JobKind {
     /// text — переписывают проект (перевод/ремикс/анализ), audio — пишут озвучку и выход.
     fn class(self) -> Option<&'static str> {
         match self {
-            JobKind::Analyze | JobKind::Retranslate | JobKind::Remix => Some("text"),
+            JobKind::Analyze | JobKind::Retranslate | JobKind::Remix | JobKind::Align => Some("text"),
             JobKind::DubAudio | JobKind::Render | JobKind::ExportLang => Some("audio"),
             JobKind::Download | JobKind::VoicesPack | JobKind::Frame => None,
         }

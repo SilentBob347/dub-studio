@@ -37,6 +37,7 @@ import RemoveComponent from "./components/RemoveComponent";
 import { useSetupStatus } from "./lib/useSetupStatus";
 import { useDownloadErrorText, useGpuReasonText } from "./lib/setupText";
 import { fmtBytes } from "./lib/format";
+import SubsAlignToggle from "./components/SubsAlignToggle";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -870,6 +871,7 @@ function DropZone() {
   const [file, setFile] = useState<File | null>(null);                          // staged video — analyzed on Start, not on drop
   const [subsFile, setSubsFile] = useState<File | null>(null);                  // опц. готовые субтитры (SRT/ASS) -> текст+тайминг вместо ASR
   const [subsTranslated, setSubsTranslated] = useState(false);                  // сабы уже на языке перевода -> tgt из них, MT пропустить (Даб Студио только озвучивает)
+  const [subsAlign, setSubsAlign] = useState(false);
   // Композируемые опции обработки (независимы, любые комбинации). audio = аудио-выход; subs = содержимое
   // субтитров; burn = вжигать ли их на видео; funnyOn+funny = шуточный ремикс (сочетается с дубляжом/голосом).
   const [audio, setAudio] = useState<LaunchDefaults["audio"]>("dub");
@@ -1070,7 +1072,7 @@ function DropZone() {
         keepOriginal: keepOrig && !audioOnly && voiced ? { container } : undefined,
         voiceSlots: voiceSrc === "library" && voiced && (slotsM.length || slotsF.length) ? { male: slotsM, female: slotsF } : undefined,
       };
-      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType, post);
+      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType, !audioOnly && !!subsFile && !subsTranslated && subsAlign, post);
       // Ошибка -> «Продолжить» с места остановки, не сброс. Для dub/voiceover озвучка готовится здесь же, на
       // экране загрузки (rendered остаётся false: /dub отдаёт готовый дуб, кадры — покадровое превью).
       await finishAnalyze(project_id, await watchWithResume(project_id, "analyze", job_id));
@@ -1216,7 +1218,8 @@ function DropZone() {
                       <input type="checkbox" checked={subsTranslated} onChange={(e) => setSubsTranslated(e.target.checked)} className="accent-[var(--color-accent)]" />
                       {t("import.translated")}
                     </label>
-                    <button onClick={() => { setSubsFile(null); setSubsTranslated(false); }} className="inline-flex items-center gap-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={10} />{t("import.subsClear")}</button>
+                    {!subsTranslated && <SubsAlignToggle checked={subsAlign} onChange={setSubsAlign} />}
+                    <button onClick={() => { setSubsFile(null); setSubsTranslated(false); setSubsAlign(false); }} className="inline-flex items-center gap-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={10} />{t("import.subsClear")}</button>
                   </div>
                 : <span className="text-[10px] text-[var(--color-muted)] leading-tight text-center max-w-[300px]">{t("import.subsHint")}</span>}
             </div>
@@ -4043,7 +4046,7 @@ function BatchView() {
           keepOriginal: keepOrig && !ao && doRender ? { container } : undefined,
           voiceSlots: voiceSrc === "library" && doRender && (slotsM.length || slotsF.length) ? { male: slotsM, female: slotsF } : undefined,
         };
-        const { job_id } = await api.analyze(project_id, tgt, eMode, src, fSubs, eRewrite, fBurn, ao ? false : detectText, false, trStyle, false, "", "auto", post);
+        const { job_id } = await api.analyze(project_id, tgt, eMode, src, fSubs, eRewrite, fBurn, ao ? false : detectText, false, trStyle, false, "", "auto", false, post);
         const res = await api.watchJob(job_id, (e) => { if (e.type === "progress") upd({ pct: e.pct ?? 0, detail: e.msg || undefined }); });
         reportVoiceSlots((res as AnalyzeResult).post.voice_slots);
         if (doRender) {

@@ -564,6 +564,10 @@
     "translated": "Subtitles already in the target language (no translation)",
     "translatedHint": "E.g. English video + Russian subtitles → Russian dub. Subtitle text goes straight to voicing; ASR and translation are skipped."
   },
+  "subalign": {
+    "label": "Align timing to the speech",
+    "hint": "Subtitles from another release or with reading margins? We recognize the speech and move each line to where it is actually said (shift and drift are fixed). Takes one speech-recognition pass. Only for subtitles in the video's language."
+  },
   "trStyle": {
     "label": "Translation style",
     "normal": "Normal",
@@ -891,6 +895,7 @@
       "dub_audio": "Dub audio",
       "render": "Export",
       "export_lang": "Export to another language",
+      "align": "Align to speech",
       "download": "Model download",
       "voices_pack": "Voice download"
     },

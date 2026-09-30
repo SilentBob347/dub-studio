@@ -262,6 +262,22 @@ pub fn time_stretch(src: &Path, dst: &Path, factor: f64) -> Result<(), String> {
     ])
 }
 
+/// Частота промежуточных стадий микса: частота audio_hq/стемов сепарации, чтобы по цепочке
+/// mix -> loudnorm -> gain не было лишних пересчётов частоты. loudnorm внутри работает на 192 кГц,
+/// поэтому частота выхода задаётся явно.
+const MIX_SR: &str = "44100";
+
+/// Кодек и частота промежуточного файла микса: float32 WAV без потерь (сумма голоса и фона может
+/// выйти за 0 dBFS — float хранит это до loudnorm без клипа). Сжатие с потерями одно — в mux.
+/// `-rf64 auto`: многочасовой стерео-float переходит границу RIFF в 4 ГБ.
+fn lossless_out() -> [&'static OsStr; 6] {
+    [
+        OsStr::new("-c:a"), OsStr::new("pcm_f32le"),
+        OsStr::new("-ar"), OsStr::new(MIX_SR),
+        OsStr::new("-rf64"), OsStr::new("auto"),
+    ]
+}
+
 /// Свести дубль-вокал поверх фона. МУЗЫКУ НЕ ГЛУШИМ (прямой приказ юзера, многократно): вокал уже вырезан
 /// сепарацией, поэтому инструментал = чистый реальный фон и звучит в ПОЛНЫЙ уровень (1.0) — дублированный
 /// голос заменяет вырезанный вокал, фон остаётся как в оригинале. amix normalize=0 НЕ делит входы пополам
@@ -271,11 +287,13 @@ pub fn mix(voice: &Path, music: &Path, out: &Path) -> Result<(), String> {
     let fc = "[0:a]aformat=channel_layouts=stereo[v];\
               [1:a]aformat=channel_layouts=stereo[m];\
               [v][m]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[a]";
-    run_ff(&[
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("-y"), OsStr::new("-i"), voice.as_os_str(), OsStr::new("-i"), music.as_os_str(),
         OsStr::new("-filter_complex"), OsStr::new(fc), OsStr::new("-map"), OsStr::new("[a]"),
-        OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), out.as_os_str(),
-    ])
+    ];
+    args.extend(lossless_out());
+    args.push(out.as_os_str());
+    run_ff(&args)
 }
 
 /// Сведение диалог+фон с САЙДЧЕЙН-ДАКИНГОМ — проф. практика дубляжа: компрессор приглушает фон
@@ -288,11 +306,13 @@ pub fn mix_ducked(voice: &Path, music: &Path, out: &Path) -> Result<(), String> 
               [1:a]aformat=channel_layouts=stereo[m];\
               [m][vkey]sidechaincompress=threshold=0.02:ratio=8:attack=150:release=600:makeup=1[bg];\
               [v][bg]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[a]";
-    run_ff(&[
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("-y"), OsStr::new("-i"), voice.as_os_str(), OsStr::new("-i"), music.as_os_str(),
         OsStr::new("-filter_complex"), OsStr::new(fc), OsStr::new("-map"), OsStr::new("[a]"),
-        OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), out.as_os_str(),
-    ])
+    ];
+    args.extend(lossless_out());
+    args.push(out.as_os_str());
+    run_ff(&args)
 }
 
 /// Речевой блок на таймлайне [start,end] — слитые по паузе <1.6с реплики дубляжа. Границы берутся из
@@ -388,34 +408,52 @@ fn mix_env_g(voice: &Path, music: &Path, blocks: &[SpeechBlock], g: f64, out: &P
     std::fs::write(&script, &fc).map_err(|e| format!("env filter-скрипт: {e}"))?;
     // Таймаут пропорционален длине музыки (eval=frame дорог на многочасовом): max(600с, 2×длит.).
     let secs = (duration(music).unwrap_or(0.0) * 2.0).max(600.0) as u64;
-    let r = run_ff_timeout(&[
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("-y"), OsStr::new("-i"), voice.as_os_str(), OsStr::new("-i"), music.as_os_str(),
         OsStr::new(dub_captions::burn::filter_script_flag()), script.as_os_str(),
         OsStr::new("-map"), OsStr::new("[a]"),
-        OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), out.as_os_str(),
-    ], secs);
+    ];
+    args.extend(lossless_out());
+    args.push(out.as_os_str());
+    let r = run_ff_timeout(&args, secs);
     let _ = std::fs::remove_file(&script); // прибрать временный filter-скрипт (в т.ч. при ошибке)
     r
 }
 
-/// Финальная нормализация программы по EBU R128 (ffmpeg loudnorm): интегральная громкость к I LUFS
-/// + true-peak лимитер к TP dBTP. Решение юзера (best-practice, НЕ питон): ставится последним шагом на
-/// смиксованную дорожку — держит целевую громкость соцсетей и ловит пики (пофразного клэмпа поэтому нет).
+/// Финальная нормализация программы по EBU R128 (ffmpeg loudnorm): интегральная громкость к I LUFS и
+/// true-peak лимитер к TP dBTP. Решение юзера (best-practice, НЕ питон): ставится последним шагом на
+/// смиксованную дорожку — держит целевую громкость соцсетей и ловит межфразовые суммы и микс с фоном
+/// (пики отдельной фразы до этого опускает пофразный лимитер normalize_voice). Выход без потерь: после
+/// loudnorm уже нет перекодирования, которое сдвинуло бы true-peak.
 pub fn loudnorm(src: &Path, dst: &Path, i: f64, tp: f64, lra: f64) -> Result<(), String> {
     let af = format!("loudnorm=I={i}:TP={tp}:LRA={lra}");
-    run_ff(&[
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
         OsStr::new("-af"), OsStr::new(&af),
-        OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), dst.as_os_str(),
-    ])
+    ];
+    args.extend(lossless_out());
+    args.push(dst.as_os_str());
+    run_ff(&args)
 }
 
-/// Усилить всю дорожку на `gain_db` dB (монтажный гейн, наша opt-in фича). Перекодирование в aac.
+/// Усилить всю дорожку на `gain_db` dB (монтажный гейн, наша opt-in фича). Выход без потерь.
 pub fn gain(src: &Path, dst: &Path, gain_db: f64) -> Result<(), String> {
     let af = format!("volume={gain_db}dB");
-    run_ff(&[
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
         OsStr::new("-af"), OsStr::new(&af),
+    ];
+    args.extend(lossless_out());
+    args.push(dst.as_os_str());
+    run_ff(&args)
+}
+
+/// Дорожка для прослушивания в редакторе (<audio> WebView): одно кодирование AAC из несжатого
+/// микса. Источник может быть и видео (nodub: звук оригинала), поэтому -vn.
+pub fn encode_preview_aac(src: &Path, dst: &Path) -> Result<(), String> {
+    run_ff(&[
+        OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
+        OsStr::new("-vn"), OsStr::new("-ac"), OsStr::new("2"), OsStr::new("-ar"), OsStr::new(MIX_SR),
         OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), dst.as_os_str(),
     ])
 }
@@ -556,7 +594,7 @@ pub fn has_audio(input: &Path) -> bool {
 }
 
 /// Сконвертировать аудио в PCM 16-bit WAV (стерео). Финальный формат аудио-режима (вход без видео):
-/// пачка WAV -> пачка озвученных WAV. Лоссовость только от исходного mix (aac), сам WAV без потерь.
+/// пачка WAV -> пачка озвученных WAV. Микс приходит несжатым float, здесь только квантование в 16 бит.
 pub fn to_wav(src: &Path, dst: &Path) -> Result<(), String> {
     run_ff(&[
         OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
@@ -754,5 +792,60 @@ mod iso639_tests {
         for (code, _) in dub_translate::WHISPER_LANGS {
             assert_ne!(iso639_1_to_2(code), "und", "no ISO 639-2 mapping for {code}");
         }
+    }
+}
+
+#[cfg(test)]
+mod lossless_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("dub_media_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn sine_wav(path: &Path, sr: u32, channels: u16, amp: f32, secs: f32) {
+        let spec = hound::WavSpec { channels, sample_rate: sr, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..(sr as f32 * secs) as usize {
+            let v = amp * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr as f32).sin();
+            for _ in 0..channels {
+                w.write_sample(v).unwrap();
+            }
+        }
+        w.finalize().unwrap();
+    }
+
+    fn read(path: &Path) -> (hound::WavSpec, Vec<f32>) {
+        let mut r = hound::WavReader::open(path).unwrap();
+        let spec = r.spec();
+        let s: Vec<f32> = r.samples::<f32>().map(|x| x.unwrap()).collect();
+        (spec, s)
+    }
+
+    #[test]
+    fn mix_and_loudnorm_stay_lossless_float_at_the_mix_rate() {
+        let d = tmp("mix");
+        let voice = d.join("dub_vocals.wav");
+        let music = d.join("instrumental.wav");
+        sine_wav(&voice, 24_000, 1, 0.8, 1.0);
+        sine_wav(&music, 44_100, 2, 0.8, 1.0);
+        let mixed = d.join("new_audio.wav");
+        mix(&voice, &music, &mixed).unwrap();
+        let (spec, s) = read(&mixed);
+        assert_eq!(spec.sample_format, hound::SampleFormat::Float);
+        assert_eq!(spec.sample_rate, 44_100);
+        let peak = s.iter().fold(0.0f32, |p, v| p.max(v.abs()));
+        assert!(peak > 1.2, "сумма голоса и фона выше 0 dBFS должна дожить до loudnorm без клипа: {peak}");
+
+        let normed = d.join("final_audio.wav");
+        loudnorm(&mixed, &normed, -14.0, -1.0, 11.0).unwrap();
+        let (spec, s) = read(&normed);
+        assert_eq!(spec.sample_format, hound::SampleFormat::Float);
+        assert_eq!(spec.sample_rate, 44_100, "loudnorm без явной частоты отдаёт 192 кГц");
+        assert!(s.iter().all(|v| v.abs() <= 1.0));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

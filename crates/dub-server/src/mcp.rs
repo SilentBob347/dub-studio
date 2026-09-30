@@ -452,7 +452,7 @@ async fn wait_for(args: &Value) -> Result<Value, String> {
             Some(job) => {
                 let state = fetch(&format!("/jobs/{}", segment(job)))
                     .await
-                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_resume or voices_download_pack returned (a models download is waited for with until download). Wait for other work with until."))?;
+                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume or voices_download_pack returned (a models download is waited for with until download). Wait for other work with until."))?;
                 if state.get("status").and_then(Value::as_str).is_none() {
                     return Err(format!("The job {job} has no status: {state}"));
                 }
@@ -758,8 +758,8 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "studio_wait",
-                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_resume or voices_download_pack returned it), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, download, voices_pack - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
-                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "download", "voices_pack"] }, "seconds": { "type": "integer" } }), &[]),
+                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume or voices_download_pack returned it), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, download, voices_pack - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
+                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "download", "voices_pack"] }, "seconds": { "type": "integer" } }), &[]),
                 call: |_| composite("wait"),
             },
             Tool {
@@ -1027,6 +1027,7 @@ fn tools() -> &'static [Tool] {
                             "casting_ref": { "type": "string" },
                             "content_type": { "type": "string", "enum": ["auto", "real", "anime"] },
                             "import_translated": { "type": "boolean" },
+                            "align_subs": { "type": "boolean", "description": "subtitles given to project_create in the original language: align their timing to the recognised speech" },
                         }),
                         &["pid"],
                     )
@@ -1047,6 +1048,7 @@ fn tools() -> &'static [Tool] {
                         ("casting_ref", given(args, "casting_ref")),
                         ("content_type", given(args, "content_type")),
                         ("import_translated", given(args, "import_translated")),
+                        ("align_subs", given(args, "align_subs")),
                     ]);
                     post(format!("{path}{tail}"), json!({}))
                 },
@@ -1077,7 +1079,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_align",
-                description: "Move each line's start and end onto the original voice where they drifted (by up to 1.5 s); the moved lines become dirty.",
+                description: "Align the lines' timing to the recognised speech of the original voice word by word (like the align option of project_create with subtitles): it holds a frame rate drift and cut pieces, lines that did not match move with their neighbours; the moved lines become dirty. A job: studio_wait with its job_id. Refused when the lines have no original-language text.",
                 schema: project_only,
                 call: |args| post(project_path(args, "/align")?, json!({})),
             },

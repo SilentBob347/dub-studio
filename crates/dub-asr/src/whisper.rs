@@ -8,10 +8,51 @@
 //! глушим `HF_HUB_OFFLINE=1` (оффлайн-first). Диаризация остаётся на Sortformer (как у Parakeet): для
 //! per-speaker раскладываем слова whole-clip по репликам, затем сегментируем внутри каждой.
 
+use crate::hallucination::{hallucination_kind, is_hallucination, HallucinationRules};
 use crate::segment::{segment_words, Segment, Word, SEG_MAX_GAP, SEG_MAX_DUR};
 use crate::{load_wav_16k_mono, AsrEngine, AsrError, SpeakerSegment, Turn, TARGET_SR};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Разбор JSON faster-whisper: словный поток настоящих сегментов и отдельно сегменты-кандидаты в
+/// галлюцинации (целиком, со своими словами). Кандидаты не смешиваются со словами соседних реплик:
+/// дальше каждый становится ОТДЕЛЬНЫМ сегментом, и решение «скрыть или оставить» принимает analyze
+/// по голосу на этом интервале.
+#[derive(Debug, Default)]
+struct Parsed {
+    words: Vec<Word>,
+    suspects: Vec<Segment>,
+}
+
+impl Parsed {
+    fn shift(&mut self, off: f64) {
+        for w in &mut self.words {
+            w.start += off;
+            w.end += off;
+        }
+        for s in &mut self.suspects {
+            s.start += off;
+            s.end += off;
+            for w in &mut s.words {
+                w.start += off;
+                w.end += off;
+            }
+        }
+    }
+
+    fn append(&mut self, mut other: Parsed) {
+        self.words.append(&mut other.words);
+        self.suspects.append(&mut other.suspects);
+    }
+
+    /// Сегменты дубляжа: обычная сегментация настоящих слов + кандидаты отдельными сегментами, по времени.
+    fn into_segments(self) -> Vec<Segment> {
+        let mut out = segment_words(&self.words, SEG_MAX_GAP, SEG_MAX_DUR);
+        out.extend(self.suspects);
+        out.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+}
 
 /// Порог «длинного» файла, сек: короче — монолитный прогон как раньше (питон-паритет).
 const PAR_MIN_DUR: f64 = 600.0;
@@ -109,7 +150,7 @@ impl WhisperAsr {
 
     /// Авто-выбор пути: короткий файл (< PAR_MIN_DUR) — монолитный прогон КАК РАНЬШЕ (паритет);
     /// длинный — параллельные окна (N сабпроцессов whisper-faster на CPU-ядра, см. run_words_windowed).
-    fn run_words_auto(&self, wav: &Path, lang: &str) -> Result<Vec<Word>, AsrError> {
+    fn run_words_auto(&self, wav: &Path, lang: &str) -> Result<Parsed, AsrError> {
         let dur = wav_duration_secs(wav).unwrap_or(0.0);
         if dur < PAR_MIN_DUR {
             return self.run_words(wav, lang, None);
@@ -124,7 +165,7 @@ impl WhisperAsr {
     /// применим, а RAM на копию модели терпим при ≤PAR_MAX_WORKERS. Границы окон — по МИНИМУМУ
     /// энергии в ±PAR_SEARCH_SECS от номинала (smart-split из transcribe-rs vad_chunked.rs: режем в
     /// тишине, не посреди слова) → окна БЕЗ overlap → дубликатов слов на швах нет по построению.
-    fn run_words_windowed(&self, wav: &Path, lang: &str) -> Result<Vec<Word>, AsrError> {
+    fn run_words_windowed(&self, wav: &Path, lang: &str) -> Result<Parsed, AsrError> {
         let (samples, _wav_sr) = load_wav_16k_mono(wav)?;
         let sr = TARGET_SR as usize;
         let total = samples.len() as f64 / sr as f64;
@@ -169,34 +210,28 @@ impl WhisperAsr {
         drop(samples);
 
         // Пачки по `workers` потоков: spawn → join (простая, предсказуемая параллель без пула).
-        let mut all: Vec<Word> = Vec::new();
+        let mut all = Parsed::default();
         for batch in wins.chunks(workers) {
             let mut handles = Vec::new();
             for (i, a, _b, p) in batch.iter().cloned() {
                 let eng = self.clone();
                 let lang = lang.to_string();
-                handles.push(std::thread::spawn(move || -> Result<Vec<Word>, AsrError> {
+                handles.push(std::thread::spawn(move || -> Result<Parsed, AsrError> {
                     let off = a as f64 / TARGET_SR as f64;
                     // 1 ретрай на окно: транзиентный сбой сабпроцесса не валит весь файл сразу.
-                    let words = match eng.run_words(&p, &lang, Some(threads_per)) {
+                    let mut parsed = match eng.run_words(&p, &lang, Some(threads_per)) {
                         Ok(w) => w,
                         Err(_) => eng.run_words(&p, &lang, Some(threads_per)).map_err(|e| {
                             AsrError::Parakeet(format!("whisper окно {i} (offset {off:.0}s): {e}"))
                         })?,
                     };
-                    Ok(words
-                        .into_iter()
-                        .map(|mut w| {
-                            w.start += off;
-                            w.end += off;
-                            w
-                        })
-                        .collect())
+                    parsed.shift(off);
+                    Ok(parsed)
                 }));
             }
             for h in handles {
                 match h.join() {
-                    Ok(Ok(mut ws)) => all.append(&mut ws),
+                    Ok(Ok(parsed)) => all.append(parsed),
                     Ok(Err(e)) => {
                         let _ = std::fs::remove_dir_all(&tmp_dir);
                         return Err(e);
@@ -209,7 +244,7 @@ impl WhisperAsr {
             }
         }
         let _ = std::fs::remove_dir_all(&tmp_dir);
-        all.sort_by(|x, y| x.start.partial_cmp(&y.start).unwrap_or(std::cmp::Ordering::Equal));
+        all.words.sort_by(|x, y| x.start.partial_cmp(&y.start).unwrap_or(std::cmp::Ordering::Equal));
         Ok(all)
     }
 
@@ -217,7 +252,7 @@ impl WhisperAsr {
     /// авто-детект (флаг --language не передаём). Оффлайн: HF_HUB_OFFLINE=1, модель из --model_dir.
     /// `threads`: Some(n) -> явный `--threads n` (оконная параллель делит ядра); None -> дефолт движка
     /// (короткий путь БЕЗ изменений — паритет).
-    fn run_words(&self, wav: &Path, lang: &str, threads: Option<usize>) -> Result<Vec<Word>, AsrError> {
+    fn run_words(&self, wav: &Path, lang: &str, threads: Option<usize>) -> Result<Parsed, AsrError> {
         let cwd = std::env::current_dir().ok();
         let abs = |p: &Path| -> PathBuf {
             if p.is_absolute() {
@@ -320,40 +355,35 @@ impl WhisperAsr {
             .ok_or_else(|| AsrError::Parakeet("whisper: нет JSON-вывода".into()))?;
         let txt = std::fs::read_to_string(&json_path)
             .map_err(|e| AsrError::WavRead(json_path.display().to_string(), e.to_string()))?;
-        let words = parse_whisper_json(&txt);
+        let parsed = parse_whisper_json(&txt);
         let _ = std::fs::remove_dir_all(&out_dir);
-        Ok(words)
+        Ok(parsed)
     }
 }
 
-impl AsrEngine for WhisperAsr {
-    fn transcribe(&mut self, wav: &Path, lang: &str) -> Result<Vec<Segment>, AsrError> {
-        let words = self.run_words_auto(wav, lang)?;
-        Ok(segment_words(&words, SEG_MAX_GAP, SEG_MAX_DUR))
-    }
+/// Результат пакетного прогона: каталог вывода (вызывающий удаляет) и JSON каждого входного файла.
+struct Batch {
+    out_dir: PathBuf,
+    jsons: Vec<Result<String, AsrError>>,
+}
 
-    /// Пакет: ОДИН сабпроцесс на весь список (filelist .txt — Purfview поддерживает; старт процесса
-    /// дорогой, поэтому не по-файлово). JSONы читаем по stem'ам входных файлов. Сбой пакета -> все None
-    /// (вызывающий QC это переживает: непроверенные сегменты просто не ретраятся по ASR-критерию).
-    fn transcribe_many(&mut self, files: &[PathBuf], lang: &str) -> Vec<Option<String>> {
-        if files.is_empty() {
-            return Vec::new();
-        }
+impl WhisperAsr {
+    /// Один сабпроцесс на список файлов (filelist). `words` — просить словные таймстемпы.
+    fn run_filelist(&self, files: &[PathBuf], lang: &str, words: bool) -> Result<Batch, AsrError> {
         let cwd = std::env::current_dir().ok();
         let abs = |p: &Path| -> PathBuf {
             if p.is_absolute() { p.to_path_buf() } else { cwd.as_ref().map(|c| c.join(p)).unwrap_or_else(|| p.to_path_buf()) }
         };
-        let parent = files[0].parent().unwrap_or(Path::new(".")).to_path_buf();
-        let out_dir = abs(&parent).join("wsp_qc");
+        let Some(first) = files.first() else {
+            return Ok(Batch { out_dir: PathBuf::new(), jsons: Vec::new() });
+        };
+        let parent = first.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let out_dir = abs(&parent).join(if words { "wsp_words" } else { "wsp_qc" });
         let _ = std::fs::remove_dir_all(&out_dir);
-        if std::fs::create_dir_all(&out_dir).is_err() {
-            return files.iter().map(|_| None).collect();
-        }
+        std::fs::create_dir_all(&out_dir).map_err(|e| AsrError::Io(format!("{}: {e}", out_dir.display())))?;
         let list = out_dir.join("files.txt");
         let body = files.iter().map(|f| abs(f).to_string_lossy().to_string()).collect::<Vec<_>>().join("\r\n");
-        if std::fs::write(&list, body).is_err() {
-            return files.iter().map(|_| None).collect();
-        }
+        std::fs::write(&list, body).map_err(|e| AsrError::Io(format!("{}: {e}", list.display())))?;
         let mut cmd = Command::new(abs(&self.bin));
         cmd.arg(&list)
             .arg("--model").arg(&self.model)
@@ -377,6 +407,8 @@ impl AsrEngine for WhisperAsr {
                 .arg("--no_speech_threshold").arg("0.5")
                 .arg("--word_timestamps").arg("True")
                 .arg("--hallucination_silence_threshold").arg("2");
+        } else if words {
+            cmd.arg("--word_timestamps").arg("True");
         }
         let l = lang.trim();
         if !l.is_empty() && l != "auto" {
@@ -391,21 +423,81 @@ impl AsrEngine for WhisperAsr {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000);
         }
-        let ok = cmd.output().map(|o| o.status.success()).unwrap_or(false);
-        let out: Vec<Option<String>> = files
+        let out = cmd.output().map_err(|e| AsrError::Parakeet(format!("whisper spawn: {e}")))?;
+        if !out.status.success() {
+            let _ = std::fs::remove_dir_all(&out_dir);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let mut tail: Vec<&str> = stderr.lines().rev().take(10).collect();
+            tail.reverse();
+            return Err(AsrError::Parakeet(format!("whisper пакет код {:?}: {}", out.status.code(), tail.join(" | "))));
+        }
+        let jsons = files
             .iter()
             .map(|f| {
-                if !ok {
-                    return None;
-                }
-                let stem = f.file_stem().and_then(|s| s.to_str())?;
-                let j = std::fs::read_to_string(out_dir.join(format!("{stem}.json"))).ok()?;
-                let v: serde_json::Value = serde_json::from_str(&j).ok()?;
-                let segs = v.get("segments")?.as_array()?;
-                Some(segs.iter().filter_map(|s| s.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join(" ").trim().to_string())
+                let stem = f
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| AsrError::Io(format!("имя файла {}", f.display())))?;
+                let jp = out_dir.join(format!("{stem}.json"));
+                std::fs::read_to_string(&jp).map_err(|e| AsrError::WavRead(jp.display().to_string(), e.to_string()))
             })
             .collect();
-        let _ = std::fs::remove_dir_all(&out_dir);
+        Ok(Batch { out_dir, jsons })
+    }
+}
+
+impl AsrEngine for WhisperAsr {
+    fn transcribe(&mut self, wav: &Path, lang: &str) -> Result<Vec<Segment>, AsrError> {
+        Ok(self.run_words_auto(wav, lang)?.into_segments())
+    }
+
+    /// Пакет: ОДИН сабпроцесс на весь список (filelist .txt — Purfview поддерживает; старт процесса
+    /// дорогой, поэтому не по-файлово). JSONы читаем по stem'ам входных файлов. Сбой пакета -> все None
+    /// (вызывающий QC это переживает: непроверенные сегменты просто не ретраятся по ASR-критерию).
+    /// Сегменты с сильным признаком галлюцинации (титр субтитровщика, звук в скобках, ни букв, ни цифр) в
+    /// текст не входят: иначе фантомная фраза на тихом клипе давала бы ложное сходство с ожидаемым.
+    /// Фразы из списка («Thank you.», «Watch out!») остаются: перевод их и правда содержит.
+    fn transcribe_many(&mut self, files: &[PathBuf], lang: &str) -> Vec<Option<String>> {
+        let Ok(batch) = self.run_filelist(files, lang, false) else {
+            return files.iter().map(|_| None).collect();
+        };
+        let out = batch
+            .jsons
+            .iter()
+            .map(|j| {
+                let v: serde_json::Value = serde_json::from_str(j.as_ref().ok()?).ok()?;
+                let segs = v.get("segments")?.as_array()?;
+                Some(
+                    segs.iter()
+                        .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
+                        .filter(|t| !hallucination_kind(t, HallucinationRules::Whisper).is_some_and(|k| k.is_strong()))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .trim()
+                        .to_string(),
+                )
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&batch.out_dir);
+        out
+    }
+
+    /// Пакет со словными таймингами (один сабпроцесс на список, как transcribe_many). Слова всех
+    /// сегментов: в озвученной фразе «Watch out!» — настоящая реплика, а не галлюцинация.
+    fn transcribe_many_words(&mut self, files: &[PathBuf], lang: &str) -> Vec<Result<Vec<Word>, AsrError>> {
+        let batch = match self.run_filelist(files, lang, true) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = e.to_string();
+                return files.iter().map(|_| Err(AsrError::Parakeet(msg.clone()))).collect();
+            }
+        };
+        let out = batch
+            .jsons
+            .into_iter()
+            .map(|j| j.map(|txt| parse_whisper_json(&txt).into_segments().into_iter().flat_map(|s| s.words).collect()))
+            .collect();
+        let _ = std::fs::remove_dir_all(&batch.out_dir);
         out
     }
 
@@ -414,35 +506,34 @@ impl AsrEngine for WhisperAsr {
     /// внутри каждой — обычная сегментация. Времена уже абсолютные.
     fn transcribe_turns(&mut self, wav: &Path, turns: &[Turn], lang: &str) -> Result<Vec<SpeakerSegment>, AsrError> {
         eprintln!("[asr] Whisper transcribe_turns: {} реплик, wav={}", turns.len(), wav.display());
-        let words = self.run_words_auto(wav, lang)?;
+        let parsed = self.run_words_auto(wav, lang)?;
         if turns.is_empty() {
             // нет реплик -> single-speaker (0), как fallback
-            return Ok(segment_words(&words, SEG_MAX_GAP, SEG_MAX_DUR)
+            return Ok(parsed
+                .into_segments()
                 .into_iter()
                 .map(|s| SpeakerSegment { start: s.start, end: s.end, text: s.text, speaker: 0 })
                 .collect());
         }
+        // реплика, чьё окно содержит середину; иначе — ближайшая по центру окна.
+        let turn_of = |mid: f64| -> usize {
+            turns.iter().position(|t| mid >= t.start && mid <= t.end).unwrap_or_else(|| {
+                turns
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let da = (mid - (a.start + a.end) / 2.0).abs();
+                        let db = (mid - (b.start + b.end) / 2.0).abs();
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            })
+        };
         // Ведро слов на реплику.
         let mut buckets: Vec<Vec<Word>> = vec![Vec::new(); turns.len()];
-        for w in words {
-            let mid = (w.start + w.end) / 2.0;
-            // реплика, чьё окно содержит середину; иначе — ближайшая по центру окна.
-            let idx = turns
-                .iter()
-                .position(|t| mid >= t.start && mid <= t.end)
-                .unwrap_or_else(|| {
-                    turns
-                        .iter()
-                        .enumerate()
-                        .min_by(|(_, a), (_, b)| {
-                            let da = (mid - (a.start + a.end) / 2.0).abs();
-                            let db = (mid - (b.start + b.end) / 2.0).abs();
-                            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(i, _)| i)
-                        .unwrap_or(0)
-                });
-            buckets[idx].push(w);
+        for w in parsed.words {
+            buckets[turn_of((w.start + w.end) / 2.0)].push(w);
         }
         let mut out = Vec::new();
         for (i, ws) in buckets.into_iter().enumerate() {
@@ -454,6 +545,10 @@ impl AsrEngine for WhisperAsr {
                 out.push(SpeakerSegment { start: s.start, end: s.end, text: s.text, speaker: spk });
             }
         }
+        for s in parsed.suspects {
+            let spk = turns[turn_of((s.start + s.end) / 2.0)].speaker;
+            out.push(SpeakerSegment { start: s.start, end: s.end, text: s.text, speaker: spk });
+        }
         out.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
         Ok(out)
     }
@@ -462,18 +557,23 @@ impl AsrEngine for WhisperAsr {
 /// Распарсить JSON faster-whisper (openai-формат) в словный поток. Берём words каждого сегмента
 /// ({word,start,end}); если у сегмента нет words — сам сегмент как одно «слово» (fallback). Ведущий
 /// пробел в word тримим (segment_words соединяет через " "). Устойчиво к отсутствующим полям.
-fn parse_whisper_json(txt: &str) -> Vec<Word> {
+/// Сегмент, который целиком — галлюцинация Whisper (is_hallucination), уходит в `suspects` отдельным
+/// сегментом со своими словами и в общий поток не попадает.
+fn parse_whisper_json(txt: &str) -> Parsed {
     let v: serde_json::Value = match serde_json::from_str(txt) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(_) => return Parsed::default(),
     };
-    let mut words = Vec::new();
+    let mut out = Parsed::default();
     let Some(segs) = v.get("segments").and_then(|s| s.as_array()) else {
-        return words;
+        return out;
     };
     for seg in segs {
-        let ws = seg.get("words").and_then(|w| w.as_array());
-        match ws {
+        let text = seg.get("text").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let seg_start = seg.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let seg_end = seg.get("end").and_then(|x| x.as_f64()).unwrap_or(seg_start).max(seg_start);
+        let mut words = Vec::new();
+        match seg.get("words").and_then(|w| w.as_array()) {
             Some(arr) if !arr.is_empty() => {
                 for w in arr {
                     let word = w
@@ -493,16 +593,28 @@ fn parse_whisper_json(txt: &str) -> Vec<Word> {
             }
             _ => {
                 // сегмент без словных таймстемпов — одно «слово» на весь сегмент
-                let word = seg.get("text").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-                if !word.is_empty() {
-                    let start = seg.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                    let end = seg.get("end").and_then(|x| x.as_f64()).unwrap_or(start);
-                    words.push(Word { word, start, end: end.max(start) });
+                if !text.is_empty() {
+                    words.push(Word { word: text.clone(), start: seg_start, end: seg_end });
                 }
             }
         }
+        if words.is_empty() {
+            continue;
+        }
+        let seg_text = if text.is_empty() {
+            words.iter().map(|w| w.word.as_str()).collect::<Vec<_>>().join(" ")
+        } else {
+            text
+        };
+        if is_hallucination(&seg_text, HallucinationRules::Whisper) {
+            let start = words.first().map(|w| w.start).unwrap_or(seg_start);
+            let end = words.iter().map(|w| w.end).fold(start, f64::max);
+            out.suspects.push(Segment { start, end, text: seg_text, words });
+        } else {
+            out.words.extend(words);
+        }
     }
-    words
+    out
 }
 
 #[cfg(test)]
@@ -516,7 +628,7 @@ mod tests {
                 {"word":" Hello","start":0.0,"end":0.4,"probability":0.9},
                 {"word":" world.","start":0.4,"end":0.8,"probability":0.8}]}],
             "language":"en"}"#;
-        let ws = parse_whisper_json(j);
+        let ws = parse_whisper_json(j).words;
         assert_eq!(ws.len(), 2);
         assert_eq!(ws[0].word, "Hello");
         assert_eq!(ws[1].word, "world.");
@@ -526,14 +638,34 @@ mod tests {
     #[test]
     fn falls_back_to_segment_when_no_words() {
         let j = r#"{"segments":[{"start":1.0,"end":2.0,"text":" No words here"}],"language":"ru"}"#;
-        let ws = parse_whisper_json(j);
+        let ws = parse_whisper_json(j).words;
         assert_eq!(ws.len(), 1);
         assert_eq!(ws[0].word, "No words here");
     }
 
     #[test]
     fn empty_on_garbage() {
-        assert!(parse_whisper_json("not json").is_empty());
-        assert!(parse_whisper_json("{}").is_empty());
+        assert!(parse_whisper_json("not json").words.is_empty());
+        assert!(parse_whisper_json("{}").words.is_empty());
+    }
+
+    #[test]
+    fn a_credit_over_silence_becomes_its_own_segment() {
+        let j = r#"{"segments":[
+            {"start":0.0,"end":1.2,"text":" Мы уходим","words":[
+                {"word":" Мы","start":0.0,"end":0.4},{"word":" уходим","start":0.45,"end":1.2}]},
+            {"start":1.3,"end":3.0,"text":" Субтитры сделал DimaTorzok","words":[
+                {"word":" Субтитры","start":1.3,"end":2.0},{"word":" сделал","start":2.0,"end":2.4},
+                {"word":" DimaTorzok","start":2.4,"end":3.0}]},
+            {"start":3.1,"end":3.8,"text":" завтра.","words":[{"word":" завтра.","start":3.1,"end":3.8}]}]}"#;
+        let p = parse_whisper_json(j);
+        let heard: Vec<&str> = p.words.iter().map(|w| w.word.as_str()).collect();
+        assert_eq!(heard, ["Мы", "уходим", "завтра."]);
+        assert_eq!(p.suspects.len(), 1);
+        assert_eq!(p.suspects[0].text, "Субтитры сделал DimaTorzok");
+        let segs = p.into_segments();
+        // Зазор 0.1с слил бы титр с репликой в один сегмент; кандидат держится отдельно.
+        assert!(segs.iter().any(|s| s.text == "Субтитры сделал DimaTorzok"));
+        assert!(segs.iter().all(|s| !s.text.contains("уходим") || !s.text.contains("DimaTorzok")));
     }
 }

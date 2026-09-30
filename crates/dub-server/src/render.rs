@@ -236,6 +236,7 @@ pub fn run(
     if vw <= 0 || vh <= 0 {
         let out_wav = paths.output.with_extension("wav");
         media::to_wav(&new_audio, &out_wav)?;
+        discard_mix(&new_audio, wd);
         // Прибрать stale output.mp4/.mkv от прошлого прогона: find_output отдаёт их приоритетнее wav (#116).
         for ext in ["mp4", "mkv"] {
             let stale = paths.output.with_extension(ext);
@@ -260,7 +261,7 @@ pub fn run(
     let captioned = if proj.subs.burn && has_overlay {
         emit(progress, "build", "сборка ASS (титры + дублированные субтитры)");
         let ass_path = wd.join("caps.ass");
-        let sub_covers = build_ass(proj, &ass_path, vw, vh, total)?;
+        let sub_covers = build_ass(proj, &ass_path, Some(wd), vw, vh, total)?;
         emit(progress, "burn", "вжигание субтитров + блюр (ffmpeg + libass, NVENC)");
         let mut blur_boxes = collect_blur_boxes(proj);
         blur_boxes.extend(sub_covers.iter().map(cover_to_blur)); // блюр-подложка ПОД нашим текстом
@@ -354,9 +355,23 @@ pub fn run(
         }
     }
 
+    discard_mix(&new_audio, wd);
     emit(progress, "done", &format!("готово -> {}", out_path.display()));
     bench.finish(|m| emit(progress, "bench", m));
     Ok(RenderResult { output: out_path })
+}
+
+/// Несжатые файлы микса (media::lossless_out), которые после финального кодирования больше не нужны:
+/// float-стерео длинного ролика занимает сотни МБ на каждый проект.
+const MIX_TEMPS: [&str; 4] = ["new_audio.wav", "orig_ducked.wav", "final_audio.wav", "gained_audio.wav"];
+
+/// Удалить отработавший файл микса. Исходник, дорожку дубля и всё вне каталога проекта не трогает.
+fn discard_mix(path: &Path, wd: &Path) {
+    let ours = path.parent() == Some(wd)
+        && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| MIX_TEMPS.contains(&n));
+    if ours {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Человекочитаемое имя языка для title дорожки. Нативных имён в проекте нет — берём английское имя из
@@ -376,7 +391,8 @@ fn lang_display(code: &str) -> String {
         })
 }
 
-/// Только ДУБ-АУДИО (без бёрна субтитров и mux видео): TTS+fit+timeline+mix -> work_dir/dub_audio.m4a.
+/// Только ДУБ-АУДИО (без бёрна субтитров и mux видео): TTS+fit+timeline+mix -> work_dir/dub_audio.m4a
+/// (одно кодирование AAC из несжатого микса).
 /// Нужно, чтобы озвучку можно было СЛУШАТЬ в редакторе сразу после анализа, НЕ собирая финальное видео
 /// (само видео на превью не нужно — кадры показывает per-frame preview). Порт _build_dub-ветки без бёрна.
 pub fn dub_audio(
@@ -396,8 +412,9 @@ pub fn dub_audio(
     };
     crate::jobs::check_cancelled()?;
     let out = wd.join("dub_audio.m4a");
-    // привести к browser-playable aac/m4a (build_dub уже даёт m4a; nodub -> извлечь звук из оригинала).
-    media::extract_audio(&src, &out, 44_100, 2)?;
+    // browser-playable aac/m4a: build_dub отдаёт несжатый WAV, nodub — звук оригинала.
+    media::encode_preview_aac(&src, &out)?;
+    discard_mix(&src, wd);
     emit(progress, "done", "дуб-аудио готово");
     Ok(out)
 }
@@ -1500,12 +1517,18 @@ fn build_dub(
         .and_then(|v| v.as_str())
         .map(|v| v == "1")
         .unwrap_or(false);
-    let laid_spans = timeline(&placed, total, &dub, breath_on)?;
+    let (laid_spans, (limited_phrases, limited_samples)) = timeline(&placed, total, &dub, breath_on)?;
+    if limited_phrases > 0 {
+        emit(progress, "mix", &format!(
+            "лимитер пиков: {limited_phrases} фраз, {limited_samples} сэмплов выше полки {VOICE_CEILING} опущены без клипа"
+        ));
+    }
     // Речевые блоки для дакинга (#106) — из ФАКТИЧЕСКИХ спанов timeline (единый источник: с учётом
     // cursor-ripple и QC-пересинтеза), а не из onset'ов placed.
     let mut speech_blocks = build_speech_blocks(&laid_spans);
     // HARD-гарантия: дубляж не длиннее видео (tempo-fit всей дорожки, если переполз).
     let mut dub = dub;
+    let mut track_sf = 1.0f64;
     let dub_dur = media::duration(&dub)?;
     if dub_dur > total + 0.15 {
         let fit = wd.join("dub_fit.wav");
@@ -1513,12 +1536,15 @@ fn build_dub(
         media::time_stretch(&dub, &fit, sf)?;
         emit(progress, "mix", &format!("tempo-fit всей дорожки x{:.2}", sf));
         dub = fit;
+        track_sf = sf;
         // огибающая дакинга едет вместе с дорожкой: границы блоков делим на тот же фактор.
         for b in &mut speech_blocks {
             b.start /= sf;
             b.end /= sf;
         }
     }
+
+    record_dub_timing(proj, paths, &segs, &placed, &laid_spans, track_sf, progress)?;
 
     // 6) свести дорожку.
     let mixed = if voiceover {
@@ -1530,20 +1556,21 @@ fn build_dub(
         emit(progress, "mix", &format!(
             "voiceover: оригинал {duck_db:+.1} dB ПОД переводом, полный в паузах (динам. огибающая, {} блоков)",
             speech_blocks.len()));
-        let new_audio = wd.join("new_audio.m4a");
+        let new_audio = wd.join("new_audio.wav");
         // Динамическая огибающая на ОРИГИНАЛ по таймингам перевода. Фолбэк — старое плоское приглушение.
         if media::mix_env_db(&dub, &audio_hq, &speech_blocks, duck_db, &new_audio).is_err() {
             emit(progress, "mix", "voiceover: огибающая недоступна -> плоское приглушение");
             let bed = if duck_db.abs() < 0.05 {
                 audio_hq.clone()
             } else {
-                let ducked = wd.join("orig_ducked.m4a");
+                let ducked = wd.join("orig_ducked.wav");
                 match media::gain(&audio_hq, &ducked, duck_db) {
                     Ok(()) => ducked,
                     Err(_) => audio_hq.clone(),
                 }
             };
             media::mix(&dub, &bed, &new_audio)?;
+            discard_mix(&bed, wd);
         }
         new_audio
     } else if let Some(inst) = instrumental {
@@ -1552,7 +1579,7 @@ fn build_dub(
         // реагировал на мгновенную амплитуду TTS и давал «качели» на микропаузах внутри фраз. Требование
         // юзера: «дубляж громче фона, но фон НЕ гробить» (−12 дБ срезали весь фон). Каскад фолбэков:
         // огибающая -> sidechain -> прямой mix.
-        let new_audio = wd.join("new_audio.m4a");
+        let new_audio = wd.join("new_audio.wav");
         // Дакинг фона под дубляжом — ОПЦИЯ (duck_on), ВЫКЛ по умолчанию: не всем нужен, многим фон нужен
         // на полной громкости. Выкл -> прямой mix (фон 1:1). Вкл -> огибающая −3дБ (каскад фолбэков).
         if !crate::models::duck_enabled(&paths.models_root) {
@@ -1574,12 +1601,17 @@ fn build_dub(
     };
     // 7) финальная нормализация программы EBU R128 + true-peak лимитер (-1 dBTP). РЕШЕНИЕ ЮЗЕРА
     // (best-practice, НЕ питон — приказ 2026-07-12): пофразный normalize_voice выровнял спикеров (и
-    // клипнул редкие пики фразы на 0.985), здесь программа приводится к целевой громкости соцсетей
+    // опустил лимитером редкие пики фразы к 0.985), здесь программа приводится к целевой громкости соцсетей
     // (-14 LUFS); финальный true-peak лимитер держит межфразовые суммы и микс с фоном.
+    // Все промежуточные стадии — несжатый float WAV (media::lossless_out); единственное кодирование с
+    // потерями — в mux (AAC 256k) либо превью dub_audio.m4a.
     emit(progress, "mix", "нормализация громкости (EBU R128, true-peak)");
-    let final_audio = wd.join("final_audio.m4a");
+    let final_audio = wd.join("final_audio.wav");
     let normalized = match media::loudnorm(&mixed, &final_audio, -14.0, -1.0, 11.0) {
-        Ok(()) => final_audio,
+        Ok(()) => {
+            discard_mix(&mixed, wd);
+            final_audio
+        }
         Err(e) => {
             emit(progress, "mix", &format!("loudnorm пропущен ({e})"));
             mixed
@@ -1592,14 +1624,61 @@ fn build_dub(
     let gain_db = proj.audio.gain_db;
     if gain_db.abs() > 0.05 {
         emit(progress, "mix", &format!("гейн дорожки {gain_db:+.1} dB"));
-        let gained = wd.join("gained_audio.m4a");
+        let gained = wd.join("gained_audio.wav");
         match media::gain(&normalized, &gained, gain_db) {
-            Ok(()) => Ok(gained),
+            Ok(()) => {
+                discard_mix(&normalized, wd);
+                Ok(gained)
+            }
             Err(_) => Ok(normalized),
         }
     } else {
         Ok(normalized)
     }
+}
+
+/// Записать, где каждая озвученная фраза реально звучит в финальной дорожке (dub_timing.json): субтитры
+/// dub/voiceover берут отсюда тайминги событий, а пословные пресеты — слова, услышанные в самом дубле.
+/// Цикл укладки кладёт в `placed` ровно одну запись на каждый элемент `segs` в том же порядке, а
+/// timeline возвращает спаны в порядке `placed` (onset'ы неубывают, сортировка стабильная).
+fn record_dub_timing(
+    proj: &Project,
+    paths: &RenderPaths,
+    segs: &[(usize, &dub_core::Segment)],
+    placed: &[(f64, PathBuf, f64)],
+    laid_spans: &[(f64, f64)],
+    track_sf: f64,
+    progress: &Progress,
+) -> Result<(), String> {
+    let wd = &paths.work_dir;
+    if placed.len() != segs.len() || laid_spans.len() != placed.len() {
+        crate::dub_timing::clear(wd)?;
+        emit(progress, "mix", &format!(
+            "тайминги дубляжа для субтитров не записаны: укладка ({} фраз, {} спанов) не сопоставилась с сегментами ({}) — субтитры по таймингам оригинала",
+            placed.len(), laid_spans.len(), segs.len()
+        ));
+        return Ok(());
+    }
+    let seg_keep = |s: &dub_core::Segment| s.extra.get("keep_original").and_then(|v| v.as_bool()).unwrap_or(false);
+    let laid: Vec<crate::dub_timing::Laid> = segs
+        .iter()
+        .zip(placed)
+        .zip(laid_spans)
+        .filter(|(((_, s), _), _)| !seg_keep(s) && !s.tgt_text.trim().is_empty())
+        .map(|(((_, s), p), span)| crate::dub_timing::Laid { seg: s, file: &p.1, span: *span })
+        .collect();
+    let preset = &proj.captions.preset;
+    let caption_style = preset.name.as_deref().filter(|n| *n != "match");
+    let need_words = proj.subs.burn
+        && proj.subs.mode != "none"
+        && dub_captions::word_timed_reveal(caption_style, preset.plate.as_deref(), preset.reveal.as_deref(), preset.font.as_deref());
+    if need_words {
+        emit(progress, "mix", &format!("пословные тайминги субтитров: распознавание {} фраз дубляжа", laid.len()));
+    }
+    let warn = |m: String| emit(progress, "mix", &m);
+    let asr = need_words.then_some((&paths.asr, proj.tgt_lang.as_str()));
+    crate::dub_timing::record(wd, &laid, track_sf, asr, &warn)?;
+    Ok(())
 }
 
 /// Референс клона на КАЖДОГО спикера: {speaker -> ref_spk{N}.wav}.
@@ -1967,12 +2046,13 @@ fn generate_breath_sample(sr: u32, seed: usize) -> Vec<f32> {
 
 /// Уложить сегменты на полную дорожку по таймкодам, без перекрытия/обрезки. Порт assemble.timeline.
 /// Применяет 10 мс crossfade к краям фраз для устранения кликов. При breath_on=true подставляет вдохи.
-fn timeline(placed: &[(f64, PathBuf, f64)], total_dur: f64, out_wav: &Path, breath_on: bool) -> Result<Vec<(f64, f64)>, String> {
+/// Возвращает фактические спаны укладки и сводку лимитера (фраз с пиками выше полки, таких сэмплов).
+fn timeline(placed: &[(f64, PathBuf, f64)], total_dur: f64, out_wav: &Path, breath_on: bool) -> Result<TimelineOut, String> {
     if placed.is_empty() {
         // тишина total_dur @ 24000.
         let n = (total_dur * 24000.0) as usize;
         wavio::write_mono_f32(out_wav, &vec![0.0f32; n], 24000)?;
-        return Ok(Vec::new());
+        return Ok((Vec::new(), (0, 0)));
     }
     let mut placed: Vec<(f64, PathBuf, f64)> = placed.to_vec();
     placed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1982,13 +2062,18 @@ fn timeline(placed: &[(f64, PathBuf, f64)], total_dur: f64, out_wav: &Path, brea
     let mut laid: Vec<(f64, Vec<f32>)> = Vec::with_capacity(placed.len());
     let mut spans: Vec<(f64, f64)> = Vec::with_capacity(placed.len());
     let mut cursor = 0.0f64;
+    let (mut limited_phrases, mut limited_samples) = (0usize, 0usize);
     for (start, wav, _) in &placed {
         let (mut s, ssr) = if *wav == placed[0].1 {
             (first.0.clone(), first.1)
         } else {
             wavio::read_mono_f32(wav)?
         };
-        normalize_voice(&mut s, ssr); // все фразы/спикеры к одной громкости
+        let over = normalize_voice(&mut s, ssr); // все фразы/спикеры к одной громкости
+        if over > 0 {
+            limited_phrases += 1;
+            limited_samples += over;
+        }
 
         // 10ms Crossfade (fade-in & fade-out) для бесшовного стыка без кликов
         let fade_len = ((sr as f64 * 0.010) as usize).min(s.len() / 2);
@@ -2030,13 +2115,13 @@ fn timeline(placed: &[(f64, PathBuf, f64)], total_dur: f64, out_wav: &Path, brea
         }
     }
     // НЕ делить всю дорожку на глобальный пик: один громкий сэмпл (крик) ронял громкость ВСЕГО
-    // фильма на ~12дБ (жалоба «голос тихий», замер -30.6 LUFS при фразах -18.7). Фразы уже
-    // пик-клипнуты в normalize_voice; здесь лишь страховка от сумм при наложении — локальный клип.
+    // фильма на ~12дБ (жалоба «голос тихий», замер -30.6 LUFS при фразах -18.7). Пики фраз уже
+    // опущены лимитером в normalize_voice; здесь лишь страховка от сумм при наложении — локальный клип.
     for x in &mut track {
-        *x = x.clamp(-0.985, 0.985);
+        *x = x.clamp(-VOICE_CEILING, VOICE_CEILING);
     }
     wavio::write_mono_f32(out_wav, &track, sr)?;
-    Ok(spans)
+    Ok((spans, (limited_phrases, limited_samples)))
 }
 
 /// Выровнять ОДНУ фразу к общей громкости, чтобы все спикеры звучали одинаково громко (dialog-gated
@@ -2045,15 +2130,17 @@ fn timeline(placed: &[(f64, PathBuf, f64)], total_dur: f64, out_wav: &Path, brea
 /// «дубляж не слышно»; вместе с поджимом фона -3 дБ в миксе зазор ~6 LU = нижняя проф-норма).
 /// РЕШЕНИЕ ЮЗЕРА (EBU R128 best-practice, НЕ копия питона — «гугли best practices, не повторяй за мной»,
 /// приказ 2026-07-12): гейн НЕ клэмпится вниз (тихая фраза дожимается, сани-кап +40 dB от раздувания
-/// почти-тишины), а редкие пики результата клипятся на 0.985 — иначе timeline давил всю дорожку
-/// глобальным делением на пик одного крика (-12 дБ всему фильму, замер R5).
-fn normalize_voice(x: &mut [f32], sr: u32) {
+/// почти-тишины), а редкие пики результата опускаются к полке 0.985 пофразно — иначе timeline давил всю
+/// дорожку глобальным делением на пик одного крика (-12 дБ всему фильму, замер R5). Пики держит лимитер
+/// с предпросмотром (limiter::SPEECH): гейн опускается до пика и возвращается за ~80 мс, без хрипа
+/// жёсткого клипа. Возвращает число сэмплов, которые без лимитера легли бы выше полки.
+fn normalize_voice(x: &mut [f32], sr: u32) -> usize {
     if x.is_empty() {
-        return;
+        return 0;
     }
     let peak = x.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
     if peak < 1e-4 {
-        return; // почти тишина -> не трогаем
+        return 0; // почти тишина -> не трогаем
     }
     let mut gain: Option<f64> = None;
     if x.len() >= (0.4 * sr as f64) as usize {
@@ -2081,13 +2168,22 @@ fn normalize_voice(x: &mut [f32], sr: u32) {
         10f64.powf(-16.0 / 20.0) / rms
     });
     let gain = gain.min(10f64.powf(40.0 / 20.0)); // сани-кап +40 dB (не раздувать почти-тишину)
-    // Пик-клип 0.985 ПОФРАЗНО: у нормализованной к -16 LUFS фразы редкие пики могут выйти за 1.0 —
-    // клипим доли процента сэмплов ЗДЕСЬ, чтобы timeline не давил ВСЮ дорожку глобальным делением
-    // на пик одной фразы (замер R5: сегменты -18.7 LUFS, дорожка после деления -30.6 = «голос тихий»).
     for v in x.iter_mut() {
-        *v = ((*v as f64 * gain) as f32).clamp(-0.985, 0.985);
+        *v = (*v as f64 * gain) as f32;
     }
+    let over = crate::limiter::limit_mono(x, sr, VOICE_CEILING as f64, &crate::limiter::SPEECH);
+    // Лимитер гарантирует полку; clamp остаётся страховкой от погрешности f32 и ничего не срезает.
+    for v in x.iter_mut() {
+        *v = v.clamp(-VOICE_CEILING, VOICE_CEILING);
+    }
+    over
 }
+
+/// Спаны укладки (начало, конец) и сводка лимитера (фраз, сэмплов выше полки).
+type TimelineOut = (Vec<(f64, f64)>, (usize, usize));
+
+/// Полка пика фразы дубляжа (доля полной шкалы): запас под true-peak до финального loudnorm.
+const VOICE_CEILING: f32 = 0.985;
 
 /// Интегральная громкость ITU-R BS.1770 (LUFS) моно-сигнала: K-weighting (high-shelf + high-pass
 /// биквады как в pyloudnorm) -> блоки 400мс с overlap 75% -> абсолютный гейт -70 + относительный -10.
@@ -2192,7 +2288,7 @@ pub(crate) fn build_and_burn_captions(
     src_codec: &str,
 ) -> Result<(), String> {
     dub_captions::set_fonts_dir(fonts_dir);
-    let sub_covers = build_ass(proj, out_ass, vw, vh, total)?;
+    let sub_covers = build_ass(proj, out_ass, None, vw, vh, total)?;
     let mut blur_boxes = collect_blur_boxes(proj);
     blur_boxes.extend(sub_covers.iter().map(cover_to_blur));
     dub_captions::burn(
@@ -2217,7 +2313,16 @@ pub(crate) fn cover_to_blur(c: &dub_captions::SubCover) -> BlurBox {
 
 /// Собрать ASS через dub-captions из Project. Порт captions.build call-site pipeline.run. Возвращает
 /// габариты подложек под дублированными субтитрами (для блюр-подложки; см. SubCover).
-pub(crate) fn build_ass(proj: &Project, out_ass: &Path, vw: i64, vh: i64, total: f64) -> Result<Vec<dub_captions::SubCover>, String> {
+/// `timing_dir` — каталог проекта с dub_timing.json: в режимах dub/voiceover субтитр стоит там, где
+/// фраза дубляжа реально звучит, и подсвечивает слова по услышанному в дубле. None — тайминги оригинала.
+pub(crate) fn build_ass(
+    proj: &Project,
+    out_ass: &Path,
+    timing_dir: Option<&Path>,
+    vw: i64,
+    vh: i64,
+    total: f64,
+) -> Result<Vec<dub_captions::SubCover>, String> {
     let titles: Vec<CapTitle> = proj.captions.titles.iter().map(map_title).collect();
     let sub_style = proj.captions.sub_style.as_ref().map(map_sub_style);
     // sub_y дефолт vh*0.82 если не задан (как pipeline.py: не затирать edited/pinned sub_y).
@@ -2273,6 +2378,12 @@ pub(crate) fn build_ass(proj: &Project, out_ass: &Path, vw: i64, vh: i64, total:
     // источника истины: если для сегмента задан override.text, рисуем ЕГО вместо tgt_text. Стилевые
     // per-seg поля (override.style/x/y/w/fs) сохраняются в Project, но в ASS-строку пока не вплетаются —
     // dub-captions строит субтитр из общего sub_style; это совпадает с питоном (тоже не рендерит их).
+    let is_dub = proj.mode == "dub" || proj.mode == "voiceover";
+    let dub_timing: Option<crate::dub_timing::DubTiming> = match (is_dub, timing_dir) {
+        (true, Some(d)) => Some(crate::dub_timing::DubTiming::load(d)?.unwrap_or_default()),
+        (true, None) => Some(crate::dub_timing::DubTiming::default()),
+        (false, _) => None,
+    };
     let overrides: std::collections::HashMap<&str, &str> = proj
         .captions
         .overrides
@@ -2300,12 +2411,23 @@ pub(crate) fn build_ass(proj: &Project, out_ass: &Path, vw: i64, vh: i64, total:
         })
         .filter(|(_, tgt)| !tgt.trim().is_empty())
         .map(|(s, tgt)| {
-            let end = if s.end > 0.0 { s.end } else { total };
+            let (start, end, words) = match dub_timing.as_ref() {
+                // Дубляж: где фраза реально легла и слова, услышанные в самом дубле. Нет свежей записи —
+                // тайминг оригинала без слов (слова оригинала на другом языке, чем текст субтитра).
+                Some(t) => match t.fresh(s) {
+                    Some(st) => (st.at, st.at + st.dur, (!st.words.is_empty()).then(|| st.words.clone())),
+                    None => (s.start, if s.end > 0.0 { s.end } else { total }, None),
+                },
+                // Без дубляжа звучит оригинал: слова ASR оригинала (word_align сам отбросит их, если
+                // текст субтитра — перевод, а не транскрипт).
+                None => (s.start, if s.end > 0.0 { s.end } else { total }, seg_words(s)),
+            };
             Sub {
-                start: s.start,
+                start,
                 end,
                 tgt,
-                y: Some(seg_y(s.start, end)),
+                y: Some(seg_y(start, end)),
+                words,
             }
         })
         .collect() };
@@ -2330,6 +2452,21 @@ pub(crate) fn build_ass(proj: &Project, out_ass: &Path, vw: i64, vh: i64, total:
             .and_then(|v| v.as_i64()),
     };
     dub_captions::build(vw, vh, out_ass, args)
+}
+
+/// Словные тайминги ASR оригинала из extra.words ({word,start,end}); нет или пусто — None.
+fn seg_words(s: &dub_core::Segment) -> Option<Vec<(String, f64, f64)>> {
+    let arr = s.extra.get("words")?.as_array()?;
+    let ws: Vec<(String, f64, f64)> = arr
+        .iter()
+        .filter_map(|w| {
+            let word = w.get("word")?.as_str()?.to_string();
+            let start = w.get("start")?.as_f64()?;
+            let end = w.get("end").and_then(|v| v.as_f64()).unwrap_or(start);
+            Some((word, start, end.max(start)))
+        })
+        .collect();
+    (!ws.is_empty()).then_some(ws)
 }
 
 /// Blur-боксы из Project (project.captions.blur_boxes, hidden исключаются). Порт caption_plan blur_boxes.
@@ -2451,7 +2588,7 @@ mod tests {
         let dir = std::env::temp_dir()
             .join(format!("render_segy_{}_{}.ass", std::process::id(),
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        build_ass(proj, &dir, vw, vh, 44.77).unwrap();
+        build_ass(proj, &dir, None, vw, vh, 44.77).unwrap();
         let s = std::fs::read_to_string(&dir).unwrap();
         let _ = std::fs::remove_file(&dir);
         s
@@ -2477,8 +2614,8 @@ mod tests {
         normalize_voice(&mut loud, sr);
         normalize_voice(&mut quiet, sr);
         let (rl, rq) = (rms(&loud), rms(&quiet));
-        // после выравнивания уровни должны сойтись (dialog-gated нормализация); пики держит финальный
-        // media::loudnorm true-peak лимитер на смиксованной дорожке (пофразного клэмпа нет — решение юзера).
+        // после выравнивания уровни должны сойтись (dialog-gated нормализация); пики фразы держит
+        // пофразный лимитер, межфразовые суммы и микс с фоном — финальный media::loudnorm.
         assert!((rl - rq).abs() / rl.max(1e-9) < 0.15, "уровни должны сойтись: loud={rl:.4} quiet={rq:.4}");
     }
 
@@ -2524,6 +2661,64 @@ mod tests {
         // плашка обнимает текст: S-style несёт BorderStyle=3 (плашка = обводка вокруг текста той же строки).
         let s_style = ass.lines().find(|l| l.starts_with("Style: S,")).unwrap();
         assert!(s_style.contains(",3,11,"), "плашка = BorderStyle=3 в стиле строки: {s_style}");
+    }
+
+    #[test]
+    fn only_mix_temporaries_of_the_project_are_discarded() {
+        let wd = std::env::temp_dir().join(format!("render_discard_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wd);
+        std::fs::create_dir_all(&wd).unwrap();
+        for n in ["final_audio.wav", "dub_vocals.wav", "source.mp4"] {
+            std::fs::write(wd.join(n), b"x").unwrap();
+        }
+        discard_mix(&wd.join("final_audio.wav"), &wd);
+        discard_mix(&wd.join("dub_vocals.wav"), &wd);
+        discard_mix(&wd.join("source.mp4"), &wd);
+        assert!(!wd.join("final_audio.wav").exists());
+        assert!(wd.join("dub_vocals.wav").exists() && wd.join("source.mp4").exists());
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn dub_subtitle_sits_where_the_dub_phrase_sounds() {
+        let dir = std::env::temp_dir().join(format!("render_dubtiming_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut timing = crate::dub_timing::DubTiming::default();
+        timing.segments.insert(
+            "s0".into(),
+            crate::dub_timing::SegTiming {
+                text: "Привет мир".into(),
+                seg_start: 1.0,
+                seg_end: 2.0,
+                at: 3.0,
+                dur: 1.5,
+                words: vec![("Привет".into(), 3.1, 3.5), ("мир".into(), 3.6, 4.2)],
+            },
+        );
+        std::fs::write(dir.join(crate::dub_timing::FILE), serde_json::to_string(&timing).unwrap()).unwrap();
+        let mut proj = Project { mode: "dub".into(), segments: vec![seg("s0", 1.0, 2.0, "Привет мир")], ..Default::default() };
+        proj.subs.mode = "translate".into();
+        proj.captions.preset.name = Some("karaoke".into());
+        let ass_path = dir.join("caps.ass");
+        let events = |proj: &Project| -> Vec<String> {
+            build_ass(proj, &ass_path, Some(&dir), 1080, 1920, 10.0).unwrap();
+            std::fs::read_to_string(&ass_path)
+                .unwrap()
+                .lines()
+                .filter(|l| l.starts_with("Dialogue: 1,") && l.contains(",KT,"))
+                .map(|l| l.to_string())
+                .collect()
+        };
+        let ev = events(&proj);
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert!(ev[0].starts_with("Dialogue: 1,0:00:03.00,0:00:04.50,"), "субтитр на месте дубля: {}", ev[0]);
+        assert!(ev[0].contains("{\\k10}{\\kf50}"), "пауза до первого слова и его длительность по дублю: {}", ev[0]);
+        // Правка текста после сборки дубляжа: запись устарела — тайминг оригинала.
+        proj.segments[0].tgt_text = "Пока мир".into();
+        let ev = events(&proj);
+        assert!(ev[0].starts_with("Dialogue: 1,0:00:01.00,0:00:02.00,"), "{}", ev[0]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Fallback: проект без маркеров band (ручной blur из редактора) — seg_y работает по всему

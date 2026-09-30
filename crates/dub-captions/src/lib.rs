@@ -11,6 +11,7 @@ mod font;
 mod look;
 mod timing_qc;
 mod types;
+mod word_align;
 
 pub use burn::{burn, burn_frame};
 pub use look::lum;
@@ -94,6 +95,20 @@ pub fn presets_catalog() -> (serde_json::Map<String, serde_json::Value>, Vec<Str
     }
     let reveals: Vec<String> = look::REVEALS.iter().map(|s| s.to_string()).collect();
     (presets, reveals)
+}
+
+/// Субтитр к раскладке: начало, конец, экранированный текст, y строки, услышанные слова.
+type VisSub<'a> = (f64, f64, String, Option<i64>, Option<&'a [(String, f64, f64)]>);
+
+/// Подсвечивает ли выбранный лук слова по одному (karaoke/highlight/word/pop). Тогда рендеру нужны
+/// пословные тайминги речи (`Sub::words`); при «whole» строка показывается целиком и они не нужны.
+pub fn word_timed_reveal(
+    caption_style: Option<&str>,
+    plate: Option<&str>,
+    reveal: Option<&str>,
+    font: Option<&str>,
+) -> bool {
+    look::resolve_look(caption_style, plate, reveal, font, None).is_some_and(|l| l.reveal != "whole")
 }
 
 /// Собрать ОДИН ASS с титрами + дублированными субтитрами и записать в out_ass. Порт captions.build.
@@ -214,10 +229,10 @@ pub fn build(width: i64, height: i64, out_ass: &Path, mut args: BuildArgs) -> Re
     let max_chars = ((width as f64 / (sub_fs as f64 * 0.52)) as i64).max(10) as usize;
 
     // vis: отсортированные по start, непустой tgt.
-    let mut vis: Vec<(f64, f64, String, Option<i64>)> = args
+    let mut vis: Vec<VisSub> = args
         .subs
         .iter()
-        .map(|s| (s.start, s.end, ass::esc(s.tgt.trim()).trim().to_string(), s.y))
+        .map(|s| (s.start, s.end, ass::esc(s.tgt.trim()).trim().to_string(), s.y, s.words.as_deref()))
         .collect();
     vis.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     vis.retain(|v| !v.2.is_empty());
@@ -289,17 +304,44 @@ pub fn build(width: i64, height: i64, out_ass: &Path, mut args: BuildArgs) -> Re
         if groups.is_empty() {
             groups.push(vec![tgt.clone()]);
         }
+        // Пословные тайминги по услышанным словам: страница перелистывается, когда голос доходит до её
+        // первого слова. Без слов — страницы делят экранное время поровну (как раньше).
+        let timed: Option<Vec<(f64, f64)>> = vis[idx].4.map(|heard| {
+            let tokens: Vec<&str> = src_txt.split_whitespace().collect();
+            word_align::align_words(&tokens, heard, st, en)
+        });
+        let mut page_words: Vec<std::ops::Range<usize>> = Vec::with_capacity(groups.len());
+        let mut w0 = 0usize;
+        for g in &groups {
+            let nw: usize = g.iter().map(|l| l.split_whitespace().count()).sum();
+            page_words.push(w0..w0 + nw);
+            w0 += nw;
+        }
         let per = (en - st) / groups.len() as f64;
         for (gi, g) in groups.iter().enumerate() {
-            let a = st + gi as f64 * per;
-            let b = if gi == groups.len() - 1 {
-                en
-            } else {
-                st + (gi as f64 + 1.0) * per
+            let (a, b) = match &timed {
+                Some(t) => {
+                    let a = if gi == 0 { st } else { t.get(page_words[gi].start).map(|w| w.0).unwrap_or(st) };
+                    let b = if gi == groups.len() - 1 {
+                        en
+                    } else {
+                        t.get(page_words[gi + 1].start).map(|w| w.0).unwrap_or(en)
+                    };
+                    (a, b.max(a))
+                }
+                None => {
+                    let a = st + gi as f64 * per;
+                    let b = if gi == groups.len() - 1 { en } else { st + (gi as f64 + 1.0) * per };
+                    (a, b)
+                }
             };
+            if b - a < 0.02 {
+                continue;
+            }
             if let Some(lk) = &look_resolved {
                 let cy = yy.unwrap_or((height - margin_v - sub_fs) as i64);
-                ass::emit_styled(&mut lines, lk, a, b, g, width / 2, cy, sub_fs, width, true);
+                let page_timed = timed.as_ref().and_then(|t| t.get(page_words[gi].clone()));
+                ass::emit_styled(&mut lines, lk, a, b, g, page_timed, width / 2, cy, sub_fs, width, true);
             } else {
                 // match-original -> S-style. FIT: ужать шрифт если строка переполняет.
                 let mut fs_g = sub_fs;
@@ -508,7 +550,7 @@ mod tests {
     }
 
     fn subs1() -> Vec<Sub> {
-        vec![Sub { start: 1.0, end: 3.0, tgt: "привет мир".into(), y: Some(600) }]
+        vec![Sub { start: 1.0, end: 3.0, tgt: "привет мир".into(), y: Some(600), words: None }]
     }
 
     // Реальная контрастная полоса (vision.background=hex) -> BorderStyle=3, Outline=11 = НЕПРОЗРАЧНАЯ

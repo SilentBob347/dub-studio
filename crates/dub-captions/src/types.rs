@@ -82,6 +82,9 @@ pub struct Sub {
     pub end: f64,
     pub tgt: String,
     pub y: Option<i64>,
+    /// Услышанные слова этой реплики (текст, начало, конец; секунды таймлайна): пословная подсветка
+    /// (karaoke/highlight/word/pop) и перелистывание страниц идут по ним. None — раскладка по длине слов.
+    pub words: Option<Vec<(String, f64, f64)>>,
 }
 
 /// Blur-бокс для burn: (x,y,w,h,t0,t1,fill).

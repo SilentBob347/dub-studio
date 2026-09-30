@@ -571,6 +571,10 @@
     "translated": "Legendas já no idioma de destino (sem tradução)",
     "translatedHint": "Ex.: vídeo em inglês + legendas em russo → dublagem em russo. O texto vai direto para a voz; reconhecimento e tradução são ignorados."
   },
+  "subalign": {
+    "label": "Alinhar os tempos à fala",
+    "hint": "Legendas de outra versão ou com margem de leitura? Reconhecemos a fala e colocamos cada fala onde ela é realmente dita (deslocamento e deriva corrigidos). Exige uma passagem de reconhecimento de fala. Apenas para legendas no idioma do vídeo."
+  },
   "trStyle": {
     "label": "Estilo de tradução",
     "normal": "Normal",
@@ -903,6 +907,7 @@
       "dub_audio": "Voz da dublagem",
       "render": "Exportação",
       "export_lang": "Exportação para outro idioma",
+      "align": "Alinhar com a fala",
       "download": "Download de modelos",
       "voices_pack": "Download de vozes"
     },

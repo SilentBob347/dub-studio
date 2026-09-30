@@ -43,7 +43,7 @@ pub fn preview_frame(
     // экспорте не будет (баг-репорт code-review). При burn=false пишем пустой ASS + без блюра.
     let mut blur_boxes: Vec<dub_captions::BlurBox> = Vec::new();
     if proj.subs.burn {
-        let sub_covers = build_ass(proj, &ass_p, vw, vh, total)?;
+        let sub_covers = build_ass(proj, &ass_p, Some(work_dir), vw, vh, total)?;
         // blur-боксы = project.captions.blur_boxes (hidden исключаются) + подложки под нашими субтитрами.
         blur_boxes = proj
             .captions

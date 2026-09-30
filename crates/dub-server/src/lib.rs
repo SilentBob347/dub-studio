@@ -7,6 +7,7 @@
 //! раунды; их карта в docs/PORT-CONTRACT.md.
 
 mod analyze;
+mod asr_filter;
 mod bench;
 mod casting;
 mod casting_library;
@@ -18,6 +19,7 @@ mod credentials;
 #[cfg(test)]
 mod dll_imports;
 mod downloads;
+mod dub_timing;
 mod endpoints;
 mod guard;
 mod llm_provider;
@@ -29,6 +31,7 @@ mod presets;
 mod job_store;
 mod jobs;
 mod mcp;
+mod limiter;
 mod media;
 mod models;
 mod ocr;
@@ -41,6 +44,7 @@ mod secrets_api;
 mod setup;
 mod spa;
 mod studio_settings;
+mod subalign;
 mod subimport;
 mod translate;
 mod voice_slots;
@@ -106,6 +110,7 @@ pub fn verify_captions_e2e(
         casting_ref: String::new(),
         content_type: String::new(),
         import_translated: false,
+        align_subs: false,
     };
     let sel = models::load_selection(&mroot);
     let (mt_model, mmproj) = models::resolve_mt(&mroot, &sel);
@@ -1669,6 +1674,8 @@ async fn analyze_enqueue(st: &AppState, pid: &str, args_json: Value) -> Result<S
         content_type: qget("content_type", "auto"),
         // «сабы уже на языке перевода» — эффективно только если сабы реально импортированы.
         import_translated: import_subs.is_some() && qget("import_translated", "0") == "1",
+        // выровнять тайминги импортированных субтитров по речи (полный прогон ASR ради слов).
+        align_subs: import_subs.is_some() && qget("align_subs", "0") == "1",
     };
     let post = post_analyze::PostAnalyze::from_query(&q)
         .map_err(|e| Box::new((StatusCode::BAD_REQUEST, e).into_response()))?;
@@ -1894,10 +1901,13 @@ fn clone_project_for_relang(src: &Path, dst: &Path) -> Result<(), String> {
             || name == "captioned.mp4"
             || name.starts_with("_preview")
             || name == "_original.png"
-            || name == "new_audio.m4a"
-            || name == "final_audio.m4a"
             || name == "dub_audio.m4a"
-            || name == "dub_fit.wav";
+            || name == "dub_fit.wav"
+            || name == "dub_timing.json"
+            || name == "dub_words.json"
+            || ["new_audio", "final_audio", "gained_audio", "orig_ducked"]
+                .iter()
+                .any(|stem| name == format!("{stem}.wav") || name == format!("{stem}.m4a"));
         if !skip {
             std::fs::copy(&p, dst.join(&name)).map_err(|e| format!("copy {name}: {e}"))?;
         }
@@ -2556,6 +2566,7 @@ async fn resume_project(State(st): State<AppState>, AxPath(pid): AxPath<String>)
         jobs::JobKind::Retranslate => retranslate_enqueue(&st, &pid, &rec.args).await,
         jobs::JobKind::Remix => endpoints::remix_enqueue(&st, &pid, &rec.args).await,
         jobs::JobKind::ExportLang => export_lang_enqueue(&st, &pid, &rec.args).await,
+        jobs::JobKind::Align => align_enqueue(&st, &pid).await,
         other => {
             return (StatusCode::CONFLICT, format!("джоба {} не продолжается", other.as_str())).into_response();
         }
@@ -2598,92 +2609,121 @@ fn sse_event(ev: &Value) -> Result<Event, Infallible> {
     Ok(Event::default().data(serde_json::to_string(ev).unwrap_or_default()))
 }
 
-// ─── POST /projects/{pid}/align — автоподгонка таймингов под оригинальные голоса ─────
+/// POST /projects/{pid}/align — выровнять тайминги реплик по распознанной речи (subalign, как галка
+/// «Выровнять тайминги по речи» при импорте субтитров). Джоба: распознавание слов по вокалу проекта,
+/// реплики с изменённым таймингом становятся dirty.
 pub async fn align_project(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> Response {
-    let Ok(d) = st.proj_dir(&pid) else {
-        return (StatusCode::NOT_FOUND, "project not found").into_response();
-    };
-    let mut proj = match st.load_project(&pid) {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
-    if proj.segments.is_empty() {
-        return Json(proj).into_response();
+    match align_enqueue(&st, &pid).await {
+        Ok(job_id) => Json(json!({ "job_id": job_id, "project_id": pid })).into_response(),
+        Err(resp) => *resp,
+    }
+}
+
+async fn align_enqueue(st: &AppState, pid: &str) -> Result<String, Box<Response>> {
+    let dir = st.proj_dir(pid).map_err(Box::new)?;
+    if !dir.join("project.json").is_file() {
+        return Err(Box::new((StatusCode::CONFLICT, "project not analyzed yet").into_response()));
+    }
+    let sel = models::load_selection(&st.models_root);
+    let asr = models::resolve_asr_choice(&st.repo_root, &st.models_root, &sel);
+    let backend = models::stage_backend(&st.models_root, "asr_backend");
+    let dir_for_job = dir.clone();
+    let pid_res = pid.to_string();
+    let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
+        let mut proj = Project::from_json(&std::fs::read_to_string(dir_for_job.join("project.json")).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        if proj.segments.iter().all(|s| s.src_text.trim().is_empty()) {
+            return Err("выравнивание по речи: у реплик нет текста на языке оригинала (субтитры импортированы на языке перевода)".into());
+        }
+        let wav = ["vocals16_clean.wav", "vocals16.wav"]
+            .iter()
+            .map(|f| dir_for_job.join(f))
+            .find(|p| p.is_file())
+            .ok_or("выравнивание по речи: нет дорожки вокала проекта — сначала анализ")?;
+        progress(json!({ "stage": "asr", "msg": "выравнивание по речи: распознавание слов" }));
+        std::env::set_var("DUB_ASR_BACKEND", &backend);
+        let words: Vec<subalign::Heard> = models::build_engine(&asr)
+            .transcribe(&wav, "auto")
+            .map_err(|e| format!("выравнивание по речи: распознавание: {e}"))?
+            .into_iter()
+            .flat_map(|s| s.words)
+            .map(|w| (w.word, w.start, w.end))
+            .collect();
+        jobs::check_cancelled()?;
+        let refs: Vec<(f64, f64, &str)> = proj.segments.iter().map(|s| (s.start, s.end, s.src_text.as_str())).collect();
+        let a = subalign::align(&refs, &words).ok_or("выравнивание по речи: речь не распознана — тайминги не менялись")?;
+        if a.share < subalign::MIN_ALIGNED_SHARE {
+            return Err(format!(
+                "выравнивание по речи: реплики не совпали с речью (сопоставлено {:.0}%) — тайминги не менялись",
+                a.share * 100.0
+            ));
+        }
+        let changed = apply_alignment(&mut proj, &a);
+        save_project_atomic(&dir_for_job, &proj)?;
+        progress(json!({ "stage": "asr", "msg": format!(
+            "выровнено по речи: {:.0}% реплик по словам, изменён тайминг у {changed}; сдвиг {:+.2} с",
+            a.share * 100.0, a.offset
+        ) }));
+        Ok(json!({ "project_id": pid_res, "changed": changed, "aligned_share": a.share, "offset": a.offset }))
+    });
+    st.jobs
+        .enqueue(jobs::JobMeta::persistent(jobs::JobKind::Align, pid, dir, json!({})), job)
+        .await
+        .map_err(|e| Box::new(enqueue_error(e)))
+}
+
+/// Перенести тайминги выравнивания на реплики проекта (как при импорте с выравниванием: extra.timing и
+/// исходные cue_start/cue_end). Реплика, чей тайминг сдвинулся больше чем на 10 мс, становится dirty.
+fn apply_alignment(proj: &mut Project, a: &subalign::Alignment) -> usize {
+    let mut changed = 0;
+    for (s, p) in proj.segments.iter_mut().zip(&a.cues) {
+        let how = match p.how {
+            subalign::How::Aligned => "asr_aligned",
+            subalign::How::Shifted => "asr_shifted",
+        };
+        if (s.start - p.start).abs() > 0.01 || (s.end - p.end).abs() > 0.01 {
+            s.extra.entry("cue_start").or_insert(json!(s.start));
+            s.extra.entry("cue_end").or_insert(json!(s.end));
+            s.start = p.start;
+            s.end = p.end;
+            s.dirty = true;
+            changed += 1;
+        }
+        s.extra.insert("timing".into(), Value::String(how.into()));
+    }
+    changed
+}
+
+#[cfg(test)]
+mod align_tests {
+    use super::*;
+
+    fn seg(id: &str, start: f64, end: f64) -> dub_core::Segment {
+        let mut s: dub_core::Segment = serde_json::from_value(json!({ "id": id, "start": start, "end": end, "src_text": "x", "tgt_text": "" })).unwrap();
+        s.dirty = false;
+        s
     }
 
-    let audio_file = ["ref_vocals16.wav", "audio_hq.wav"]
-        .iter()
-        .map(|f| d.join(f))
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| d.join("audio_hq.wav"));
-
-    if !audio_file.is_file() {
-        if let Ok(src_str) = tokio::fs::read_to_string(d.join("source.txt")).await {
-            let src_p = Path::new(src_str.trim());
-            if src_p.is_file() {
-                let _ = media::to_16k_mono(src_p, &audio_file);
-            }
-        }
-    }
-
-    let res = tokio::task::spawn_blocking(move || {
-        let mut count = 0usize;
-        let mut wav_path = audio_file;
-        let voc16 = d.join("vocals16_align.wav");
-        if wav_path.is_file() && media::to_16k_mono(&wav_path, &voc16).is_ok() {
-            wav_path = voc16;
-        }
-
-        if let Ok((samples, sr)) = wavio::read_mono_f32(&wav_path) {
-            let cfg = dub_asr::WindowConfig::default();
-            let (env, _) = dub_asr::speech_envelope(&samples, sr, cfg.frame_sec);
-            let spans = dub_asr::detect_active_spans(&env, cfg.frame_sec, &cfg);
-            if !spans.is_empty() {
-                const MAX_DRIFT: f64 = 1.5;
-                let mut last_end = 0.0f64;
-                for seg in &mut proj.segments {
-                    let s_center = (seg.start + seg.end) / 2.0;
-                    // Фильтруем спаны строго в локальной окрестности ±1.5с от текущего субтитра
-                    let local_spans: Vec<&(f64, f64)> = spans
-                        .iter()
-                        .filter(|span| (span.0 - seg.start).abs() <= MAX_DRIFT || (span.1 - seg.end).abs() <= MAX_DRIFT || (span.0 <= seg.end && span.1 >= seg.start))
-                        .collect();
-
-                    let best = local_spans.iter().max_by(|a, b| {
-                        let overlap_a = (a.1.min(seg.end) - a.0.max(seg.start)).max(0.0);
-                        let overlap_b = (b.1.min(seg.end) - b.0.max(seg.start)).max(0.0);
-                        if (overlap_a - overlap_b).abs() > 0.01 {
-                            overlap_a.partial_cmp(&overlap_b).unwrap()
-                        } else {
-                            let dist_a = ((a.0 + a.1) / 2.0 - s_center).abs();
-                            let dist_b = ((b.0 + b.1) / 2.0 - s_center).abs();
-                            dist_b.partial_cmp(&dist_a).unwrap()
-                        }
-                    });
-
-                    if let Some(span) = best {
-                        let new_start = (span.0 - 0.05).max(last_end).max(0.0);
-                        let new_end = (span.1 + 0.05).max(new_start + 0.1);
-                        if (new_start - seg.start).abs() <= MAX_DRIFT && (new_end - seg.end).abs() <= MAX_DRIFT {
-                            if (seg.start - new_start).abs() > 0.03 || (seg.end - new_end).abs() > 0.03 {
-                                seg.start = (new_start * 100.0).round() / 100.0;
-                                seg.end = (new_end * 100.0).round() / 100.0;
-                                seg.dirty = true;
-                                count += 1;
-                            }
-                        }
-                    }
-                    last_end = seg.end;
-                }
-            }
-        }
-        let _ = save_project_atomic(&d, &proj);
-        (count, proj)
-    }).await;
-
-    match res {
-        Ok((_count, fresh_proj)) => Json(fresh_proj).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    #[test]
+    fn moved_lines_become_dirty_and_keep_their_file_timing() {
+        let mut p: Project = serde_json::from_value(json!({ "segments": [] })).unwrap();
+        p.segments = vec![seg("s0", 1.0, 2.0), seg("s1", 3.0, 4.0)];
+        let a = subalign::Alignment {
+            cues: vec![
+                subalign::Placed { start: 1.004, end: 2.0, how: subalign::How::Aligned },
+                subalign::Placed { start: 3.5, end: 4.4, how: subalign::How::Shifted },
+            ],
+            offset: 0.5,
+            share: 0.5,
+        };
+        assert_eq!(apply_alignment(&mut p, &a), 1);
+        assert!(!p.segments[0].dirty, "сдвиг меньше 10 мс не трогает реплику");
+        assert_eq!(p.segments[0].extra["timing"], "asr_aligned");
+        let moved = &p.segments[1];
+        assert!(moved.dirty);
+        assert_eq!((moved.start, moved.end), (3.5, 4.4));
+        assert_eq!((moved.extra["cue_start"].as_f64(), moved.extra["cue_end"].as_f64()), (Some(3.0), Some(4.0)));
+        assert_eq!(moved.extra["timing"], "asr_shifted");
     }
 }
 

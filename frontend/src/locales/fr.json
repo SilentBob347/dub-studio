@@ -571,6 +571,10 @@
     "translated": "Sous-titres déjà dans la langue cible (sans traduction)",
     "translatedHint": "Ex. : vidéo anglaise + sous-titres russes → doublage russe. Le texte va directement à la voix ; reconnaissance et traduction ignorées."
   },
+  "subalign": {
+    "label": "Caler le minutage sur la parole",
+    "hint": "Sous-titres d'une autre version ou avec une marge de lecture ? Nous reconnaissons la parole et plaçons chaque réplique là où elle est réellement prononcée (décalage et dérive corrigés). Nécessite une passe de reconnaissance vocale. Uniquement pour des sous-titres dans la langue de la vidéo."
+  },
   "trStyle": {
     "label": "Style de traduction",
     "normal": "Normal",
@@ -903,6 +907,7 @@
       "dub_audio": "Voix du doublage",
       "render": "Exportation",
       "export_lang": "Export dans une autre langue",
+      "align": "Alignement sur la voix",
       "download": "Téléchargement des modèles",
       "voices_pack": "Téléchargement des voix"
     },
