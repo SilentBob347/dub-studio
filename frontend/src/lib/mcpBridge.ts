@@ -159,6 +159,17 @@ function nearbyText(element: Element): string {
   return "";
 }
 
+/** An element's words, its parts apart: a title and its caption in two spans read as two words, not one. */
+function textOf(element: Element): string {
+  const parts: string[] = [];
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = (node.textContent || "").replace(/\s+/g, " ").trim();
+    if (text) parts.push(text);
+  }
+  return parts.join(" ");
+}
+
 export function label(element: Element): string {
   const own = element.getAttribute("aria-label") || element.getAttribute("title") || "";
   if (own) return own.slice(0, 80);
@@ -166,8 +177,7 @@ export function label(element: Element): string {
     const tied = element.labels?.[0]?.textContent?.replace(/\s+/g, " ").trim();
     return (tied || nearbyText(element) || element.getAttribute("placeholder") || "").slice(0, 80);
   }
-  const text = (element.textContent || "").replace(/\s+/g, " ").trim();
-  return (text || iconName(element) || nearbyText(element)).slice(0, 80);
+  return (textOf(element) || iconName(element) || nearbyText(element)).slice(0, 80);
 }
 
 let nextRef = 1;
@@ -196,6 +206,23 @@ export const SECRET = "data-mcp-secret";
  */
 function secret(element: Element): boolean {
   return (element instanceof HTMLInputElement && element.type === "password") || element.hasAttribute(SECRET);
+}
+
+/**
+ * Marks the chosen option of every list in a copy of the page: the copy carries a list's value only as its
+ * value attribute, which a drawn list ignores, so it would show its first option.
+ */
+export function showChosenOptions(cloned: Node): void {
+  if (!(cloned instanceof Element)) return;
+  const lists = cloned instanceof HTMLSelectElement ? [cloned] : Array.from(cloned.querySelectorAll("select"));
+  for (const list of lists) {
+    const value = list.getAttribute("value");
+    if (value === null) continue;
+    for (const option of Array.from(list.options)) {
+      if (option.value === value) option.setAttribute("selected", "");
+      else option.removeAttribute("selected");
+    }
+  }
 }
 
 /** Draws a secret field of a copy of the page masked, as a password field is. */
@@ -347,7 +374,7 @@ const builtIn: Record<string, Handler> = {
     // a window that is minimised or covered draws no frames, and the copy waits for one
     if (document.visibilityState === "hidden") throw bridgeError("hidden");
     const scale = Math.min(1, (numberArg("ui_screenshot", args, "max_width") ?? 1600) / window.innerWidth);
-    const data = await domToJpeg(document.documentElement, { scale, quality: 0.9, width: window.innerWidth, height: window.innerHeight, backgroundColor: getComputedStyle(document.body).backgroundColor, onCloneEachNode: maskSecret });
+    const data = await domToJpeg(document.documentElement, { scale, quality: 0.9, width: window.innerWidth, height: window.innerHeight, backgroundColor: getComputedStyle(document.body).backgroundColor, onCloneEachNode: maskSecret, onCloneNode: showChosenOptions });
     return { image: data.replace(/^data:image\/jpeg;base64,/, ""), mime: "image/jpeg", text: `${window.innerWidth}x${window.innerHeight} window` };
   },
   read_page: (args) => {

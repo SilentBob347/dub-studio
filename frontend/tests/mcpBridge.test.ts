@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { WINDOW_ID } from "../src/lib/api";
-import { PROJECT_CHANGED, SETTINGS_CHANGED, maskSecret, readPage, startBridge, takeArgs } from "../src/lib/mcpBridge";
+import { PROJECT_CHANGED, SETTINGS_CHANGED, maskSecret, readPage, showChosenOptions, startBridge, takeArgs } from "../src/lib/mcpBridge";
 
 /** The stream the studio opens to the page, driven by the test. */
 class FakeStream {
@@ -49,6 +49,19 @@ describe("the page's side of the bridge", () => {
     const answer = posted.find((p) => p.url.endsWith("/mcp/window/result"))!;
     expect(answer.body.id).toBe("w2");
     expect(String((answer.body.result as { text: string }).text)).toContain('button "Export"');
+  });
+
+  it("draws a list of the page's copy at the option chosen, not its first", () => {
+    const copy = document.createElement("div");
+    copy.innerHTML = `<select value="ru"><option value="en" selected>EN</option><option value="ru">RU</option></select>`;
+    showChosenOptions(copy);
+    const options = Array.from(copy.querySelectorAll("option"));
+    expect(options.map((option) => option.hasAttribute("selected"))).toEqual([false, true]);
+  });
+
+  it("reads a button's title and caption as separate words", () => {
+    document.body.innerHTML = `<button><span>Models</span><span>Local engines and quants</span></button>`;
+    expect(readPage()).toContain('button "Models Local engines and quants"');
   });
 
   it("clicks by label inside an open dialog, not the control of the same name behind it", async () => {
