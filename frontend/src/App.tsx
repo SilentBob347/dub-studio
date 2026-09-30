@@ -4,7 +4,7 @@ import { motion } from "motion/react";
 import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, slot, type Selection, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
+import { api, llmProviderOf, slot, type Selection, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
 import { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
@@ -12,6 +12,8 @@ import { playSfx, sfxEnabled, setSfxEnabled } from "./lib/sfx";
 import ResourceMonitor from "./components/ResourceMonitor";
 import OpenRouterKey from "./components/OpenRouterKey";
 import ProxySection from "./components/ProxySection";
+import LlmProviders from "./components/LlmProviders";
+import OpenRouterModelSelect, { OpenRouterCatalogRow } from "./components/OpenRouterModelSelect";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -90,8 +92,7 @@ function ModelsSection() {
   const [picks, setPicks] = useState<Record<string, string>>({});
   const [err, setErr] = useState<string | null>(null);            // ошибки скачки/импорта — показываем, не глотаем
   // Облачные движки OpenRouter — НЕ отдельный блок, а альтернатива локальному движку ВНУТРИ каждой группы
-  // (перевод: Gemma|OpenRouter, TTS: Higgs|OpenRouter), как Parakeet|Whisper в ASR. Ключ общий на все стадии.
-  const [orModels, setOrModels] = useState<Record<string, { id: string }[]>>({});
+  // (перевод: Gemma|свой сервер|OpenRouter, TTS: Higgs|OpenRouter), как Parakeet|Whisper в ASR. Ключ общий на все стадии.
   const [orVoices, setOrVoices] = useState<{ name: string; gender: string; age: string; ru: boolean }[]>([]);
   const [ttsRu, setTtsRu] = useState<boolean | null>(null);
   const loadCap = () => api.capabilities().then((c) => {
@@ -104,12 +105,6 @@ function ModelsSection() {
   const selv = (k: string) => slot(cap?.selection, k) ?? "";
   const hasOrKey = cap?.selection?.or_key_set === true;
   const setSel = (k: string, v: string) => api.setSelection(k, v).then(loadCap).catch(() => {});
-  // Каталоги моделей по стадиям — динамически из OpenRouter, как только есть рабочий ключ (без хардкода id).
-  useEffect(() => {
-    if (!hasOrKey) return;
-    (["llm", "vision", "tts", "asr"] as const).forEach((kind) =>
-      api.openrouterModels(kind).then((r) => setOrModels((m) => ({ ...m, [kind]: r.models }))).catch(() => {}));
-  }, [hasOrKey]);
   // Голоса выбранной облачной TTS-модели (пол/возраст/русский) для дропдауна + предупреждения о русском.
   const orTtsModel = slot(cap?.selection, "or_tts_model") ?? "";
   useEffect(() => {
@@ -226,7 +221,7 @@ function ModelsSection() {
   const EngineTabs = ({ cloud, onLocal, onCloud, localLabel }: { cloud: boolean; onLocal: () => void; onCloud: () => void; localLabel: string }) => (
     <div className="flex gap-1 mb-1.5">
       <button onClick={onLocal} className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${!cloud ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>{localLabel}</button>
-      <button onClick={onCloud} disabled={!hasOrKey} title={hasOrKey ? "" : "Введите ключ OpenRouter ниже (Облачные настройки)"}
+      <button onClick={onCloud} disabled={!hasOrKey} title={hasOrKey ? "" : t("providers.needKey")}
         className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${cloud ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`}>OpenRouter</button>
     </div>
   );
@@ -244,12 +239,11 @@ function ModelsSection() {
     );
   };
   const orSelectCls = "w-full bg-[var(--color-surface)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[11px] mono focus:border-[var(--color-accent)] focus:outline-none";
-  const OrModelSelect = ({ kind, k, empty }: { kind: "llm" | "vision" | "tts" | "asr"; k: string; empty: string }) => (
-    <select value={selv(k)} onChange={(e) => setSel(k, e.target.value)} className={orSelectCls}>
-      <option value="">{empty}</option>
-      {(orModels[kind] ?? []).map((m) => <option key={m.id} value={m.id}>{m.id}</option>)}
-    </select>
+  // Модели OpenRouter стадии: имя, цена, контекст — из каталога (кэш на сервере).
+  const orModelSelect = (kind: "tts" | "asr", k: string, empty: string) => (
+    <OpenRouterModelSelect kind={kind} value={selv(k)} onChange={(id) => { if (id) setSel(k, id); }} placeholder={empty} />
   );
+  const needsGemma = llmProviderOf(cap?.selection, "llm") === "local" || llmProviderOf(cap?.selection, "vision") === "local";
 
   const browse = async () => {
     if (prog) return;
@@ -272,7 +266,7 @@ function ModelsSection() {
         <EngineTabs cloud={selv("or_tts_on") === "1"} localLabel="Higgs Audio v3" onLocal={() => setSel("or_tts_on", "0")} onCloud={() => setSel("or_tts_on", "1")} />
         {selv("or_tts_on") === "1" ? (
           <div className={`${orRowCls} space-y-2`}>
-            <OrModelSelect kind="tts" k="or_tts_model" empty="— выбрать TTS-модель —" />
+            {orModelSelect("tts", "or_tts_model", t("providers.pickTtsModel"))}
             {ttsRu === false && <div className="text-[11px] text-[var(--color-warn)]">⚠ Модель не поддерживает русский — выберите другую для русского дубляжа.</div>}
             <div className="flex items-center gap-2">
               <button onClick={() => setSel("or_tts_autocast", (selv("or_tts_autocast") || "1") !== "0" ? "0" : "1")}
@@ -306,7 +300,7 @@ function ModelsSection() {
             const active = e.cloud ? asrCloud : (!asrCloud && asrEngine === e.id);
             const dis = e.cloud && !hasOrKey;
             return (
-              <button key={e.id} disabled={dis} title={dis ? "Введите ключ OpenRouter ниже (Облачные настройки)" : ""}
+              <button key={e.id} disabled={dis} title={dis ? t("providers.needKey") : ""}
                 onClick={() => { if (e.cloud) { setSel("or_asr_on", "1"); } else { setSel("or_asr_on", "0"); setAsrEngine(e.id); api.setSelection("asr_engine", e.id).catch(() => {}); } }}
                 className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${active ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`}>
                 {e.label}
@@ -318,8 +312,8 @@ function ModelsSection() {
         {selv("or_asr_on") !== "1" && <BackendTabs k="asr_backend" />}
         {selv("or_asr_on") === "1" ? (
           <div className={`${orRowCls} space-y-2`}>
-            <OrModelSelect kind="asr" k="or_asr" empty="— выбрать STT-модель —" />
-            <div className="text-[11px] text-[var(--color-muted)]">Транскрипция через облако — тяжёлые локальные ASR-модели качать не нужно.</div>
+            {orModelSelect("asr", "or_asr", t("providers.pickAsrModel"))}
+            <div className="text-[11px] text-[var(--color-muted)]">{t("providers.asrCloudHint")}</div>
           </div>
         ) : asrEngine === "parakeet" ? (
           <VariantPicker base="Parakeet-TDT 0.6B v3" ids={["parakeet", "parakeet-fp32"]} />
@@ -345,20 +339,9 @@ function ModelsSection() {
         )}
       </Group>
       <Group label={t("settings.roleMt")}>
-        <EngineTabs cloud={selv("or_llm_on") === "1"} localLabel="Gemma-4 12B" onLocal={() => setSel("or_llm_on", "0")} onCloud={() => setSel("or_llm_on", "1")} />
-        {selv("or_llm_on") === "1" ? (
-          <div className={`${orRowCls} space-y-2`}>
-            <OrModelSelect kind="llm" k="or_llm" empty="— выбрать модель перевода —" />
-            <div className="flex items-center gap-2 pt-0.5">
-              <button onClick={() => setSel("or_vision_on", selv("or_vision_on") === "1" ? "0" : "1")}
-                className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${selv("or_vision_on") === "1" ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface)] border border-[var(--color-border)]"}`}>
-                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${selv("or_vision_on") === "1" ? "left-[18px]" : "left-0.5"}`} />
-              </button>
-              <span className="text-[12px]">Vision-анализ кадров через облако</span>
-            </div>
-            {selv("or_vision_on") === "1" && <OrModelSelect kind="vision" k="or_vision" empty="как модель перевода" />}
-          </div>
-        ) : (
+        {/* Перевод и vision — каждый своим провайдером: своя Gemma, локальный сервер или OpenRouter. */}
+        <LlmProviders selection={cap?.selection} hasOrKey={hasOrKey} onChanged={loadCap} />
+        {needsGemma && (
           <>
             <VariantPicker base="Gemma-4 12B QAT + vision" ids={["gemma", "gemma-q5_0", "gemma-q6_k", "gemma-q8_0"]} />
             {rowOf("llama")}
@@ -405,16 +388,17 @@ function ModelsSection() {
           (опция для слабых ПК/скорости). Ключ + число параллельных потоков; сам выбор облачного движка —
           в группах выше рядом с локальным (Higgs|OpenRouter и т.д.). */}
       <div className="mt-2 pt-3 border-t border-[var(--color-border)]">
-        <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)] mb-1.5">Облачные настройки · OpenRouter</div>
+        <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)] mb-1.5">{t("providers.cloudTitle")}</div>
         <div className="space-y-2">
           <OpenRouterKey onSaved={loadCap} />
+          <OpenRouterCatalogRow />
           {hasOrKey && (
             <div className={orRowCls}>
               <div className="flex items-center gap-2.5">
                 <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[var(--color-muted)]" />
                 <div className="min-w-0 flex-1">
-                  <div className="text-[12px] font-medium truncate">Параллельные потоки</div>
-                  <div className="mono text-[10px] text-[var(--color-muted)] truncate">чанки в N коннектов — быстрее облачные ASR/TTS/перевод (1 = без многопоточности)</div>
+                  <div className="text-[12px] font-medium truncate">{t("providers.concurrency")}</div>
+                  <div className="mono text-[10px] text-[var(--color-muted)] truncate">{t("providers.concurrencyHint")}</div>
                 </div>
                 <select value={selv("or_concurrency") || "6"} onChange={(e) => setSel("or_concurrency", e.target.value)}
                   className="shrink-0 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[11px] mono focus:border-[var(--color-accent)] focus:outline-none">
@@ -428,7 +412,7 @@ function ModelsSection() {
       {/* Прокси — В САМОМ КОНЦЕ: нужен только тем, у кого закрыт прямой доступ к HF/OpenRouter. Весь исходящий
           трафик приложения (закачка моделей + облако) через свой прокси. */}
       <div className="mt-2 pt-3 border-t border-[var(--color-border)]">
-        <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)] mb-1.5">Прокси</div>
+        <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)] mb-1.5">{t("secrets.proxyTitle")}</div>
         <ProxySection />
       </div>
     </div>
