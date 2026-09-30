@@ -1,39 +1,51 @@
-# Bundle staging (`desktop/src-tauri/staging/`)
+# Сборка релиза и staging бандла
 
-Каталог `staging/` — источник для `bundle.resources` в `tauri.conf.json`. Он **генерируется** перед
-`npx tauri build` и **не коммитится** (в `.gitignore`). Собирает то, что должно лечь рядом с `.exe` в
-NSIS/MSI-установщике и в портативной раскладке: нативный сервер, SPA, шрифты и **бандл-компоненты**
-(VC++-рантайм + OCR-модели). Модели/движки/CUDA/ffmpeg сюда **не** кладутся — они качаются при первом
-запуске (см. `crates/dub-server/src/setup.rs`, `delivery: Download`).
+Релиз собирает один скрипт: `scripts/build-release.ps1` (PowerShell 5.1, файл в UTF-8 с BOM). Версия берётся из
+`desktop/src-tauri/tauri.conf.json` и обязана совпадать с `version` в `desktop/src-tauri/Cargo.toml`.
 
-## Как собрать staging
-
-Из корня репозитория, после `cargo build --release -p dub-server` и `cd frontend && npm run build`:
-
-```bash
-STAGE=desktop/src-tauri/staging
-rm -rf "$STAGE"
-mkdir -p "$STAGE/models/higgs-engine" "$STAGE/models/ocr" "$STAGE/frontend"
-cp target/release/dub-server.exe          "$STAGE/dub-server.exe"
-cp -r frontend/dist                       "$STAGE/frontend/dist"
-cp -r fonts                               "$STAGE/fonts"
-# Бандл: VC++ runtime (delivery=Bundled)
-cp models/higgs-engine/MSVCP140.dll models/higgs-engine/VCOMP140.DLL \
-   models/higgs-engine/VCRUNTIME140.dll models/higgs-engine/VCRUNTIME140_1.dll \
-   "$STAGE/models/higgs-engine/"
-# Бандл: OCR-модели (delivery=Bundled)
-cp models/ocr/det.onnx models/ocr/cls.onnx \
-   models/ocr/rec_cyrillic.onnx models/ocr/rec_cyrillic.dict.txt \
-   models/ocr/rec_ch.onnx models/ocr/rec_ch.dict.txt \
-   "$STAGE/models/ocr/"
+```powershell
+# проверка входов без сборки
+scripts\build-release.ps1 -DryRun -ModelsSource "F:\AI\Dub Studio"
+# тесты + фронт + staging, без tauri build
+scripts\build-release.ps1 -StopAfterStaging -ModelsSource "F:\AI\Dub Studio"
+# полный релиз (ключ и пароль — в окружении или в %USERPROFILE%\.tauri)
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
+scripts\build-release.ps1 -ReleaseNotes "..." -ModelsSource "F:\AI\Dub Studio"
 ```
 
-Затем `cd desktop && npx tauri build` — NSIS (`-setup.exe`) и MSI (`_en-US.msi`) появятся в
-`desktop/src-tauri/target/release/bundle/{nsis,msi}/`.
+Что делает полный прогон:
 
-## Раскладка после установки
+1. Гейт: `cargo test --workspace`, `cargo test --manifest-path desktop/src-tauri/Cargo.toml`, фронт `npm run test`
+   (если такой скрипт есть) и `npm run build`.
+2. Staging в `desktop/src-tauri/staging/` (каталог генерируется, в git не попадает): `frontend/dist`, `fonts`,
+   `models/higgs-engine` (только VC++-рантайм), `models/ocr` (PP-OCR), `tools/openrouter-helper`. Сервер встроен в
+   exe оболочки, отдельный `dub-server.exe` в бандл не кладётся.
+3. `tauri build` с `tauri.release.conf.json` (он добавляет `bundle.resources` на staging): NSIS и MSI с подписью
+   обновлений из `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Обычная сборка и `tauri dev`
+   идут по `tauri.conf.json` и staging не требуют.
+4. `release/<версия>/`: `Dub.Studio_<версия>_x64-setup.exe` и `.sig`, MSI и `.sig`, портативный zip и
+   `latest.json` (UTF-8 без BOM, `url` с точками вместо пробелов).
 
-Установщик кладёт ресурсы **рядом с `Dub Studio.exe`** (та же раскладка, что портатив). Оболочка
-(`desktop/src-tauri/src/lib.rs::resolve_repo_root`) видит `dub-server.exe` рядом и берёт этот каталог
-за `DUB_STUDIO_ROOT`; `dub-server` находит `frontend/dist`, `fonts`, `models/higgs-engine`, `models/ocr`
-относительно него. Остальное (модели/движки) докачивается в тот же каталог по кнопке «Первый запуск».
+`models/higgs-engine` и `models/ocr` в git не лежат (gitignore): источник задаётся `-ModelsSource` (по умолчанию
+корень репозитория). Модели, движки, CUDA и ffmpeg в бандл не входят, их качает «Первый запуск»
+(`crates/dub-server/src/setup.rs`, `delivery: Download`).
+
+## Раскладка и данные
+
+Установщик и портативный zip кладут ресурсы рядом с `Dub-Studio.exe`. Оболочка
+(`desktop/src-tauri/src/layout.rs`) выбирает каталог данных (`models`, `workspace`, `voices`, `casting_library`,
+`tools`, профиль WebView2, `temp`):
+
+- рядом с exe, если туда можно писать (проверяется реальной записью);
+- иначе `%LOCALAPPDATA%\Dub Studio`; поставляемые ресурсы копируются туда при старте;
+- портативная копия (файл `portable.flag` рядом с exe) запасного пути не имеет: недоступная для записи папка — ошибка.
+
+`TEMP`/`TMP` процесса переводятся в `<каталог данных>\temp`, `WEBVIEW2_USER_DATA_FOLDER` — в
+`<каталог данных>\webview-data` (если не задан). Автообновление установленной копии идёт в ту же папку (`/D=`),
+портатив только открывает страницу релиза.
+
+## NSIS
+
+`installer-hooks.nsi` удаляет старое имя exe при обновлении, а при деинсталляции с галочкой «Удалить данные» убирает
+перечисленные каталоги данных (не `$INSTDIR` целиком). `installer-english.nsh` и `installer-russian.nsh` — языковые
+файлы установщика (английский и русский) с понятной ошибкой WebView2.
