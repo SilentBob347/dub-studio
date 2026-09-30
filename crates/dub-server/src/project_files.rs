@@ -1,6 +1,7 @@
 //! A project's files for an agent: where they are on this computer, and its
 //! lines written as SRT or plain text the way the window's export buttons
-//! write them, into any folder and without opening Explorer.
+//! write them - or as WebVTT, JSON with word timings, or ASS styled as the
+//! render burns them - into any folder and without opening Explorer.
 
 use axum::extract::{Path as AxPath, State};
 use axum::http::StatusCode;
@@ -31,7 +32,8 @@ pub async fn files(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> R
                 .filter(|path| {
                     let file = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-                    matches!(ext.as_str(), "srt" | "txt" | "ass") && file != "source.txt" && file != "name.txt"
+                    (matches!(ext.as_str(), "srt" | "vtt" | "txt" | "ass") && file != "source.txt" && file != "name.txt")
+                        || matches!(file, "transcript.json" | "translation.json")
                 })
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect()
@@ -52,11 +54,15 @@ pub async fn files(State(st): State<AppState>, AxPath(pid): AxPath<String>) -> R
     .into_response()
 }
 
-/// POST /projects/{pid}/export-text {format: srt|txt, text?: tgt|src, dir?, name?, speaker_label?}
-/// — write the lines as a file. Without dir it goes into the project's folder
-/// under the fixed name of its kind, replacing the earlier one, as the window's
-/// save-text does; a name of one's own needs dir, and there a name already
-/// taken gets (2), (3) instead of being overwritten.
+/// The formats a project's lines are written in.
+const FORMATS: &[&str] = &["srt", "vtt", "ass", "txt", "json"];
+
+/// POST /projects/{pid}/export-text {format: srt|vtt|ass|txt|json, text?: tgt|src, dir?, name?,
+/// speaker_label?, content?} — write the lines as a file. Without dir it goes
+/// into the project's folder under the fixed name of its kind, replacing the
+/// earlier one, as the window's save-text does; a name of one's own needs dir,
+/// and there a name already taken gets (2), (3) instead of being overwritten.
+/// content true answers the file's text as well.
 pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>, Json(body): Json<Value>) -> Response {
     let dir = match st.proj_dir(&pid) {
         Ok(d) => d,
@@ -67,8 +73,8 @@ pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
         Err(r) => return r,
     };
     let format = body.get("format").and_then(Value::as_str).unwrap_or_default();
-    if !matches!(format, "srt" | "txt") {
-        return (StatusCode::BAD_REQUEST, format!("format is srt or txt, not {format:?}")).into_response();
+    if !FORMATS.contains(&format) {
+        return (StatusCode::BAD_REQUEST, format!("format is one of {}, not {format:?}", FORMATS.join(", "))).into_response();
     }
     let which = body.get("text").and_then(Value::as_str).unwrap_or("tgt");
     let source = match which {
@@ -76,13 +82,11 @@ pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
         "src" => true,
         other => return (StatusCode::BAD_REQUEST, format!("text is tgt or src, not {other:?}")).into_response(),
     };
+    if format == "ass" && (proj.meta.width <= 0 || proj.meta.height <= 0) {
+        return (StatusCode::BAD_REQUEST, "ass places the subtitles on the picture, and this project is audio: take srt, vtt, txt or json").into_response();
+    }
+    let label = body.get("speaker_label").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).unwrap_or("Speaker");
     let rows = lines(&proj, source);
-    let content = if format == "srt" {
-        srt(&rows)
-    } else {
-        let label = body.get("speaker_label").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).unwrap_or("Speaker");
-        txt(&rows, label)
-    };
     let target = match destination(
         &dir,
         body.get("dir").and_then(Value::as_str),
@@ -93,10 +97,54 @@ pub async fn export_text(State(st): State<AppState>, AxPath(pid): AxPath<String>
         Ok(target) => target,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
-    if let Err(e) = std::fs::write(&target, content) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("write {}: {e}", target.display())).into_response();
+    let written = if format == "ass" {
+        let fonts = st.fonts_dir.clone();
+        let target = target.clone();
+        tokio::task::spawn_blocking(move || write_ass(&proj, source, &target, &fonts))
+            .await
+            .unwrap_or_else(|e| Err(format!("ass: {e}")))
+    } else {
+        let content = render_text(&rows, format, label);
+        std::fs::write(&target, &content).map(|_| content).map_err(|e| format!("write {}: {e}", target.display()))
+    };
+    let content = match written {
+        Ok(content) => content,
+        Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
+    };
+    let mut answer = json!({ "ok": true, "path": target.to_string_lossy(), "lines": rows.len() });
+    if body.get("content").and_then(Value::as_bool) == Some(true) {
+        answer["content"] = content.into();
     }
-    Json(json!({ "ok": true, "path": target.to_string_lossy(), "lines": rows.len() })).into_response()
+    Json(answer).into_response()
+}
+
+/// The lines as the text of a file of the format: srt, vtt, txt or json.
+pub(crate) fn render_text(rows: &[Row], format: &str, label: &str) -> String {
+    match format {
+        "srt" => srt(rows),
+        "vtt" => vtt(rows, label),
+        "json" => format!("{:#}", json_rows(rows)),
+        _ => txt(rows, label),
+    }
+}
+
+/// The subtitles as ASS, styled as the render burns them (titles, per-line
+/// text, hidden lines left out), even while they are switched off for the
+/// render; the transcript gets the recognised words in the same style, without
+/// the titles, which are the picture's translation.
+fn write_ass(proj: &Project, source: bool, target: &Path, fonts: &Path) -> Result<String, String> {
+    let mut proj = proj.clone();
+    proj.subs.mode = if source { "transcribe" } else { "translate" }.to_string();
+    if source {
+        for seg in &mut proj.segments {
+            seg.tgt_text = seg.src_text.clone();
+        }
+        proj.captions.overrides.clear();
+        proj.captions.titles.clear();
+    }
+    dub_captions::set_fonts_dir(fonts);
+    crate::render::build_ass(&proj, target, proj.meta.width, proj.meta.height, proj.meta.duration)?;
+    std::fs::read_to_string(target).map_err(|e| format!("read {}: {e}", target.display()))
 }
 
 /// Where the lines go. In the project's folder only the fixed name of their
@@ -107,6 +155,12 @@ fn destination(project_dir: &Path, dir: Option<&str>, name: Option<&str>, format
     let fixed = match (format, source) {
         ("srt", false) => "subtitles.srt",
         ("srt", true) => "transcript.srt",
+        ("vtt", false) => "subtitles.vtt",
+        ("vtt", true) => "transcript.vtt",
+        ("ass", false) => "subtitles.ass",
+        ("ass", true) => "transcript.ass",
+        ("json", false) => "translation.json",
+        ("json", true) => "transcript.json",
         (_, false) => "translation.txt",
         (_, true) => "transcript.txt",
     };
@@ -128,23 +182,36 @@ fn destination(project_dir: &Path, dir: Option<&str>, name: Option<&str>, format
     }
 }
 
-/// One line of an export: its timing, speaker and words.
-struct Row {
+/// One line of an export: its timing, speaker and words; the recognised line
+/// under a translation, and the word timings of a recognised line.
+pub(crate) struct Row {
+    id: String,
     start: f64,
     end: f64,
     speaker: String,
     text: String,
+    original: Option<String>,
+    words: Option<Value>,
 }
 
 /// The lines the window's buttons export: every line with its translation
 /// (the recognised text where it has none), or the recognised lines alone.
-fn lines(proj: &Project, source: bool) -> Vec<Row> {
+pub(crate) fn lines(proj: &Project, source: bool) -> Vec<Row> {
     proj.segments
         .iter()
         .filter(|s| !source || !s.src_text.trim().is_empty())
         .map(|s| {
-            let text = if source || s.tgt_text.is_empty() { &s.src_text } else { &s.tgt_text };
-            Row { start: s.start, end: s.end, speaker: s.speaker.clone().unwrap_or_else(|| "0".into()), text: text.trim().to_string() }
+            let translated = !source && !s.tgt_text.is_empty();
+            let text = if translated { &s.tgt_text } else { &s.src_text };
+            Row {
+                id: s.id.clone(),
+                start: s.start,
+                end: s.end,
+                speaker: s.speaker.clone().unwrap_or_else(|| "0".into()),
+                text: text.trim().to_string(),
+                original: translated.then(|| s.src_text.trim().to_string()),
+                words: if source { s.extra.get("words").filter(|words| words.is_array()).cloned() } else { None },
+            }
         })
         .collect()
 }
@@ -165,6 +232,49 @@ fn srt(rows: &[Row]) -> String {
 
 fn txt(rows: &[Row], label: &str) -> String {
     rows.iter().map(|r| format!("[{label} {}] {}", r.speaker, r.text)).collect::<Vec<_>>().join("\n")
+}
+
+/// WebVTT time: hh:mm:ss.mmm.
+fn vtt_time(seconds: f64) -> String {
+    srt_time(seconds).replace(',', ".")
+}
+
+/// Cue text as WebVTT reads it: markup characters escaped, and no blank line,
+/// which would end the cue.
+fn vtt_text(text: &str) -> String {
+    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    escaped.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
+/// WebVTT; with more than one speaker each cue names its speaker in a voice tag.
+fn vtt(rows: &[Row], label: &str) -> String {
+    let speakers: std::collections::HashSet<&str> = rows.iter().map(|r| r.speaker.as_str()).collect();
+    let voices = speakers.len() > 1;
+    let mut out = String::from("WEBVTT\n");
+    for r in rows {
+        let voice = if voices { format!("<v {} {}>", vtt_text(label), vtt_text(&r.speaker)) } else { String::new() };
+        out.push_str(&format!("\n{} --> {}\n{voice}{}\n", vtt_time(r.start), vtt_time(r.end), vtt_text(&r.text)));
+    }
+    out
+}
+
+/// The lines as JSON: id, timing, speaker and text, the recognised line under
+/// a translation (original), and the word timings of a recognised line.
+fn json_rows(rows: &[Row]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|r| {
+                let mut line = json!({ "id": r.id, "start": r.start, "end": r.end, "speaker": r.speaker, "text": r.text });
+                if let Some(original) = &r.original {
+                    line["original"] = original.clone().into();
+                }
+                if let Some(words) = &r.words {
+                    line["words"] = words.clone();
+                }
+                line
+            })
+            .collect(),
+    )
 }
 
 /// A file name without path separators or characters Windows refuses, with
@@ -229,6 +339,64 @@ mod tests {
         );
         assert_eq!(srt(&lines(&p, true)), "1\n00:00:00,000 --> 00:00:01,500\nHello\n\n2\n00:00:05,000 --> 00:00:06,000\nBye\n");
         assert_eq!(txt(&lines(&p, true), "Speaker"), "[Speaker 0] Hello\n[Speaker 0] Bye");
+    }
+
+    fn spoken() -> Project {
+        serde_json::from_value(json!({
+            "meta": { "video": "C:/v/clip.mp4", "duration": 8.0, "width": 1280, "height": 720, "fps": 25.0 },
+            "segments": [
+                { "id": "s0", "start": 0.25, "end": 1.5, "speaker": "0", "src_text": "Tom & <Jerry>", "tgt_text": "Том и Джерри",
+                  "words": [{ "word": "Tom", "start": 0.25, "end": 0.5 }, { "word": "&", "start": 0.5, "end": 0.6 }] },
+                { "id": "s1", "start": 2.0, "end": 3.25, "speaker": "1", "src_text": "Run -->\n\nnow", "tgt_text": "" },
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn webvtt_escapes_its_markup_and_names_the_speakers() {
+        let p = spoken();
+        assert_eq!(
+            render_text(&lines(&p, true), "vtt", "Speaker"),
+            "WEBVTT\n\n00:00:00.250 --> 00:00:01.500\n<v Speaker 0>Tom &amp; &lt;Jerry&gt;\n\n00:00:02.000 --> 00:00:03.250\n<v Speaker 1>Run --&gt;\nnow\n"
+        );
+        let one: Project = serde_json::from_value(json!({ "segments": [{ "id": "a", "start": 0.0, "end": 1.0, "speaker": "0", "src_text": "Hi" }] })).unwrap();
+        assert_eq!(render_text(&lines(&one, true), "vtt", "Speaker"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHi\n", "one speaker needs no voice tag");
+    }
+
+    #[test]
+    fn json_keeps_the_speakers_the_word_timings_and_the_original() {
+        let p = spoken();
+        let transcript: Value = serde_json::from_str(&render_text(&lines(&p, true), "json", "Speaker")).unwrap();
+        assert_eq!(transcript[0], json!({ "id": "s0", "start": 0.25, "end": 1.5, "speaker": "0", "text": "Tom & <Jerry>", "words": [{ "word": "Tom", "start": 0.25, "end": 0.5 }, { "word": "&", "start": 0.5, "end": 0.6 }] }));
+        assert_eq!(transcript[1]["speaker"], "1");
+        let translation: Value = serde_json::from_str(&render_text(&lines(&p, false), "json", "Speaker")).unwrap();
+        assert_eq!(translation[0], json!({ "id": "s0", "start": 0.25, "end": 1.5, "speaker": "0", "text": "Том и Джерри", "original": "Tom & <Jerry>" }));
+        assert!(translation[1].get("original").is_none(), "a line without a translation is its recognised text");
+        assert!(translation[0].get("words").is_none(), "word timings belong to the recognised words");
+    }
+
+    #[test]
+    fn ass_is_the_burned_style_and_the_transcript_leaves_the_titles_out() {
+        let folder = tempfile::tempdir().unwrap();
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fonts");
+        let mut p = spoken();
+        p.captions.titles.push(serde_json::from_value(json!({ "text": "SIGN", "tgt": "ВЫВЕСКА", "bbox": [100, 80, 300, 60], "start": 0.0, "end": 8.0 })).unwrap());
+        let subtitles = write_ass(&p, false, &folder.path().join("subtitles.ass"), &fonts).unwrap();
+        assert!(subtitles.contains("[Events]") && subtitles.contains("Том и Джерри") && subtitles.contains("ВЫВЕСКА"), "{subtitles}");
+        let transcript = write_ass(&p, true, &folder.path().join("transcript.ass"), &fonts).unwrap();
+        assert!(transcript.contains("Tom & <Jerry>") && !transcript.contains("Том и Джерри"), "{transcript}");
+        assert!(!transcript.contains("ВЫВЕСКА"), "the titles are the picture's translation");
+    }
+
+    #[test]
+    fn every_format_has_its_fixed_name() {
+        let folder = tempfile::tempdir().unwrap();
+        let named = |format: &str, source: bool| destination(folder.path(), None, None, format, source).unwrap().file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!((named("vtt", false), named("vtt", true)), ("subtitles.vtt".into(), "transcript.vtt".into()));
+        assert_eq!((named("ass", false), named("ass", true)), ("subtitles.ass".into(), "transcript.ass".into()));
+        assert_eq!((named("json", false), named("json", true)), ("translation.json".into(), "transcript.json".into()));
+        assert!(destination(folder.path(), None, Some("project"), "json", true).is_err(), "project.json is the studio's own");
     }
 
     #[test]
