@@ -565,6 +565,21 @@
     "delete": "Eliminar perfil",
     "deleteConfirm": "¿Eliminar este perfil de reparto?"
   },
+  "news": {
+    "title": "Novedades",
+    "tabNews": "Noticias",
+    "tabChangelog": "Registro de cambios",
+    "unreleased": "Sin publicar",
+    "empty": "Aún no hay nada.",
+    "changelogNote": "El registro de cambios se mantiene en inglés.",
+    "releaseNotes": "Notas de la versión",
+    "close": "Cerrar",
+    "sections": {
+      "added": "Añadido",
+      "changed": "Cambiado",
+      "fixed": "Corregido"
+    }
+  },
   "asrVariant": {
     "int8": "int8",
     "int8Hint": "Modelo base de NVIDIA, cuantización int8: rápido y ligero (~0,7 GB)",

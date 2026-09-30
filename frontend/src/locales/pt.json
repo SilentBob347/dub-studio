@@ -565,6 +565,21 @@
     "delete": "Excluir perfil",
     "deleteConfirm": "Excluir este perfil de elenco?"
   },
+  "news": {
+    "title": "Novidades",
+    "tabNews": "Notícias",
+    "tabChangelog": "Registro de alterações",
+    "unreleased": "Não lançado",
+    "empty": "Ainda não há nada.",
+    "changelogNote": "O registro de alterações é mantido em inglês.",
+    "releaseNotes": "Notas da versão",
+    "close": "Fechar",
+    "sections": {
+      "added": "Adicionado",
+      "changed": "Alterado",
+      "fixed": "Corrigido"
+    }
+  },
   "asrVariant": {
     "int8": "int8",
     "int8Hint": "Modelo base da NVIDIA, quantização int8 — rápido e leve (~0,7 GB)",

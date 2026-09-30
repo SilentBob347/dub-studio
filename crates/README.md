@@ -2,7 +2,7 @@
 
 Порт Dub Studio с Python/FastAPI на нативный стек Rust (Tauri 2 + axum). Фронт (`frontend/`) НЕ
 переписывается — Rust-сервер отдаёт тот же REST/SSE контракт, что `backend/app.py` (см.
-`docs/PORT-CONTRACT.md`). Python-код (`backend/`, `dub-engine/`) остаётся референсом до паритета.
+`docs/PORT-CONTRACT.md`). Python-код (`backend/`, `dub-engine/`) — легаси первой эры, ориентиром не служит.
 
 ## Крейты
 

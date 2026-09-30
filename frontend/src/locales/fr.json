@@ -565,6 +565,21 @@
     "delete": "Supprimer le profil",
     "deleteConfirm": "Supprimer ce profil de distribution ?"
   },
+  "news": {
+    "title": "Nouveautés",
+    "tabNews": "Actualités",
+    "tabChangelog": "Journal des modifications",
+    "unreleased": "Non publié",
+    "empty": "Rien pour le moment.",
+    "changelogNote": "Le journal des modifications est tenu en anglais.",
+    "releaseNotes": "Notes de version",
+    "close": "Fermer",
+    "sections": {
+      "added": "Ajouté",
+      "changed": "Modifié",
+      "fixed": "Corrigé"
+    }
+  },
   "asrVariant": {
     "int8": "int8",
     "int8Hint": "Modèle de base NVIDIA, quantification int8 — rapide et léger (~0,7 Go)",

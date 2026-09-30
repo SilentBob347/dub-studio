@@ -21,6 +21,7 @@ import JobFailurePanel from "./components/JobFailurePanel";
 import ProjectJobBar from "./components/ProjectJobBar";
 import { ContinueJobButton, JobStateLabel } from "./components/RecentJobBadge";
 import AgentPanel from "./components/AgentPanel";
+import WhatsNew from "./components/WhatsNew";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -803,6 +804,7 @@ function TopBar() {
           <span className="text-[12px] font-bold flex items-center gap-1"><Plus size={13} /> {t("nav.new")}</span>
           <span className="text-[9px] text-[var(--color-muted)] font-normal leading-none mt-0.5">{t("manual.newSub")}</span>
         </button>
+        <WhatsNew />
         <button onClick={() => setHelp(true)} title={t("help.title")}
           className="p-1.5 rounded-md text-[var(--color-muted)] hover:text-[var(--color-text)] transition-colors"><HelpCircle size={18} /></button>
         <button onClick={() => setSettings(true)} title={t("settings.title")}
