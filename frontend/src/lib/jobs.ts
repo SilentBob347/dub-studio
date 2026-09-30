@@ -33,6 +33,28 @@ export async function watchTracked(pid: string, kind: JobKind, jobId: string, fa
   }
 }
 
+// Джобы, за которыми следит сам редактор. Полоса джоб проекта их не подхватывает: итог обрабатывает
+// тот, кто их поставил, а id остаётся здесь и после конца, чтобы подписка полосы не обработала его второй раз.
+const ownJobIds = new Set<string>();
+export const isOwnJob = (jobId: string): boolean => ownJobIds.has(jobId);
+
+// Следить за джобой, поставленной из редактора: пока она идёт, полоса джоб проекта показывает её этап и «Отменить».
+export async function watchLocal(pid: string, kind: JobKind, jobId: string, onEvent: (e: JobEvent) => void): Promise<unknown> {
+  ownJobIds.add(jobId);
+  useStore.getState().putLocalJob({ id: jobId, kind, pid, stage: "", msg: "", ahead: null });
+  try {
+    return await api.watchJob(jobId, (e) => {
+      const s = useStore.getState();
+      if (e.type === "queued") s.patchLocalJob(jobId, { ahead: e.position ?? null });
+      else if (e.type === "running") s.patchLocalJob(jobId, { ahead: null });
+      else if (e.type === "progress") s.patchLocalJob(jobId, { stage: e.stage ?? "", msg: e.msg ?? "", ahead: null });
+      onEvent(e);
+    });
+  } finally {
+    useStore.getState().dropLocalJob(jobId);
+  }
+}
+
 // Можно ли продолжить последнюю джобу проекта (job.json).
 export const RESUMABLE_STATES: ReadonlySet<JobState> = new Set<JobState>(["failed", "interrupted", "cancelled"]);
 

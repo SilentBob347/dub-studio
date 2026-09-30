@@ -749,6 +749,7 @@
       "job_record_broken": "El registro de la tarea está dañado"
     },
     "busy": "El proyecto está ocupado: {{kind}} en curso",
-    "waitingFor": "Esperando a que termine {{kind}} en este proyecto"
+    "waitingFor": "Esperando a que termine {{kind}} en este proyecto",
+    "cancelledKind": "{{kind}}: cancelado"
   }
 }

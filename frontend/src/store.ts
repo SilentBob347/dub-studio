@@ -5,6 +5,8 @@ type Stage = "boot" | "setup" | "empty" | "analyzing" | "editor" | "batch" | "mu
 export type ExportItem = { id: string; name: string; status: "rendering" | "done" | "error"; msg: string; url?: string; pid?: string };
 export type Activity = { t: number; text: string; kind: "work" | "done" | "error" };   // строка лога «что делает приложение»
 export type CurrentJob = { id: string; kind: JobKind; pid: string };
+// Джоба, за которой следит сам редактор (экспорт, озвучка, ремикс): полоса джоб проекта показывает её с «Отменить».
+export type LocalJob = { id: string; kind: JobKind; pid: string; stage: string; msg: string; ahead: number | null };
 // Джоба упала на экране анализа: ждём решения пользователя (продолжить с места остановки или назад).
 export type JobFailure = { pid: string; msg: string; resolve: (choice: "continue" | "back") => void };
 
@@ -54,6 +56,11 @@ type State = {
   clearResumed: () => void;
   jobFailure: JobFailure | null;
   setJobFailure: (f: JobFailure | null) => void;
+  localJobs: LocalJob[];
+  putLocalJob: (j: LocalJob) => void;
+  patchLocalJob: (id: string, patch: Partial<LocalJob>) => void;
+  dropLocalJob: (id: string) => void;
+  jobsRev: number;                   // растёт на каждом конце джобы редактора: полоса джоб перечитывает итог проекта
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -133,4 +140,9 @@ export const useStore = create<State>((set, get) => ({
   clearResumed: () => set({ resumedStages: [] }),
   jobFailure: null,
   setJobFailure: (jobFailure) => set({ jobFailure }),
+  localJobs: [],
+  putLocalJob: (j) => set((s) => ({ localJobs: [...s.localJobs.filter((x) => x.id !== j.id), j] })),
+  patchLocalJob: (id, patch) => set((s) => ({ localJobs: s.localJobs.map((x) => (x.id === id ? { ...x, ...patch } : x)) })),
+  dropLocalJob: (id) => set((s) => ({ localJobs: s.localJobs.filter((x) => x.id !== id), jobsRev: s.jobsRev + 1 })),
+  jobsRev: 0,
 }));

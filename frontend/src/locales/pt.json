@@ -749,6 +749,7 @@
       "job_record_broken": "O registro da tarefa está corrompido"
     },
     "busy": "O projeto está ocupado: {{kind}} em andamento",
-    "waitingFor": "Aguardando {{kind}} deste projeto terminar"
+    "waitingFor": "Aguardando {{kind}} deste projeto terminar",
+    "cancelledKind": "{{kind}}: cancelado"
   }
 }

@@ -37,7 +37,7 @@ fn fixture_root(tag: &str) -> PathBuf {
 }
 
 async fn call(app: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
-    let req = Request::builder().method(method).uri(uri).body(Body::empty()).unwrap();
+    let req = Request::builder().method(method).uri(uri).header("host", "127.0.0.1:8793").body(Body::empty()).unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();

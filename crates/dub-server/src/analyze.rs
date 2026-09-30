@@ -425,9 +425,9 @@ fn has_speech_text(text: &str) -> bool {
     text.chars().any(char::is_alphanumeric)
 }
 
-const DIAR_VER: &str = "nemotron3-diar-v3 · offline · merge_gap=0.8 · min_spk=2.5 · out-v2";
+const DIAR_VER: &str = "nemotron3-diar-v3 · offline · merge_gap=0.8 · min_spk=10%[1.5..2.5] · out-v2";
 const ASR_VER: &str = "asr-v2";
-const TRANSLATE_VER: &str = "gemma-ctx-v2";
+const TRANSLATE_VER: &str = "gemma-ctx-v3";
 const OCR_VER: &str = "ppocr-onnx-v2";
 const CAST_VER: &str = "casting-v1";
 

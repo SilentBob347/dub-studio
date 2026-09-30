@@ -729,6 +729,7 @@
       "job_record_broken": "任务记录已损坏"
     },
     "busy": "项目忙碌中：正在进行{{kind}}",
-    "waitingFor": "正在等待此项目的{{kind}}完成"
+    "waitingFor": "正在等待此项目的{{kind}}完成",
+    "cancelledKind": "{{kind}}：已取消"
   }
 }

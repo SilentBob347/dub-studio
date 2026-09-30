@@ -15,7 +15,7 @@ import { GENDER_LABEL_KEY, genderKey } from "./lib/gender";
 import OpenRouterKey from "./components/OpenRouterKey";
 import ProxySection from "./components/ProxySection";
 import { ANALYZE_STEPS, STAGE_TO_STEPKEY } from "./lib/stages";
-import { enqueueWhenFree, finishAnalyze, reportVoiceSlots, watchWithResume } from "./lib/jobs";
+import { enqueueWhenFree, finishAnalyze, reportVoiceSlots, watchLocal, watchTracked, watchWithResume } from "./lib/jobs";
 import CancelJobButton from "./components/CancelJobButton";
 import JobFailurePanel from "./components/JobFailurePanel";
 import ProjectJobBar from "./components/ProjectJobBar";
@@ -2594,6 +2594,12 @@ function Editor() {
     addExport({ id: `err-${Date.now()}`, name: t("common.error"), status: "error", msg: String(err) });
     try { setProject(await api.getProject(pid)); } catch { /* offline -> keep optimistic state */ }
   }
+  // Джобу отменили кнопкой в полосе джоб: не ошибка — строка в журнале и проект в том виде, в каком его оставила джоба.
+  async function jobCancelled(kind: JobKind) {
+    pushActivity(t("jobs.cancelledKind", { kind: t(`jobs.kind.${kind}`) }), "done");
+    try { setProject(await api.getProject(pid)); bump(); }
+    catch (err) { pushActivity(String(err), "error"); }
+  }
   async function persistSeg(id: string, tgt: string) {               // on blur -> persist to backend + refresh frame
     setRendered(false);
     try { setProject(await api.patch(pid, { op: "segment", id, tgt_text: tgt })); bump(); }
@@ -2616,7 +2622,7 @@ function Editor() {
   }
   // По проекту уже идёт озвучка или экспорт: новая джоба ждёт её конца (журнал говорит, чего ждём).
   const waitNote = (kind: JobKind) => pushActivity(t("jobs.waitingFor", { kind: t(`jobs.kind.${kind}`) }), "work");
-  const watchDub = (jobId: string) => api.watchJob(jobId, (e) => {
+  const watchDub = (jobId: string) => watchLocal(pid, "dub_audio", jobId, (e) => {
     if (e.type === "progress") {
       if (e.msg) useStore.getState().pushActivity(e.msg, "work");
       useStore.getState().setProgress(e.stage || "tts", e.msg || "", e.pct ?? null);
@@ -2630,7 +2636,7 @@ function Editor() {
       const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);   // ре-TTS ТОЛЬКО dirty-сегмент -> свежая озвучка (без сборки видео; финал — на Экспорте)
       await watchDub(job_id);
       setProject(await api.getProject(pid)); setRendered(false); bump(); bumpDub(); playSfx("notify");   // refresh preview + reload the re-rendered dub audio
-    } catch (e) { await surfaceErr(e); }
+    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
     finally { setRegenId(null); }
   }
   // hide/del/keep одной строки: патч проекта (без авто-ре-озвучки; рендер — по кнопке)
@@ -2712,7 +2718,7 @@ function Editor() {
       const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);   // ре-TTS всех сегментов -> свежая озвучка (видео на Экспорте)
       await watchDub(job_id);
       setProject(await api.getProject(pid)); setRendered(false); bump(); bumpDub(); playSfx("notify");   // покадровое превью; /dub обновлён -> плей играет новый дуб
-    } catch (e) { await surfaceErr(e); }
+    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
     finally { setRegenId(null); }
   }
   function playFull() {                                               // bottom-bar Play: play the whole dub from the playhead
@@ -2755,7 +2761,7 @@ function Editor() {
     setRendering(true); pushActivity(`${t("export.proceed")}: ${name}`);
     try {
       const { job_id } = await enqueueWhenFree(() => api.render(pid), (kind) => { updateExport(exId, { msg: t("jobs.waitingFor", { kind: t(`jobs.kind.${kind}`) }) }); waitNote(kind); });
-      await api.watchJob(job_id, (e) => { if (e.type === "progress") { updateExport(exId, { msg: e.msg || "" }); pushActivity(e.msg || "", "work"); } });
+      await watchLocal(pid, "render", job_id, (e) => { if (e.type === "progress") { updateExport(exId, { msg: e.msg || "" }); pushActivity(e.msg || "", "work"); } });
       updateExport(exId, { status: "done", msg: "", url: `${api.outputUrl(pid)}?rev=${Date.now()}` });   // bust cache on re-export
       // Раскрыть реальный выход в проводнике: контейнер может быть output.mkv (#113, сохранена ориг. дорожка) —
       // не хардкодим .mp4. Расширение из project.json (keep_original_track + container), иначе .mp4.
@@ -2765,7 +2771,12 @@ function Editor() {
       pushActivity(`${t("compare.result")}: ${name}`, "done"); playSfx("success");
       setRendered(true); bumpDub();   // /dub now serves the freshly rendered output.mp4 -> reload <audio>
     } catch (err) {
-      updateExport(exId, { status: "error", msg: String(err) }); pushActivity(String(err), "error"); playSfx("error");
+      if (err instanceof JobCancelledError) {
+        updateExport(exId, { status: "error", msg: t("jobs.state.cancelled") });
+        pushActivity(t("jobs.cancelledKind", { kind: t("jobs.kind.render") }), "done");
+      } else {
+        updateExport(exId, { status: "error", msg: String(err) }); pushActivity(String(err), "error"); playSfx("error");
+      }
     } finally { setRendering(false); }
   }
   async function doRemix() {                                            // Gemma rewrites the WHOLE script on a theme
@@ -2774,12 +2785,12 @@ function Editor() {
     try {
       pushHistory(p);
       const { job_id } = await api.remix(pid, remixText.trim());
-      await api.watchJob(job_id, (e) => { if (e.type === "progress") useStore.getState().setProgress(e.stage || "remix", e.msg || t("remix.apply"), e.pct ?? null); });
+      await watchLocal(pid, "remix", job_id, (e) => { if (e.type === "progress") useStore.getState().setProgress(e.stage || "remix", e.msg || t("remix.apply"), e.pct ?? null); });
       setRendered(false);
       setProject(await api.getProject(pid));                            // rewritten transcript -> shows in the lane
       bump(); setLane("subs");                                          // показать переписанный текст сразу
       useStore.getState().setProgress("done", t("remix.apply"), null); // done-строка в журнале
-    } catch (err) { await surfaceErr(err); }                           // было: тихий console.error -> провал не был виден
+    } catch (err) { if (err instanceof JobCancelledError) await jobCancelled("remix"); else await surfaceErr(err); }
     finally { setRemixing(false); }
   }
 
@@ -4306,12 +4317,7 @@ function TranscriptView() {
     setStage("analyzing");
     try {
       const { job_id } = await api.retranslate(pid, tgt, mode);
-      await api.watchJob(job_id, (e) => {
-        if (e.type === "progress") {
-          if (e.msg) useStore.getState().pushActivity(e.msg, "work");
-          setProgress(e.stage || "", e.msg || "", e.pct ?? null);
-        }
-      });
+      await watchTracked(pid, "retranslate", job_id);
       const updated = await api.getProject(pid);
       if (updated.mode === "transcribe") {
         const patched = await api.patch(pid, { mode });
@@ -4320,7 +4326,14 @@ function TranscriptView() {
         setProject(updated);
       }
       setStage("editor");
-    } catch {
+    } catch (err) {
+      if (err instanceof JobCancelledError) {                        // перевод отменили на экране анализа: транскрипт остаётся транскриптом
+        useStore.getState().pushActivity(t("jobs.cancelledKind", { kind: t("jobs.kind.retranslate") }), "done");
+        try { setProject(await api.getProject(pid)); }
+        catch (e) { useStore.getState().pushActivity(String(e), "error"); }
+        setStage("editor");
+        return;
+      }
       try {
         const patched = await api.patch(pid, { mode });
         setProject(patched);

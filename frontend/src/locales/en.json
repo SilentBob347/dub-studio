@@ -739,6 +739,7 @@
       "job_record_broken": "The task record is damaged"
     },
     "busy": "The project is busy: {{kind}} is in progress",
-    "waitingFor": "Waiting for {{kind}} on this project to finish"
+    "waitingFor": "Waiting for {{kind}} on this project to finish",
+    "cancelledKind": "{{kind}}: cancelled"
   }
 }

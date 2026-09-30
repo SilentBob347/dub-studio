@@ -749,6 +749,7 @@
       "job_record_broken": "L'enregistrement de la tâche est endommagé"
     },
     "busy": "Le projet est occupé : {{kind}} en cours",
-    "waitingFor": "En attente de la fin de {{kind}} sur ce projet"
+    "waitingFor": "En attente de la fin de {{kind}} sur ce projet",
+    "cancelledKind": "{{kind}} : annulé"
   }
 }
