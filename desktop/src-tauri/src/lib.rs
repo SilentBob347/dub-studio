@@ -1,16 +1,20 @@
 //! Tauri-оболочка Dub Studio. Ничего тяжёлого сама не делает: поднимает нативный `dub-server`
-//! (axum, тот же REST/SSE-контракт, что бэкенд-питон) на 127.0.0.1:<свободный порт> и открывает
-//! окно на этот URL. Сервер сам раздаёт SPA (frontend/dist) и API на одном origin — фронт работает
-//! с относительными путями без правок.
+//! (axum, тот же REST/SSE-контракт, что бэкенд-питон) на 127.0.0.1:8793 (`DUB_STUDIO_PORT`) и
+//! открывает окно на этот URL. Сервер сам раздаёт SPA (frontend/dist) и API на одном origin — фронт
+//! работает с относительными путями без правок, а постоянный порт держит origin, и с ним
+//! localStorage окна, одинаковым между запусками. Если на порту уже отвечает Dub Studio, второй
+//! сервис не поднимается, а окно открывается на неё; второй запуск релизной сборки на порту по
+//! умолчанию отдаёт фокус уже открытому окну.
 //!
 //! Портативность взята из эталона Higgs-Ultimate (desktop/src-tauri/src/lib.rs):
 //! app_root_dir = каталог рядом с exe; WEBVIEW2_USER_DATA_FOLDER и рантайм-модели держим там же.
 
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use dub_server::service::{self, Claim};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// Каталог рядом с exe (портативная установка). Дев-режим: корень репозитория.
 fn app_root_dir() -> PathBuf {
@@ -46,23 +50,76 @@ fn resolve_repo_root() -> PathBuf {
     exe_dir
 }
 
-/// Занять свободный TCP-порт на 127.0.0.1 (ядро выдаёт порт 0 -> читаем реальный, отпускаем).
-fn pick_free_port() -> std::io::Result<u16> {
-    let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
-    Ok(listener.local_addr()?.port())
+/// Ждать, пока встроенный сервер ответит на /health, или его поток не сообщит, что остановился.
+fn wait_for_own_service(port: u16, stopped: &Receiver<Result<(), String>>) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if service::wait_until_serving(port, Duration::from_millis(500)) {
+            return Ok(());
+        }
+        match stopped.try_recv() {
+            Ok(Err(e)) => return Err(format!("Встроенный сервер Dub Studio не запустился: {e}")),
+            Ok(Ok(())) => return Err("Встроенный сервер Dub Studio остановился сразу после запуска.".into()),
+            Err(TryRecvError::Disconnected) => {
+                return Err("Поток встроенного сервера Dub Studio аварийно завершился при запуске.".into())
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Встроенный сервер Dub Studio не ответил на 127.0.0.1:{port} за 30 с."
+            ));
+        }
+    }
 }
 
-/// Дождаться, пока сервер начнёт принимать соединения (или таймаут).
-fn wait_until_ready(port: u16, timeout: Duration) -> bool {
-    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if TcpStream::connect_timeout(&addr.into(), Duration::from_millis(200)).is_ok() {
-            return true;
+/// Окна ещё нет, консоль скрыта: единственный способ сказать пользователю, почему студия не
+/// открылась, — нативный диалог.
+fn fatal(message: &str) {
+    eprintln!("[ERROR] {message}");
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Dub Studio")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+/// tauri-plugin-single-instance называет мьютекс и окно только по identifier, общему у установленной,
+/// портативной и дев-сборок: с ним дев-копия рядом с открытой установленной молча выходила бы, подняв
+/// старое окно. Замок нужен только релизной сборке на порту по умолчанию; дев-сборка и копия с явным
+/// `DUB_STUDIO_PORT` живут на своём порту, а на том же — открывают окно на уже работающий сервис.
+fn single_instance_wanted() -> bool {
+    !cfg!(debug_assertions) && !service::port_is_explicit()
+}
+
+/// Поднять встроенный сервис на порту или найти уже работающий. Err — текст для пользователя.
+fn start_or_reuse_service(repo_root: &std::path::Path) -> Result<u16, String> {
+    let port = service::listen_port()?;
+    match service::claim_port(port, Duration::from_secs(20)).map_err(|busy| busy.to_string())? {
+        Claim::Bound(listener) => {
+            let root = repo_root.to_path_buf();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("dub-server".into())
+                .spawn(move || {
+                    let result = dub_server::serve_blocking(&root, listener).map_err(|e| format!("{e:#}"));
+                    if let Err(e) = &result {
+                        eprintln!("[ERROR] встроенный dub-server остановился: {e}");
+                    }
+                    let _ = tx.send(result);
+                })
+                .map_err(|e| format!("Не удалось запустить поток сервера Dub Studio: {e}"))?;
+            wait_for_own_service(port, &rx)?;
         }
-        std::thread::sleep(Duration::from_millis(120));
+        Claim::AlreadyRunning(running) => {
+            eprintln!(
+                "на 127.0.0.1:{port} уже работает Dub Studio {} ({}): окно откроется на неё",
+                running.version, running.service_executable
+            );
+        }
     }
-    false
+    Ok(port)
 }
 
 /// Прописать ORT_DYLIB_PATH (onnxruntime 1.28) в окружение ПРОЦЕССА до старта сервера (dub-asr трогает ort
@@ -101,7 +158,21 @@ fn spawn_update_check(app: tauri::AppHandle, portable: bool) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     use tauri_plugin_updater::UpdaterExt;
     tauri::async_runtime::spawn(async move {
-        let updater = match app.updater() {
+        // Установщик — ребёнок этого процесса, а процесс сидит в своём job с kill-on-close: без
+        // освобождения установщик умер бы вместе со студией, ничего не поставив. Свой хук заменяет
+        // штатный, поэтому cleanup_before_exit вызывается здесь же.
+        let cleanup = app.clone();
+        let updater = match app
+            .updater_builder()
+            .on_before_exit(move || {
+                cleanup.cleanup_before_exit();
+                dub_server::process_group::terminate_group_members();
+                if !dub_server::process_group::release_children() {
+                    eprintln!("[ERROR] установщик обновления не выведен из job object студии");
+                }
+            })
+            .build()
+        {
             Ok(u) => u,
             Err(_) => return,
         };
@@ -124,8 +195,19 @@ fn spawn_update_check(app: tauri::AppHandle, portable: bool) {
                 ))
                 .blocking_show();
             if open {
-                use tauri_plugin_opener::OpenerExt;
-                let _ = app.opener().open_url(RELEASES_URL, None::<&str>);
+                // Браузер, запущенный изнутри job студии, закрылся бы вместе с ней.
+                let opened = dub_server::process_group::detach_from_group(
+                    &mut std::process::Command::new("explorer"),
+                )
+                .arg(RELEASES_URL)
+                .spawn();
+                if let Err(e) = opened {
+                    app.dialog()
+                        .message(format!("Не удалось открыть {RELEASES_URL}: {e}"))
+                        .title("Обновление Dub Studio")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                }
             }
             return;
         }
@@ -187,6 +269,11 @@ fn hide_console_window() {
 }
 
 pub fn run() {
+    // Что бы ни завершило процесс — окно, диспетчер задач, taskkill, падение, — llama-server,
+    // bs_roformer-cli, whisper, ffmpeg и openrouter-helper уходят вместе с ним.
+    if !dub_server::process_group::bind_children_to_this_process() {
+        eprintln!("[ERROR] процесс не встал в свой job object: сайдкары гасятся только своими деструкторами");
+    }
     #[cfg(windows)]
     hide_console_window();
     // Портатив: состояние WebView2 (localStorage) держим рядом с exe, а не в профиле пользователя.
@@ -198,31 +285,42 @@ pub fn run() {
     }
 
     let repo_root = resolve_repo_root();
-    let port = pick_free_port().unwrap_or(8765);
     setup_server_env(&repo_root);
 
-    // axum-бэкенд поднимается В ЭТОМ ЖЕ процессе на фоновом потоке — ОДИН exe, без dub-server.exe-сайдкара.
-    // Поток-демон: живёт до выхода процесса, отдельно убивать не нужно (нет дочернего процесса).
-    let root = repo_root.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = dub_server::serve_blocking(&root, port) {
-            eprintln!("встроенный dub-server упал: {e}");
-        }
-    });
+    let context = tauri::generate_context!();
+    service::set_app_version(context.package_info().version.to_string());
 
-    // Ждём готовности сервера, чтобы окно не открылось на пустоту.
-    if !wait_until_ready(port, Duration::from_secs(30)) {
-        eprintln!("встроенный dub-server не поднялся на 127.0.0.1:{port} за 30с");
+    let mut builder = tauri::Builder::default();
+    if single_instance_wanted() {
+        // Первым: второй запуск должен уйти до остальной настройки, отдав фокус открытому окну.
+        // Сервис поднимается только в .setup(), который Tauri зовёт после setup плагинов: второй
+        // запуск выходит здесь, не тронув порт, и сервер живёт в процессе, чьё окно останется.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let shown = win.unminimize().and_then(|_| win.show()).and_then(|_| win.set_focus());
+                if let Err(e) = shown {
+                    eprintln!("[ERROR] повторный запуск: окно Dub Studio не вышло на передний план: {e}");
+                }
+            }
+        }));
     }
-
-    let url = format!("http://127.0.0.1:{port}/");
-
-    tauri::Builder::default()
+    builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            // axum-бэкенд поднимается В ЭТОМ ЖЕ процессе на фоновом потоке — ОДИН exe, без dub-server.exe-сайдкара.
+            // Окно открывается только после ответа /health, чтобы не встать на пустую страницу.
+            let port = match start_or_reuse_service(&repo_root) {
+                Ok(p) => p,
+                Err(message) => {
+                    fatal(&message);
+                    app.handle().exit(1);
+                    return Ok(());
+                }
+            };
+            let url = format!("http://127.0.0.1:{port}/");
             // Иконка бандла для GUI-окна: без явной установки окно оставалось пустым в ALT+TAB/панели задач
             // (иконка висела на консольном окне). Ставим её на само GUI-окно.
             let icon = app.default_window_icon().cloned();
@@ -247,6 +345,6 @@ pub fn run() {
             spawn_update_check(app.handle().clone(), is_portable());
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("ошибка запуска Tauri");
 }

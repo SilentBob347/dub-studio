@@ -85,7 +85,8 @@ GPU-провайдер (`--features cuda` + CUDA EP) снимает это ог�
 ### Сервер
 ```bash
 DUB_STUDIO_ROOT=<repo> ORT_DYLIB_PATH=<...>/onnxruntime-1.28.dll ./target/release/dub-server
-#   слушает 127.0.0.1:8765 (порт: env DUB_STUDIO_PORT). Раздаёт SPA (frontend/dist) + API.
+#   слушает 127.0.0.1:8793 (порт: env DUB_STUDIO_PORT). Раздаёт SPA (frontend/dist) + API.
+#   Если на порту уже отвечает Dub Studio (GET /health, app=="dub-studio"), второй сервис не поднимается.
 ```
 
 ### Десктоп (Tauri-оболочка)
@@ -93,7 +94,14 @@ DUB_STUDIO_ROOT=<repo> ORT_DYLIB_PATH=<...>/onnxruntime-1.28.dll ./target/releas
 # frontend собрать заранее: (cd frontend && npm ci && npm run build)
 cd desktop && npx tauri build --no-bundle      # -> desktop/src-tauri/target/release/dub-studio-desktop.exe
 ```
-Оболочка поднимает `dub-server` на 127.0.0.1:<свободный порт> и открывает окно на этот URL.
+Оболочка поднимает `dub-server` на 127.0.0.1:8793 (`DUB_STUDIO_PORT`) и открывает окно на этот URL; если там
+уже отвечает Dub Studio, окно открывается на неё. Повторный запуск релизной сборки на порту по умолчанию
+отдаёт фокус открытому окну; дев-сборка (`tauri dev`, `target/debug`) и копия с явным `DUB_STUDIO_PORT` в этот
+замок не встают и запускаются рядом с установленной студией.
+Порт занят чужим процессом — 20 с повторов, затем диалог с причиной. Сайдкары живут в job object процесса
+(`dub_server::process_group`) и не переживают студию.
+Установщик (NSIS/MSI) — `npm run bundle` в `desktop/` (`tauri build --config src-tauri/tauri.bundle.conf.json`):
+`bundle.resources` из `staging/` подключаются только там, dev и `cargo build` оболочки работают без staging.
 Портатив: рантайм (onnxruntime.dll, models/) держится рядом с exe; WEBVIEW2_USER_DATA_FOLDER там же.
 
 ## Статус (раунд 2)

@@ -1,7 +1,12 @@
 # Bundle staging (`desktop/src-tauri/staging/`)
 
-Каталог `staging/` — источник для `bundle.resources` в `tauri.conf.json`. Он **генерируется** перед
-`npx tauri build` и **не коммитится** (в `.gitignore`). Собирает то, что должно лечь рядом с `.exe` в
+Каталог `staging/` — источник для `bundle.resources` в `tauri.bundle.conf.json`. Этот конфиг подключается
+только при сборке установщика (`--config`), поэтому `tauri dev`, `npm run build` (`--no-bundle`) и
+`cargo build` оболочки работают без staging. Установщик без этих ресурсов собрать нельзя: в `tauri.conf.json`
+`bundle.active` = false (обычный `tauri build` даёт только exe), а `beforeBundleCommand` там падает с подсказкой
+для `tauri build --bundles …` и `tauri bundle`; `tauri.bundle.conf.json` включает бандл и снимает эту заглушку.
+Каталог **генерируется** перед
+сборкой установщика и **не коммитится** (в `.gitignore`). Собирает то, что должно лечь рядом с `.exe` в
 NSIS/MSI-установщике и в портативной раскладке: нативный сервер, SPA, шрифты и **бандл-компоненты**
 (VC++-рантайм + OCR-модели). Модели/движки/CUDA/ffmpeg сюда **не** кладутся — они качаются при первом
 запуске (см. `crates/dub-server/src/setup.rs`, `delivery: Download`).
@@ -28,7 +33,7 @@ cp models/ocr/det.onnx models/ocr/cls.onnx \
    "$STAGE/models/ocr/"
 ```
 
-Затем `cd desktop && npx tauri build` — NSIS (`-setup.exe`) и MSI (`_en-US.msi`) появятся в
+Затем `cd desktop && npx tauri build --config src-tauri/tauri.bundle.conf.json` (то же: `npm run bundle`) — NSIS (`-setup.exe`) и MSI (`_en-US.msi`) появятся в
 `desktop/src-tauri/target/release/bundle/{nsis,msi}/`.
 
 ## Раскладка после установки

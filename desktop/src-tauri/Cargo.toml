@@ -2,7 +2,7 @@
 name = "dub-studio-desktop"
 version = "3.1.1"
 edition = "2021"
-description = "Tauri-оболочка Dub Studio: поднимает dub-server на 127.0.0.1:<рандомный порт> и открывает окно"
+description = "Tauri-оболочка Dub Studio: поднимает dub-server на 127.0.0.1:8793 (DUB_STUDIO_PORT) и открывает окно"
 
 [lib]
 name = "dub_studio_desktop_lib"
@@ -16,7 +16,9 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"   # авто-обновление: качает подписанный NSIS с GitHub-релиза, ставит в один клик
 tauri-plugin-dialog = "2"    # нативный диалог «Обновить? [Обновить] [Позже]»
-tauri-plugin-opener = "2"    # открыть страницу релиза (портатив) — замена устаревшего shell.open
+tauri-plugin-opener = "2"    # opener:default окна; страницу релиза оболочка открывает сама, вне job (spawn_update_check)
+tauri-plugin-single-instance = "2"  # второй запуск отдаёт фокус уже открытому окну
+rfd = "0.17"                 # диалог ошибки старта, когда окна Tauri ещё нет
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # axum-бэкенд встроен В ЭТОТ ЖЕ процесс (один exe, без dub-server.exe-сайдкара): serve_blocking с фонового потока.
