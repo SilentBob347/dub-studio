@@ -29,6 +29,7 @@ mod media;
 mod models;
 mod ocr;
 mod patch;
+mod post_analyze;
 mod record;
 mod render;
 mod secrets_api;
@@ -781,34 +782,14 @@ async fn voice_slots_assign(
         Err(r) => return r,
     };
     // Списки имён из тела; проверяем существование каждого в voices/ (.wav|.mp3).
-    let names_of = |k: &str| -> Vec<String> {
-        body.get(k)
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect())
-            .unwrap_or_default()
-    };
-    let male = names_of("male");
-    let female = names_of("female");
-    let available: std::collections::BTreeSet<String> = list_voice_names(&st.voices_dir).into_iter().collect();
-    for n in male.iter().chain(female.iter()) {
-        if !available.contains(n) {
-            return (StatusCode::BAD_REQUEST, format!("голос {n:?} не найден в voices/")).into_response();
-        }
+    let slots = voice_slots::Slots::from_json(&body);
+    if let Some(n) = slots.missing_in(&list_voice_names(&st.voices_dir)).first() {
+        return (StatusCode::BAD_REQUEST, format!("голос {n:?} не найден в voices/")).into_response();
     }
-    // Чистый вокал analyze: vocals16_clean.wav, фолбэк vocals16.wav (сырой 16k). Нет ни того ни другого -> 409.
-    let vocals = {
-        let clean = dir.join("vocals16_clean.wav");
-        let raw = dir.join("vocals16.wav");
-        if clean.is_file() {
-            clean
-        } else if raw.is_file() {
-            raw
-        } else {
-            return (StatusCode::CONFLICT, "нет вокала для замера F0 — сначала analyze").into_response();
-        }
+    let Some(vocals) = voice_slots::vocals_for(&dir) else {
+        return (StatusCode::CONFLICT, "нет вокала для замера F0 — сначала analyze").into_response();
     };
 
-    let slots = voice_slots::Slots { male, female };
     let dir_job = dir.clone();
     let res = tokio::task::spawn_blocking(move || {
         let assigns = voice_slots::assign(&mut proj, &vocals, &dir_job, &slots);
@@ -817,33 +798,13 @@ async fn voice_slots_assign(
     })
     .await;
     match res {
-        Ok(Ok((assigns, proj))) => {
-            let mapping: serde_json::Map<String, Value> = assigns
-                .iter()
-                .map(|a| {
-                    let gender = match a.gender {
-                        Some(voice_slots::Gender::Male) => Value::from("male"),
-                        Some(voice_slots::Gender::Female) => Value::from("female"),
-                        None => Value::Null,
-                    };
-                    (
-                        a.speaker.clone(),
-                        json!({
-                            "voice": a.voice.clone().map(Value::from).unwrap_or(Value::Null),
-                            "gender": gender,
-                            "f0": a.f0,
-                        }),
-                    )
-                })
-                .collect();
-            Json(json!({
-                "ok": true,
-                "voice_mode": proj.audio.voice.mode,
-                "voice_name": proj.audio.voice.name,
-                "speakers": mapping,
-            }))
-            .into_response()
-        }
+        Ok(Ok((assigns, proj))) => Json(json!({
+            "ok": true,
+            "voice_mode": proj.audio.voice.mode,
+            "voice_name": proj.audio.voice.name,
+            "speakers": voice_slots::mapping(&assigns),
+        }))
+        .into_response(),
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1513,10 +1474,10 @@ async fn delete_project(State(st): State<AppState>, AxPath(pid): AxPath<String>)
         Ok(d) => d,
         Err(resp) => return resp, // невалидный/несуществующий pid -> та же ошибка, что у прочих ручек
     };
-    if let Some(job_id) = st.jobs.active_for(&pid).await {
+    if let Some((job_id, kind)) = st.jobs.active_for(&pid).await {
         return (
             StatusCode::CONFLICT,
-            Json(json!({ "error": "project_busy", "job_id": job_id })),
+            Json(json!({ "error": "project_busy", "job_id": job_id, "kind": kind.as_str() })),
         )
             .into_response();
     }
@@ -1596,6 +1557,9 @@ async fn analyze_enqueue(st: &AppState, pid: &str, args_json: Value) -> Result<S
         // «сабы уже на языке перевода» — эффективно только если сабы реально импортированы.
         import_translated: import_subs.is_some() && qget("import_translated", "0") == "1",
     };
+    let post = post_analyze::PostAnalyze::from_query(&q)
+        .map_err(|e| Box::new((StatusCode::BAD_REQUEST, e).into_response()))?;
+    let voices_dir = st.voices_dir.clone();
     // Активный вариант модели резолвится ПРИ КАЖДОЙ джобе (не морозится на старте): скачал/выбрал
     // квант -> применяется без рестарта. См. models::resolve_*.
     let sel = models::load_selection(&st.models_root);
@@ -1635,15 +1599,20 @@ async fn analyze_enqueue(st: &AppState, pid: &str, args_json: Value) -> Result<S
         jobs::check_cancelled()?;
         // Трекинг затрат OpenRouter в ДОЛЛАРАХ (перевод/vision через облако): total_usage до/после.
         let cost_before = openrouter_cli::total_usage_usd(&paths.models_root);
-        let proj = analyze::run(&args, &paths, &cb)?;
+        let mut proj = analyze::run(&args, &paths, &cb)?;
         if let (Some(b), Some(a)) = (cost_before, openrouter_cli::total_usage_usd(&paths.models_root)) {
             let spent = (a - b).max(0.0);
             if spent > 0.0 {
                 cb(json!({ "stage": "cost", "msg": format!("OpenRouter: потрачено ${spent:.4} за анализ (всего использовано ${a:.2})") }));
             }
         }
+        let post_result = post.apply(&mut proj, &dir_for_save, &list_voice_names(&voices_dir))?;
         save_project_atomic(&dir_for_save, &proj)?;
-        Ok(json!({ "project_id": pid_for_result, "output": dir_for_save.join("project.json").to_string_lossy() }))
+        Ok(json!({
+            "project_id": pid_for_result,
+            "output": dir_for_save.join("project.json").to_string_lossy(),
+            "post": post_result,
+        }))
     });
     st.jobs
         .enqueue(jobs::JobMeta::persistent(jobs::JobKind::Analyze, pid, dir, args_json), job)
@@ -2449,8 +2418,8 @@ async fn resume_project(State(st): State<AppState>, AxPath(pid): AxPath<String>)
         Ok(None) => return (StatusCode::NOT_FOUND, "no job to resume").into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    if let Some(job_id) = st.jobs.active_for(&pid).await {
-        return (StatusCode::CONFLICT, Json(json!({ "error": "job_conflict", "job_id": job_id }))).into_response();
+    if let Some((job_id, kind)) = st.jobs.active_for(&pid).await {
+        return enqueue_error(jobs::EnqueueError::Conflict { job_id, kind });
     }
     let unfinished = rec.state == job_store::STATE_QUEUED || rec.state == job_store::STATE_RUNNING;
     if !rec.resumable() && !unfinished {

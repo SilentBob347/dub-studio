@@ -100,3 +100,24 @@ async fn interrupted_job_is_listed_and_resumes_with_same_kind_and_args() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn analyze_rejects_malformed_post_options_before_queueing() {
+    let root = fixture_root("post");
+    let dir = root.join("workspace").join(PID);
+    let src = dir.join("source.mp4");
+    std::fs::write(&src, b"not a video").unwrap();
+    std::fs::write(dir.join("source.txt"), src.to_string_lossy().as_bytes()).unwrap();
+    let app = build_router(AppState::new(&root));
+
+    for q in ["vo_gain=loud", "sub_blur=yes", "keep_original=1&container=avi", "voice_slots=%5B1%5D"] {
+        let (st, body) = call(&app, "POST", &format!("/projects/{PID}/analyze?mode=dub&{q}")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{q}: {body}");
+    }
+    // Кривые настройки не ставят джобу и не переписывают job.json прошлой джобы.
+    assert_eq!(job_file(&root)["job_id"], "old");
+    let (_, jobs) = call(&app, "GET", &format!("/jobs?pid={PID}")).await;
+    assert_eq!(jobs["jobs"], json!([]));
+
+    let _ = std::fs::remove_dir_all(&root);
+}

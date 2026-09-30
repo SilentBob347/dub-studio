@@ -1,10 +1,10 @@
 import { create } from "zustand";
-import type { Project } from "./lib/api";
+import type { JobKind, Project } from "./lib/api";
 
 type Stage = "boot" | "setup" | "empty" | "analyzing" | "editor" | "batch" | "multilang";
 export type ExportItem = { id: string; name: string; status: "rendering" | "done" | "error"; msg: string; url?: string; pid?: string };
 export type Activity = { t: number; text: string; kind: "work" | "done" | "error" };   // строка лога «что делает приложение»
-export type CurrentJob = { id: string; kind: string; pid: string };
+export type CurrentJob = { id: string; kind: JobKind; pid: string };
 // Джоба упала на экране анализа: ждём решения пользователя (продолжить с места остановки или назад).
 export type JobFailure = { pid: string; msg: string; resolve: (choice: "continue" | "back") => void };
 
@@ -20,6 +20,7 @@ type State = {
   past: Project[];                  // undo/redo history of Project snapshots
   future: Project[];
   rev: number;                       // preview cache-buster: bumped on every backend-confirmed frame change
+  dubRev: number;                    // dub-audio cache-buster: bumped ONLY when the dub track is re-rendered (regen/export/finished job), NOT on every edit, so live edits don't reload <audio> mid-playback
   selBlur: number | null;            // selected blur-box index — SHARED between the left list and the canvas overlay
   selTitle: number | null;           // selected title index — SHARED between the left titles list and the canvas overlay
   justAnalyzed: boolean;             // только что прошёл analyze -> редактор один раз авто-генерит дуб (чтобы сразу слушать)
@@ -39,7 +40,8 @@ type State = {
   pushHistory: (p: Project) => void; // snapshot the project BEFORE a mutation (for undo)
   undo: () => Project | null;        // returns the project to restore (PUT it) or null
   redo: () => Project | null;
-  bump: () => void;                  // invalidate the rendered preview frame -> <img> refetches
+  bump: () => void;
+  bumpDub: () => void;                  // invalidate the rendered preview frame -> <img> refetches
   setSelBlur: (i: number | null) => void;
   setSelTitle: (i: number | null) => void;
   pushActivity: (text: string, kind?: Activity["kind"]) => void;   // добавить строку в журнал
@@ -66,6 +68,7 @@ export const useStore = create<State>((set, get) => ({
   past: [],
   future: [],
   rev: 0,
+  dubRev: 0,
   selBlur: null,
   selTitle: null,
   justAnalyzed: false,
@@ -111,6 +114,7 @@ export const useStore = create<State>((set, get) => ({
     return next;
   },
   bump: () => set((s) => ({ rev: s.rev + 1 })),
+  bumpDub: () => set({ dubRev: Date.now() }),
   setSelBlur: (selBlur) => set({ selBlur }),
   setSelTitle: (selTitle) => set({ selTitle }),
   pushActivity: (text, kind = "work") => set((s) => {

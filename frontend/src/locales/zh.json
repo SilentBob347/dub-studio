@@ -498,7 +498,9 @@
     "add": "添加音色",
     "remove": "移除",
     "priorityHint": "顺序 = 优先级：第 1 个槽位是该性别中说话最多的说话人，然后循环分配。列表为空 = 该性别使用克隆。",
-    "assigned_other": "已分配音色：{{count}} 位说话人"
+    "assigned_other": "已分配音色：{{count}} 位说话人",
+    "missing": "未找到音色库中的声音：{{names}}。这些说话人保留克隆声音",
+    "noVocals": "没有可用于测量声音的人声音轨。说话人保留克隆声音"
   },
   "accordion": {
     "voices": "音色",
@@ -713,7 +715,7 @@
     "kind": {
       "analyze": "分析",
       "retranslate": "翻译",
-      "remix": "重混",
+      "remix": "改编",
       "dub_audio": "配音",
       "render": "导出",
       "export_lang": "导出为其他语言",
@@ -725,6 +727,8 @@
       "interrupted": "运行期间应用被关闭",
       "engine_stuck": "配音引擎卡死",
       "job_record_broken": "任务记录已损坏"
-    }
+    },
+    "busy": "项目忙碌中：正在进行{{kind}}",
+    "waitingFor": "正在等待此项目的{{kind}}完成"
   }
 }

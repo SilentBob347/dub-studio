@@ -510,7 +510,9 @@
     "priorityHint": "Ordem = prioridade: o slot 1 é o falante que mais fala desse gênero, depois em rodízio. Lista vazia = esse gênero é clonado.",
     "assigned_one": "Vozes atribuídas: {{count}} falante",
     "assigned_many": "Vozes atribuídas: {{count}} falantes",
-    "assigned_other": "Vozes atribuídas: {{count}} falantes"
+    "assigned_other": "Vozes atribuídas: {{count}} falantes",
+    "missing": "Vozes da biblioteca não encontradas: {{names}}. Esses falantes mantêm vozes clonadas",
+    "noVocals": "Não há faixa vocal para medir as vozes. Os falantes mantêm vozes clonadas"
   },
   "accordion": {
     "voices": "Vozes",
@@ -745,6 +747,8 @@
       "interrupted": "O aplicativo foi fechado durante o trabalho",
       "engine_stuck": "O motor de voz travou",
       "job_record_broken": "O registro da tarefa está corrompido"
-    }
+    },
+    "busy": "O projeto está ocupado: {{kind}} em andamento",
+    "waitingFor": "Aguardando {{kind}} deste projeto terminar"
   }
 }

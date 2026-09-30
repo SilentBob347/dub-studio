@@ -686,13 +686,13 @@ impl JobQueue {
         ids.iter().filter_map(|(_, id)| g.snapshot(id)).collect()
     }
 
-    /// Есть ли у проекта незавершённая джоба (кроме кадр-джоб).
-    pub async fn active_for(&self, pid: &str) -> Option<String> {
+    /// Незавершённая джоба проекта (кроме кадр-джоб): id и вид.
+    pub async fn active_for(&self, pid: &str) -> Option<(String, JobKind)> {
         let g = self.inner.lock().await;
         g.jobs
             .iter()
             .find(|(_, j)| !j.status.terminal() && j.kind != JobKind::Frame && j.pid.as_deref() == Some(pid))
-            .map(|(id, _)| id.clone())
+            .map(|(id, j)| (id.clone(), j.kind))
     }
 
     /// Отменить: в очереди — сразу cancelled; выполняется — кооперативная отмена + kill дочерних

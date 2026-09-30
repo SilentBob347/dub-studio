@@ -510,7 +510,9 @@
     "priorityHint": "Ordre = priorité : l'emplacement 1 est le locuteur qui parle le plus de ce genre, puis en rotation. Liste vide = ce genre est cloné.",
     "assigned_one": "Voix attribuées : {{count}} locuteur",
     "assigned_many": "Voix attribuées : {{count}} locuteurs",
-    "assigned_other": "Voix attribuées : {{count}} locuteurs"
+    "assigned_other": "Voix attribuées : {{count}} locuteurs",
+    "missing": "Voix de la bibliothèque introuvables : {{names}}. Ces locuteurs gardent des voix clonées",
+    "noVocals": "Aucune piste vocale pour mesurer les voix. Les locuteurs gardent des voix clonées"
   },
   "accordion": {
     "voices": "Voix",
@@ -735,7 +737,7 @@
       "retranslate": "Traduction",
       "remix": "Remix",
       "dub_audio": "Voix du doublage",
-      "render": "Export",
+      "render": "Exportation",
       "export_lang": "Export dans une autre langue",
       "download": "Téléchargement des modèles",
       "voices_pack": "Téléchargement des voix"
@@ -745,6 +747,8 @@
       "interrupted": "L'application s'est fermée pendant le traitement",
       "engine_stuck": "Le moteur vocal s'est figé",
       "job_record_broken": "L'enregistrement de la tâche est endommagé"
-    }
+    },
+    "busy": "Le projet est occupé : {{kind}} en cours",
+    "waitingFor": "En attente de la fin de {{kind}} sur ce projet"
   }
 }

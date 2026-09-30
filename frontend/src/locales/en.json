@@ -504,7 +504,9 @@
     "remove": "Remove",
     "priorityHint": "Order = priority: slot 1 is the most-speaking speaker of that gender, then round-robin. Empty list = that gender is cloned.",
     "assigned_one": "Voices assigned: {{count}} speaker",
-    "assigned_other": "Voices assigned: {{count}} speakers"
+    "assigned_other": "Voices assigned: {{count}} speakers",
+    "missing": "Library voices not found: {{names}}. These speakers keep cloned voices",
+    "noVocals": "No vocal track to measure voices. Speakers keep cloned voices"
   },
   "accordion": {
     "voices": "Voices",
@@ -735,6 +737,8 @@
       "interrupted": "The app closed while it was running",
       "engine_stuck": "The voice engine froze",
       "job_record_broken": "The task record is damaged"
-    }
+    },
+    "busy": "The project is busy: {{kind}} is in progress",
+    "waitingFor": "Waiting for {{kind}} on this project to finish"
   }
 }

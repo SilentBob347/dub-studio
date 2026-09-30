@@ -1,13 +1,29 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2, RotateCw, Square, X } from "lucide-react";
-import { api, JobCancelledError, type JobSnapshot, type ProjectJob } from "../lib/api";
+import { api, JobCancelledError, type JobKind, type JobSnapshot, type Project, type ProjectJob } from "../lib/api";
 import { continueProject, RESUMABLE_STATES } from "../lib/jobs";
 import { useJobErrorText, useJobStateLabel } from "../lib/jobLabels";
 import { STAGE_TO_STEPKEY } from "../lib/stages";
+import i18n from "../lib/i18n";
 import { useStore } from "../store";
 
 type Live = { stage: string; msg: string; ahead: number | null };
+
+const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+// Джоба завершилась: свежий проект; новая озвучка -> плеер перечитывает дуб; экспорт -> готовый файл в панели.
+function jobFinished(pid: string, kind: JobKind, exportId: string, exportName: string, project: Project) {
+  const s = useStore.getState();
+  s.setProject(project);
+  if (kind === "render") {
+    s.updateExport(exportId, { status: "done", msg: "", url: `${api.outputUrl(pid)}?rev=${Date.now()}` });
+    s.pushActivity(`${i18n.t("compare.result")}: ${exportName}`, "done");
+  }
+  s.setRendered(kind === "render");
+  if (kind === "render" || kind === "dub_audio") s.bumpDub();
+  s.bump();
+}
 
 // Джобы открытого проекта: при открытии подписывается на уже идущую (после перезагрузки окна, после
 // «Продолжить» в «Недавних», поставленную агентом) и показывает её прогресс с «Отменить»; если последняя
@@ -34,6 +50,10 @@ export default function ProjectJobBar({ pid }: { pid: string }) {
         setRecord(active ? null : r.project_job);
         if (!active) return;
         setLive({ stage: active.stage ?? "", msg: active.msg ?? "", ahead: active.position ?? null });
+        // Экспорт, подхваченный окном, — та же запись в панели файлов, что у кнопки «Экспорт».
+        const exportId = `export-${pid}`;
+        const exportName = fileName(useStore.getState().project?.meta.video || pid);
+        if (active.kind === "render") useStore.getState().addExport({ id: exportId, name: exportName, status: "rendering", msg: i18n.t("common.rendering"), pid });
         try {
           await api.watchJob(active.id, (e) => {
             if (!alive) return;
@@ -41,11 +61,9 @@ export default function ProjectJobBar({ pid }: { pid: string }) {
             else if (e.type === "progress") setLive({ stage: e.stage ?? "", msg: e.msg ?? "", ahead: null });
           });
           if (!alive) return;
-          const s = useStore.getState();
-          s.setProject(await api.getProject(pid));
-          s.setRendered(false);
-          s.bump();
+          jobFinished(pid, active.kind, exportId, exportName, await api.getProject(pid));
         } catch (e) {
+          if (active.kind === "render") useStore.getState().updateExport(exportId, { status: "error", msg: e instanceof JobCancelledError ? i18n.t("jobs.state.cancelled") : e instanceof Error ? e.message : String(e) });
           if (alive && !(e instanceof JobCancelledError)) setError(e instanceof Error ? e.message : String(e));
         } finally {
           if (alive) {
@@ -92,7 +110,7 @@ export default function ProjectJobBar({ pid }: { pid: string }) {
   }
 
   if (hidden) return null;
-  const kindLabel = (kind: string) => t(`jobs.kind.${kind}`);
+  const kindLabel = (kind: JobKind) => t(`jobs.kind.${kind}`);
   const box = "fixed top-14 left-1/2 -translate-x-1/2 z-40 max-w-[min(640px,90vw)] flex items-center gap-2.5 rounded-lg border px-3 py-1.5 text-[12px] shadow-lg backdrop-blur";
 
   if (job) {

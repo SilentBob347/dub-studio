@@ -5,7 +5,7 @@ import { motion } from "motion/react";
 import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, slot, JobCancelledError, type Selection, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
+import { api, slot, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
 import i18n, { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
@@ -15,7 +15,7 @@ import { GENDER_LABEL_KEY, genderKey } from "./lib/gender";
 import OpenRouterKey from "./components/OpenRouterKey";
 import ProxySection from "./components/ProxySection";
 import { ANALYZE_STEPS, STAGE_TO_STEPKEY } from "./lib/stages";
-import { watchTracked, watchWithResume } from "./lib/jobs";
+import { enqueueWhenFree, finishAnalyze, reportVoiceSlots, watchWithResume } from "./lib/jobs";
 import CancelJobButton from "./components/CancelJobButton";
 import JobFailurePanel from "./components/JobFailurePanel";
 import ProjectJobBar from "./components/ProjectJobBar";
@@ -1120,37 +1120,19 @@ function DropZone() {
       // Готовый кастинг из библиотеки применяем только когда кастинг реально включён (та же видимость, что у галки).
       const effCastingRef = effCasting ? castingRef : "";
       const effContentType = effCasting ? contentType : "real";
-      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType);
-      await watchWithResume(project_id, "analyze", job_id);   // ошибка -> «Продолжить» с места остановки, не сброс
-      if (audio === "voiceover") await api.patch(project_id, { op: "voiceover_gain", gain_db: voGain });   // громкость оригинала со старта -> рендер ниже подхватит
-      // Блюр-подложка под субтитрами — опция дубляжа/субтитров (дефолт вкл). Патчим, когда сабы вжигаются.
-      if (eBurn && eSubs !== "none" && !audioOnly) await api.patch(project_id, { op: "sub_blur", on: subBlur });
-      // Сохранить оригинальную дорожку (#113): 2-я аудиодорожка при mux рендера. Только dub/voiceover, не аудио-режим.
-      if (keepOrig && !audioOnly && (audio === "dub" || audio === "voiceover"))
-        await api.patch(project_id, { op: "keep_original", keep: true, container });
-      // Голоса из библиотеки (#114): раздать слоты по спикерам ПОСЛЕ analyze и ДО подготовки озвучки.
-      // Ошибка не роняет флоу — продолжаем с дефолтным клонированием.
-      if (voiceSrc === "library" && (audio === "dub" || audio === "voiceover") && (slotsM.length || slotsF.length)) {
-        try {
-          const r = await api.voiceSlots(project_id, { male: slotsM, female: slotsF });
-          // Считаем только реально назначенных из библиотеки (voice != null) — спикеры без слота уйдут в клон.
-          const nAssigned = Object.values(r.speakers || {}).filter((s) => s && s.voice).length;
-          useStore.getState().pushActivity(t("voiceSlots.assigned", { count: nAssigned }), "done");
-        } catch (e) { useStore.getState().pushActivity(String(e), "error"); }
-      }
-      s.setProject(await api.getProject(project_id));
-      // Озвучку готовим ЗДЕСЬ, на экране загрузки (не собирая видео — кадры даёт per-frame preview),
-      // чтобы редактор открылся с готовым дубом (плей сразу играет). Иначе рендер блокировал бы превью
-      // после открытия -> чёрный экран, и слушать дуб можно было бы только после экспорта.
-      if (audio === "dub" || audio === "voiceover") {
-        try {
-          const r = await api.render(project_id);   // полный дубляж на экране ЗАГРУЗКИ (1:1 питон: analyze -> analyzed.mp4): TTS+микс+бёрн+mux -> output.mp4
-          await watchTracked(project_id, "render", r.job_id, "voicing");
-          s.setProject(await api.getProject(project_id));
-          // rendered ОСТАЁТСЯ false: покадровое превью <img> (редактирование), а /dub отдаёт готовый дуб
-          // (output.mp4) -> плей играет озвучку и двигает скраб -> кадры следуют (1:1 оригинал).
-        } catch { /* рендер не удался -> редактор откроется на покадровом превью */ }
-      }
+      // Настройки после анализа (громкость оригинала, блюр-подложка, 2-я дорожка #113, голоса из библиотеки
+      // #114) сервер кладёт на проект в конце анализа и хранит в job.json: «Продолжить» повторит их же.
+      const voiced = audio === "dub" || audio === "voiceover";
+      const post: AnalyzePost = {
+        voGain: audio === "voiceover" ? voGain : undefined,
+        subBlur: eBurn && eSubs !== "none" && !audioOnly ? subBlur : undefined,
+        keepOriginal: keepOrig && !audioOnly && voiced ? { container } : undefined,
+        voiceSlots: voiceSrc === "library" && voiced && (slotsM.length || slotsF.length) ? { male: slotsM, female: slotsF } : undefined,
+      };
+      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType, post);
+      // Ошибка -> «Продолжить» с места остановки, не сброс. Для dub/voiceover озвучка готовится здесь же, на
+      // экране загрузки (rendered остаётся false: /dub отдаёт готовый дуб, кадры — покадровое превью).
+      await finishAnalyze(project_id, await watchWithResume(project_id, "analyze", job_id));
       s.setStage("editor"); playSfx("success");
     } catch (err) {
       if (err instanceof JobCancelledError) { s.setProgress("", "", null); s.setStage("empty"); return; }
@@ -2478,7 +2460,8 @@ function Editor() {
   const [vol, setVol] = useState<number>(() => { const s = localStorage.getItem("dub-vol"); return s ? parseFloat(s) : 1; });
 
   const playEndRef = useRef<number>(Infinity);                        // stop time for single-phrase playback (Infinity = full)
-  const [dubRev, setDubRev] = useState(0);                            // dub-audio cache-buster — bumped ONLY when the dub track is re-rendered (regen/export), NOT on every edit, so live edits don't reload <audio> mid-playback
+  const dubRev = useStore((s) => s.dubRev);
+  const bumpDub = useStore((s) => s.bumpDub);
   useEffect(() => {
     if (audioRef.current) {
       audioRef.current.volume = vol;
@@ -2631,6 +2614,8 @@ function Editor() {
     try { setProject(await api.patch(pid, { op: "add_segment", id: `u${Date.now().toString(36)}`, start, end: start + 2, speaker })); bump(); }
     catch (e) { await surfaceErr(e); }
   }
+  // По проекту уже идёт озвучка или экспорт: новая джоба ждёт её конца (журнал говорит, чего ждём).
+  const waitNote = (kind: JobKind) => pushActivity(t("jobs.waitingFor", { kind: t(`jobs.kind.${kind}`) }), "work");
   const watchDub = (jobId: string) => api.watchJob(jobId, (e) => {
     if (e.type === "progress") {
       if (e.msg) useStore.getState().pushActivity(e.msg, "work");
@@ -2642,9 +2627,9 @@ function Editor() {
     setRegenId(segId); pushActivity(t("seg.regen"));
     try {
       await api.patch(pid, { op: "regen", id: segId });
-      const { job_id } = await api.dubAudio(pid);                     // ре-TTS ТОЛЬКО dirty-сегмент -> свежая озвучка (без сборки видео; финал — на Экспорте)
+      const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);   // ре-TTS ТОЛЬКО dirty-сегмент -> свежая озвучка (без сборки видео; финал — на Экспорте)
       await watchDub(job_id);
-      setProject(await api.getProject(pid)); setRendered(false); bump(); setDubRev(Date.now()); playSfx("notify");   // refresh preview + reload the re-rendered dub audio
+      setProject(await api.getProject(pid)); setRendered(false); bump(); bumpDub(); playSfx("notify");   // refresh preview + reload the re-rendered dub audio
     } catch (e) { await surfaceErr(e); }
     finally { setRegenId(null); }
   }
@@ -2724,9 +2709,9 @@ function Editor() {
     setRegenId("__all__"); pushActivity(t("voice.regenAll"));       // sentinel: disables per-seg regen buttons, no per-seg spinner
     try {
       await api.patch(pid, { op: "regen_all" });                    // mark every segment dirty
-      const { job_id } = await api.dubAudio(pid);                   // ре-TTS всех сегментов -> свежая озвучка (видео на Экспорте)
+      const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);   // ре-TTS всех сегментов -> свежая озвучка (видео на Экспорте)
       await watchDub(job_id);
-      setProject(await api.getProject(pid)); setRendered(false); bump(); setDubRev(Date.now()); playSfx("notify");   // покадровое превью; /dub обновлён -> плей играет новый дуб
+      setProject(await api.getProject(pid)); setRendered(false); bump(); bumpDub(); playSfx("notify");   // покадровое превью; /dub обновлён -> плей играет новый дуб
     } catch (e) { await surfaceErr(e); }
     finally { setRegenId(null); }
   }
@@ -2769,7 +2754,7 @@ function Editor() {
     addExport({ id: exId, name, status: "rendering", msg: t("common.rendering"), pid });   // queue entry -> Files panel (no screen block)
     setRendering(true); pushActivity(`${t("export.proceed")}: ${name}`);
     try {
-      const { job_id } = await api.render(pid);
+      const { job_id } = await enqueueWhenFree(() => api.render(pid), (kind) => { updateExport(exId, { msg: t("jobs.waitingFor", { kind: t(`jobs.kind.${kind}`) }) }); waitNote(kind); });
       await api.watchJob(job_id, (e) => { if (e.type === "progress") { updateExport(exId, { msg: e.msg || "" }); pushActivity(e.msg || "", "work"); } });
       updateExport(exId, { status: "done", msg: "", url: `${api.outputUrl(pid)}?rev=${Date.now()}` });   // bust cache on re-export
       // Раскрыть реальный выход в проводнике: контейнер может быть output.mkv (#113, сохранена ориг. дорожка) —
@@ -2778,7 +2763,7 @@ function Editor() {
       // Если имя всё же не совпало (редкий рассинхрон настроек), бэкенд сам резолвит выход через find_output — не гадаем здесь.
       api.reveal(pid, outName).catch(() => {});   // открыть проводник с выделенным готовым файлом — юзер видит, куда сохранилось
       pushActivity(`${t("compare.result")}: ${name}`, "done"); playSfx("success");
-      setRendered(true); setDubRev(Date.now());   // /dub now serves the freshly rendered output.mp4 -> reload <audio>
+      setRendered(true); bumpDub();   // /dub now serves the freshly rendered output.mp4 -> reload <audio>
     } catch (err) {
       updateExport(exId, { status: "error", msg: String(err) }); pushActivity(String(err), "error"); playSfx("error");
     } finally { setRendering(false); }
@@ -4082,15 +4067,16 @@ function BatchView() {
         const fSubs = ao ? "none" : eSubs;
         const fBurn = ao ? false : audio === "transcribe" ? true : burn;
         // Стиль перевода (#112) — параметром analyze (patch до analyze невозможен: project.json ещё нет).
-        const { job_id } = await api.analyze(project_id, tgt, eMode, src, fSubs, eRewrite, fBurn, ao ? false : detectText, false, trStyle);
-        await api.watchJob(job_id, (e) => { if (e.type === "progress") upd({ pct: e.pct ?? 0, detail: e.msg || undefined }); });
-        if (audio === "voiceover") await api.patch(project_id, { op: "voiceover_gain", gain_db: voGain });   // громкость оригинала со старта -> общий для всех проектов батча
-        // Сохранить оригинальную дорожку (#113): 2-я дорожка при mux. Только dub/voiceover, не аудио-файл.
-        if (keepOrig && !ao && doRender) await api.patch(project_id, { op: "keep_original", keep: true, container });
-        // Голоса из библиотеки (#114): раздать слоты ПЕРЕД render каждого проекта. Ошибка не роняет батч (клон-фолбэк).
-        if (voiceSrc === "library" && doRender && (slotsM.length || slotsF.length)) {
-          try { await api.voiceSlots(project_id, { male: slotsM, female: slotsF }); } catch { /* фолбэк на клон */ }
-        }
+        // Громкость оригинала, 2-я дорожка (#113) и голоса из библиотеки (#114) сервер кладёт на проект в
+        // конце анализа (и повторяет при «Продолжить»); ненайденные голоса — строкой в журнале, спикеры на клоне.
+        const post: AnalyzePost = {
+          voGain: audio === "voiceover" ? voGain : undefined,
+          keepOriginal: keepOrig && !ao && doRender ? { container } : undefined,
+          voiceSlots: voiceSrc === "library" && doRender && (slotsM.length || slotsF.length) ? { male: slotsM, female: slotsF } : undefined,
+        };
+        const { job_id } = await api.analyze(project_id, tgt, eMode, src, fSubs, eRewrite, fBurn, ao ? false : detectText, false, trStyle, false, "", "auto", post);
+        const res = await api.watchJob(job_id, (e) => { if (e.type === "progress") upd({ pct: e.pct ?? 0, detail: e.msg || undefined }); });
+        reportVoiceSlots((res as AnalyzeResult).post.voice_slots);
         if (doRender) {
           upd({ status: "rendering", pct: 0 });
           const r = await api.render(project_id);
