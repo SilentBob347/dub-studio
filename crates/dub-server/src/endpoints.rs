@@ -283,17 +283,23 @@ pub async fn remix_project(
     AxPath(pid): AxPath<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let instruction = q.get("instruction").cloned().unwrap_or_default();
-    if instruction.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "empty remix instruction").into_response();
+    let args = json!({ "instruction": q.get("instruction").cloned().unwrap_or_default() });
+    match remix_enqueue(&st, &pid, &args).await {
+        Ok(job_id) => Json(json!({ "job_id": job_id })).into_response(),
+        Err(resp) => *resp,
     }
-    let dir = match st.proj_dir(&pid) {
-        Ok(d) => d,
-        Err(resp) => return resp,
-    };
+}
+
+/// Поставить ремикс с args.instruction (его же сохраняет job.json для «Продолжить»).
+pub(crate) async fn remix_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<String, Box<Response>> {
+    let instruction = args.get("instruction").and_then(Value::as_str).unwrap_or("").to_string();
+    if instruction.trim().is_empty() {
+        return Err(Box::new((StatusCode::BAD_REQUEST, "empty remix instruction").into_response()));
+    }
+    let dir = st.proj_dir(pid).map_err(Box::new)?;
     let proj_path = dir.join("project.json");
     if !proj_path.is_file() {
-        return (StatusCode::CONFLICT, "project not analyzed yet").into_response();
+        return Err(Box::new((StatusCode::CONFLICT, "project not analyzed yet").into_response()));
     }
     let llama_bin = st.llama_bin.clone();
     let mt_model = st.opts.mt_model_path.clone();
@@ -351,8 +357,10 @@ pub async fn remix_project(
         save_project_atomic(&dir_for_job, &p)?;
         serde_json::to_value(&p).map_err(|e| e.to_string())
     });
-    let job_id = st.jobs.enqueue(job).await;
-    Json(json!({ "job_id": job_id })).into_response()
+    st.jobs
+        .enqueue(jobs::JobMeta::persistent(jobs::JobKind::Remix, pid, dir, args.clone()), job)
+        .await
+        .map_err(|e| Box::new(crate::enqueue_error(e)))
 }
 
 // ─── GET /projects/{pid}/preview?t=&rev= ────────────────────────────────────
@@ -379,7 +387,7 @@ pub async fn preview(
     let lowres = q.get("lr").map(|v| v == "1" || v == "true").unwrap_or(false);
     let fonts_dir = st.fonts_dir.clone();
     let work_dir = dir.clone();
-    frame_job(&st, 300, "image/jpeg", move |_p| {
+    frame_job(&st, &pid, 300, "image/jpeg", move |_p| {
         crate::frame::preview_frame(&proj, &input, &work_dir, &fonts_dir, t, lowres)
     })
     .await
@@ -407,12 +415,12 @@ pub async fn original_frame(
     }
     let t: f64 = q.get("t").and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let work_dir = dir.clone();
-    frame_job(&st, 60, "image/png", move |_p| crate::frame::source_frame(&input, &work_dir, t)).await
+    frame_job(&st, &pid, 60, "image/png", move |_p| crate::frame::source_frame(&input, &work_dir, t)).await
 }
 
 /// Общий помощник: поставить синхронную кадр-джобу в GPU-воркер, ждать с таймаутом, вернуть
 /// байты с заданным content-type (`mime`) или 504. Порт паттерна app.py.preview/original.
-async fn frame_job<F>(st: &AppState, timeout_s: u64, mime: &'static str, f: F) -> Response
+async fn frame_job<F>(st: &AppState, pid: &str, timeout_s: u64, mime: &'static str, f: F) -> Response
 where
     F: FnOnce(jobs::ProgressFn) -> Result<Vec<u8>, String> + Send + 'static,
 {
@@ -422,7 +430,11 @@ where
         // канал: сериализуем как массив байт в Value (voркер отдаёт oneshot Result<Value>). Читаем ниже.
         Ok(Value::Array(png.into_iter().map(|b| Value::from(b as u64)).collect()))
     });
-    let (job_id, rx) = st.jobs.enqueue_awaitable(job).await;
+    let meta = jobs::JobMeta::new(jobs::JobKind::Frame, Some(pid));
+    let (job_id, rx) = match st.jobs.enqueue_awaitable(meta, job).await {
+        Ok(v) => v,
+        Err(e) => return crate::enqueue_error(e),
+    };
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_s), rx).await {
         Ok(Ok(Ok(v))) => {
             st.jobs.remove(&job_id).await;
@@ -441,7 +453,8 @@ where
             (StatusCode::INTERNAL_SERVER_ERROR, "job canceled").into_response()
         }
         Err(_) => {
-            st.jobs.mark_abandoned(&job_id).await;
+            // Ожидающий ушёл: джоба в очереди снимается, выполняемая прерывается (её ffmpeg убивается).
+            let _ = st.jobs.cancel(&job_id).await;
             (StatusCode::GATEWAY_TIMEOUT, "frame render timed out").into_response()
         }
     }

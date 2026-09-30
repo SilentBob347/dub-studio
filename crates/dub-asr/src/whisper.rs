@@ -287,7 +287,7 @@ impl WhisperAsr {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
-        let out = cmd.output().map_err(|e| AsrError::Parakeet(format!("whisper spawn: {e}")))?;
+        let out = dub_core::proc::output(&mut cmd).map_err(|e| AsrError::Parakeet(format!("whisper spawn: {e}")))?;
         if !out.status.success() {
             // АВТО-ФОЛБЭК cuda -> cpu: дефолт девайса теперь cuda (быстрее в разы на NVIDIA), но на
             // машине без CUDA/либ сабпроцесс падает — повторяем ОДИН раз на cpu с безопасным int8

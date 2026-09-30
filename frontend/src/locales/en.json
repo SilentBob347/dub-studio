@@ -504,7 +504,9 @@
     "remove": "Remove",
     "priorityHint": "Order = priority: slot 1 is the most-speaking speaker of that gender, then round-robin. Empty list = that gender is cloned.",
     "assigned_one": "Voices assigned: {{count}} speaker",
-    "assigned_other": "Voices assigned: {{count}} speakers"
+    "assigned_other": "Voices assigned: {{count}} speakers",
+    "missing": "Library voices not found: {{names}}. These speakers keep cloned voices",
+    "noVocals": "No vocal track to measure voices. Speakers keep cloned voices"
   },
   "accordion": {
     "voices": "Voices",
@@ -698,5 +700,46 @@
   "preview": {
     "frameAlt": "Preview frame",
     "updating": "updating…"
+  },
+  "jobs": {
+    "fromCache": "from cache",
+    "continue": "Continue",
+    "continueHint": "Continue from where it stopped: finished stages and voiced lines are reused",
+    "cancel": "Cancel",
+    "cancelling": "Cancelling…",
+    "back": "Back",
+    "dismiss": "Hide",
+    "failedTitle": "Processing stopped with an error",
+    "failedHint": "Finished stages are saved — Continue picks up where it stopped.",
+    "details": "Details",
+    "queuedAhead": "Queued, tasks ahead: {{n}}",
+    "atStage": "{{state}} · {{stage}}",
+    "state": {
+      "queued": "Queued",
+      "running": "Running",
+      "failed": "Failed",
+      "interrupted": "Interrupted",
+      "cancelled": "Cancelled",
+      "done": "Done"
+    },
+    "kind": {
+      "analyze": "Analysis",
+      "retranslate": "Translation",
+      "remix": "Remix",
+      "dub_audio": "Dub audio",
+      "render": "Export",
+      "export_lang": "Export to another language",
+      "download": "Model download",
+      "voices_pack": "Voice download"
+    },
+    "error": {
+      "failed": "The task failed",
+      "interrupted": "The app closed while it was running",
+      "engine_stuck": "The voice engine froze — restart Dub Studio, then press Continue",
+      "job_record_broken": "The task record is damaged"
+    },
+    "busy": "The project is busy: {{kind}} is in progress",
+    "waitingFor": "Waiting for {{kind}} on this project to finish",
+    "cancelledKind": "{{kind}}: cancelled"
   }
 }

@@ -5,7 +5,7 @@ import { motion } from "motion/react";
 import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, slot, type Selection, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
+import { api, slot, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
 import i18n, { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
@@ -14,6 +14,12 @@ import ResourceMonitor from "./components/ResourceMonitor";
 import { GENDER_LABEL_KEY, genderKey } from "./lib/gender";
 import OpenRouterKey from "./components/OpenRouterKey";
 import ProxySection from "./components/ProxySection";
+import { ANALYZE_STEPS, STAGE_TO_STEPKEY } from "./lib/stages";
+import { enqueueWhenFree, finishAnalyze, reportVoiceSlots, watchLocal, watchTracked, watchWithResume } from "./lib/jobs";
+import CancelJobButton from "./components/CancelJobButton";
+import JobFailurePanel from "./components/JobFailurePanel";
+import ProjectJobBar from "./components/ProjectJobBar";
+import { ContinueJobButton, JobStateLabel } from "./components/RecentJobBadge";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -1090,6 +1096,7 @@ function DropZone() {
       s.setJobSteps(steps);
     }
     s.setProgress("", "", null);             // fresh stepper for this run
+    s.clearResumed();
     try {
       const { project_id } = await api.createProject(file, isAudioFile(file) ? null : subsFile);   // сабы — только для видео
       s.setPid(project_id);
@@ -1113,39 +1120,22 @@ function DropZone() {
       // Готовый кастинг из библиотеки применяем только когда кастинг реально включён (та же видимость, что у галки).
       const effCastingRef = effCasting ? castingRef : "";
       const effContentType = effCasting ? contentType : "real";
-      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType);
-      await api.watchJob(job_id, (e) => { if (e.type === "progress") s.setProgress(e.stage || "", e.msg || "", e.pct ?? null); });
-      if (audio === "voiceover") await api.patch(project_id, { op: "voiceover_gain", gain_db: voGain });   // громкость оригинала со старта -> рендер ниже подхватит
-      // Блюр-подложка под субтитрами — опция дубляжа/субтитров (дефолт вкл). Патчим, когда сабы вжигаются.
-      if (eBurn && eSubs !== "none" && !audioOnly) await api.patch(project_id, { op: "sub_blur", on: subBlur });
-      // Сохранить оригинальную дорожку (#113): 2-я аудиодорожка при mux рендера. Только dub/voiceover, не аудио-режим.
-      if (keepOrig && !audioOnly && (audio === "dub" || audio === "voiceover"))
-        await api.patch(project_id, { op: "keep_original", keep: true, container });
-      // Голоса из библиотеки (#114): раздать слоты по спикерам ПОСЛЕ analyze и ДО подготовки озвучки.
-      // Ошибка не роняет флоу — продолжаем с дефолтным клонированием.
-      if (voiceSrc === "library" && (audio === "dub" || audio === "voiceover") && (slotsM.length || slotsF.length)) {
-        try {
-          const r = await api.voiceSlots(project_id, { male: slotsM, female: slotsF });
-          // Считаем только реально назначенных из библиотеки (voice != null) — спикеры без слота уйдут в клон.
-          const nAssigned = Object.values(r.speakers || {}).filter((s) => s && s.voice).length;
-          useStore.getState().pushActivity(t("voiceSlots.assigned", { count: nAssigned }), "done");
-        } catch (e) { useStore.getState().pushActivity(String(e), "error"); }
-      }
-      s.setProject(await api.getProject(project_id));
-      // Озвучку готовим ЗДЕСЬ, на экране загрузки (не собирая видео — кадры даёт per-frame preview),
-      // чтобы редактор открылся с готовым дубом (плей сразу играет). Иначе рендер блокировал бы превью
-      // после открытия -> чёрный экран, и слушать дуб можно было бы только после экспорта.
-      if (audio === "dub" || audio === "voiceover") {
-        try {
-          const r = await api.render(project_id);   // полный дубляж на экране ЗАГРУЗКИ (1:1 питон: analyze -> analyzed.mp4): TTS+микс+бёрн+mux -> output.mp4
-          await api.watchJob(r.job_id, (e) => { if (e.type === "progress") s.setProgress(e.stage || "voicing", e.msg || "", e.pct ?? null); });
-          s.setProject(await api.getProject(project_id));
-          // rendered ОСТАЁТСЯ false: покадровое превью <img> (редактирование), а /dub отдаёт готовый дуб
-          // (output.mp4) -> плей играет озвучку и двигает скраб -> кадры следуют (1:1 оригинал).
-        } catch { /* рендер не удался -> редактор откроется на покадровом превью */ }
-      }
+      // Настройки после анализа (громкость оригинала, блюр-подложка, 2-я дорожка #113, голоса из библиотеки
+      // #114) сервер кладёт на проект в конце анализа и хранит в job.json: «Продолжить» повторит их же.
+      const voiced = audio === "dub" || audio === "voiceover";
+      const post: AnalyzePost = {
+        voGain: audio === "voiceover" ? voGain : undefined,
+        subBlur: eBurn && eSubs !== "none" && !audioOnly ? subBlur : undefined,
+        keepOriginal: keepOrig && !audioOnly && voiced ? { container } : undefined,
+        voiceSlots: voiceSrc === "library" && voiced && (slotsM.length || slotsF.length) ? { male: slotsM, female: slotsF } : undefined,
+      };
+      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType, post);
+      // Ошибка -> «Продолжить» с места остановки, не сброс. Для dub/voiceover озвучка готовится здесь же, на
+      // экране загрузки (rendered остаётся false: /dub отдаёт готовый дуб, кадры — покадровое превью).
+      await finishAnalyze(project_id, await watchWithResume(project_id, "analyze", job_id));
       s.setStage("editor"); playSfx("success");
     } catch (err) {
+      if (err instanceof JobCancelledError) { s.setProgress("", "", null); s.setStage("empty"); return; }
       s.setProgress("error", String(err), null);  // surface backend failure instead of hanging on "analyzing"
       s.setStage("empty"); playSfx("error");
     }
@@ -1194,9 +1184,11 @@ function DropZone() {
                           <span>·</span><span className="truncate">{p.mode}</span>
                           <span>·</span><span className="shrink-0">{fmtAgo(p.mtime)}</span>
                           {p.done && <Check size={12} className="text-[var(--color-accent)] shrink-0" />}
+                          <JobStateLabel p={p} />
                         </div>
                       </div>
                     </button>
+                    <ContinueJobButton p={p} onOpen={openProject} />
                     <button onClick={(e) => deleteRecent(e, p.pid, p.video)} title={t("recent.delete")}
                       className="shrink-0 mr-1 p-1.5 rounded-md text-[var(--color-muted)] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] hover:bg-white/5 transition"><Trash2 size={15} /></button>
                   </div>
@@ -1525,26 +1517,6 @@ function DropZone() {
   );
 }
 
-// editor stages mapped to the engine's stage markers (api._run emits `stage` per _timed block + "download").
-type AnalyzeStepKey = "download" | "separating" | "diarizing" | "recognizing" | "translating" | "voicing" | "locating" | "casting" | "assembling";
-const ANALYZE_STEPS: { key: AnalyzeStepKey; stages: string[] }[] = [
-  { key: "download",    stages: ["download"] },
-  { key: "separating",  stages: ["extract_audio", "separate"] },
-  { key: "diarizing",   stages: ["diarize"] },
-  { key: "recognizing", stages: ["asr"] },
-  { key: "translating", stages: ["translate", "translate_ctx", "vision", "rewrite", "rewrite_ctx"] },   // "vision" = ctx-проход (vision layout + перевод транскрипта)
-  { key: "voicing",     stages: ["tts", "mix"] },        // TTS synthesis + mix — runs BETWEEN translate and OCR; without this the stepper blanks (cur=-1) during voice gen
-  // «Находим текст на экране» = ТОЛЬКО OCR-стадии: юзер с выключенной детекцией не должен видеть этот
-  // шаг вовсе (жалоба). Сборка выходного файла (build/burn/mux) — отдельный честный шаг.
-  { key: "locating",    stages: ["ocr_detect", "translate_titles", "translate_tagline"] },
-  { key: "casting",     stages: ["cast_detect", "cast_embed", "cast_speaker"] },   // #115: лица (SCRFD) + эмбеддинги (LVFace) + active-speaker (LR-ASD)
-  { key: "assembling",  stages: ["build", "burn", "mux"] },
-];
-// стадия -> переведённая метка шага (бэкенд шлёт детальный msg по-русски; в UI показываем локализованный
-// ярлык стадии вместо сырого текста, чтобы статус был на языке интерфейса). Неизвестная стадия -> null.
-const STAGE_TO_STEPKEY: Record<string, AnalyzeStepKey> = Object.fromEntries(
-  ANALYZE_STEPS.flatMap((s) => s.stages.map((st) => [st, s.key])),
-);
 // `allowed` — ключи шагов ТЕКУЩЕЙ джобы: стадия отфильтрованного шага (напр. ocr_detect при
 // выключенной детекции) не должна подписываться его ярлыком в статус-строке — вернём null, и
 // строка покажет сырое сообщение бэкенда («детекция вшитого текста отключена»), а не фантомный шаг.
@@ -1558,7 +1530,7 @@ function stageLabel(stage: string | undefined, t: TFunction<"t">, allowed?: stri
 
 function AnalyzeProgress() {
   const { t } = useTranslation();
-  const { progress, audioOnly, jobSteps } = useStore();
+  const { progress, audioOnly, jobSteps, resumedStages, queuedAhead } = useStore();
   // Показываем только шаги текущей джобы (jobSteps из run()); null (открытие по ?pid и т.п.) = все.
   const STEPS = jobSteps ? ANALYZE_STEPS.filter((stp) => jobSteps.includes(stp.key)) : ANALYZE_STEPS;
   const matched = STEPS.findIndex((stp) => stp.stages.includes(progress.stage));
@@ -1583,6 +1555,7 @@ function AnalyzeProgress() {
                   {done ? <Check size={12} /> : active ? <Loader2 size={14} className="animate-spin" /> : <span className="w-1.5 h-1.5 rounded-full bg-current" />}
                 </span>
                 <span className={`text-sm ${active ? "text-[var(--color-text)] font-medium" : done ? "text-[var(--color-muted)]" : "text-[var(--color-muted)]/45"}`}>{t(`analyze.${stp.key}`)}</span>
+                {stp.stages.some((st) => resumedStages.includes(st)) && <span className="ml-auto text-[10px] uppercase tracking-wider text-[var(--color-accent-2)]">{t("jobs.fromCache")}</span>}
                 {active && dl && pct != null && <span className="ml-auto mono text-[11px] text-[var(--color-accent)]">{Math.round(pct)}%</span>}
               </div>
             );
@@ -1593,7 +1566,9 @@ function AnalyzeProgress() {
             ? <div className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-300" style={{ width: `${Math.max(2, Math.min(100, pct))}%` }} />
             : <div className="h-full w-1/3 rounded-full bg-[var(--color-accent)] animate-pulse" />}
         </div>
-        <div className="mt-2 min-h-4 text-center mono text-[12px] text-[var(--color-muted)] break-words">{stageLabel(progress.stage, t, jobSteps) || progress.msg}</div>
+        <div className="mt-2 min-h-4 text-center mono text-[12px] text-[var(--color-muted)] break-words">{queuedAhead != null ? t("jobs.queuedAhead", { n: queuedAhead }) : stageLabel(progress.stage, t, jobSteps) || progress.msg}</div>
+        <JobFailurePanel />
+        <CancelJobButton />
       </div>
     </div>
   );
@@ -2485,7 +2460,8 @@ function Editor() {
   const [vol, setVol] = useState<number>(() => { const s = localStorage.getItem("dub-vol"); return s ? parseFloat(s) : 1; });
 
   const playEndRef = useRef<number>(Infinity);                        // stop time for single-phrase playback (Infinity = full)
-  const [dubRev, setDubRev] = useState(0);                            // dub-audio cache-buster — bumped ONLY when the dub track is re-rendered (regen/export), NOT on every edit, so live edits don't reload <audio> mid-playback
+  const dubRev = useStore((s) => s.dubRev);
+  const bumpDub = useStore((s) => s.bumpDub);
   useEffect(() => {
     if (audioRef.current) {
       audioRef.current.volume = vol;
@@ -2618,6 +2594,12 @@ function Editor() {
     addExport({ id: `err-${Date.now()}`, name: t("common.error"), status: "error", msg: String(err) });
     try { setProject(await api.getProject(pid)); } catch { /* offline -> keep optimistic state */ }
   }
+  // Джобу отменили кнопкой в полосе джоб: не ошибка — строка в журнале и проект в том виде, в каком его оставила джоба.
+  async function jobCancelled(kind: JobKind) {
+    pushActivity(t("jobs.cancelledKind", { kind: t(`jobs.kind.${kind}`) }), "done");
+    try { setProject(await api.getProject(pid)); bump(); }
+    catch (err) { pushActivity(String(err), "error"); }
+  }
   async function persistSeg(id: string, tgt: string) {               // on blur -> persist to backend + refresh frame
     setRendered(false);
     try { setProject(await api.patch(pid, { op: "segment", id, tgt_text: tgt })); bump(); }
@@ -2638,7 +2620,9 @@ function Editor() {
     try { setProject(await api.patch(pid, { op: "add_segment", id: `u${Date.now().toString(36)}`, start, end: start + 2, speaker })); bump(); }
     catch (e) { await surfaceErr(e); }
   }
-  const watchDub = (jobId: string) => api.watchJob(jobId, (e) => {
+  // По проекту уже идёт озвучка или экспорт: новая джоба ждёт её конца (журнал говорит, чего ждём).
+  const waitNote = (kind: JobKind) => pushActivity(t("jobs.waitingFor", { kind: t(`jobs.kind.${kind}`) }), "work");
+  const watchDub = (jobId: string) => watchLocal(pid, "dub_audio", jobId, (e) => {
     if (e.type === "progress") {
       if (e.msg) useStore.getState().pushActivity(e.msg, "work");
       useStore.getState().setProgress(e.stage || "tts", e.msg || "", e.pct ?? null);
@@ -2649,10 +2633,10 @@ function Editor() {
     setRegenId(segId); pushActivity(t("seg.regen"));
     try {
       await api.patch(pid, { op: "regen", id: segId });
-      const { job_id } = await api.dubAudio(pid);                     // ре-TTS ТОЛЬКО dirty-сегмент -> свежая озвучка (без сборки видео; финал — на Экспорте)
+      const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);   // ре-TTS ТОЛЬКО dirty-сегмент -> свежая озвучка (без сборки видео; финал — на Экспорте)
       await watchDub(job_id);
-      setProject(await api.getProject(pid)); setRendered(false); bump(); setDubRev(Date.now()); playSfx("notify");   // refresh preview + reload the re-rendered dub audio
-    } catch (e) { await surfaceErr(e); }
+      setProject(await api.getProject(pid)); setRendered(false); bump(); bumpDub(); playSfx("notify");   // refresh preview + reload the re-rendered dub audio
+    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
     finally { setRegenId(null); }
   }
   // hide/del/keep одной строки: патч проекта (без авто-ре-озвучки; рендер — по кнопке)
@@ -2731,10 +2715,10 @@ function Editor() {
     setRegenId("__all__"); pushActivity(t("voice.regenAll"));       // sentinel: disables per-seg regen buttons, no per-seg spinner
     try {
       await api.patch(pid, { op: "regen_all" });                    // mark every segment dirty
-      const { job_id } = await api.dubAudio(pid);                   // ре-TTS всех сегментов -> свежая озвучка (видео на Экспорте)
+      const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);   // ре-TTS всех сегментов -> свежая озвучка (видео на Экспорте)
       await watchDub(job_id);
-      setProject(await api.getProject(pid)); setRendered(false); bump(); setDubRev(Date.now()); playSfx("notify");   // покадровое превью; /dub обновлён -> плей играет новый дуб
-    } catch (e) { await surfaceErr(e); }
+      setProject(await api.getProject(pid)); setRendered(false); bump(); bumpDub(); playSfx("notify");   // покадровое превью; /dub обновлён -> плей играет новый дуб
+    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
     finally { setRegenId(null); }
   }
   function playFull() {                                               // bottom-bar Play: play the whole dub from the playhead
@@ -2776,8 +2760,8 @@ function Editor() {
     addExport({ id: exId, name, status: "rendering", msg: t("common.rendering"), pid });   // queue entry -> Files panel (no screen block)
     setRendering(true); pushActivity(`${t("export.proceed")}: ${name}`);
     try {
-      const { job_id } = await api.render(pid);
-      await api.watchJob(job_id, (e) => { if (e.type === "progress") { updateExport(exId, { msg: e.msg || "" }); pushActivity(e.msg || "", "work"); } });
+      const { job_id } = await enqueueWhenFree(() => api.render(pid), (kind) => { updateExport(exId, { msg: t("jobs.waitingFor", { kind: t(`jobs.kind.${kind}`) }) }); waitNote(kind); });
+      await watchLocal(pid, "render", job_id, (e) => { if (e.type === "progress") { updateExport(exId, { msg: e.msg || "" }); pushActivity(e.msg || "", "work"); } });
       updateExport(exId, { status: "done", msg: "", url: `${api.outputUrl(pid)}?rev=${Date.now()}` });   // bust cache on re-export
       // Раскрыть реальный выход в проводнике: контейнер может быть output.mkv (#113, сохранена ориг. дорожка) —
       // не хардкодим .mp4. Расширение из project.json (keep_original_track + container), иначе .mp4.
@@ -2785,9 +2769,14 @@ function Editor() {
       // Если имя всё же не совпало (редкий рассинхрон настроек), бэкенд сам резолвит выход через find_output — не гадаем здесь.
       api.reveal(pid, outName).catch(() => {});   // открыть проводник с выделенным готовым файлом — юзер видит, куда сохранилось
       pushActivity(`${t("compare.result")}: ${name}`, "done"); playSfx("success");
-      setRendered(true); setDubRev(Date.now());   // /dub now serves the freshly rendered output.mp4 -> reload <audio>
+      setRendered(true); bumpDub();   // /dub now serves the freshly rendered output.mp4 -> reload <audio>
     } catch (err) {
-      updateExport(exId, { status: "error", msg: String(err) }); pushActivity(String(err), "error"); playSfx("error");
+      if (err instanceof JobCancelledError) {
+        updateExport(exId, { status: "error", msg: t("jobs.state.cancelled") });
+        pushActivity(t("jobs.cancelledKind", { kind: t("jobs.kind.render") }), "done");
+      } else {
+        updateExport(exId, { status: "error", msg: String(err) }); pushActivity(String(err), "error"); playSfx("error");
+      }
     } finally { setRendering(false); }
   }
   async function doRemix() {                                            // Gemma rewrites the WHOLE script on a theme
@@ -2796,12 +2785,12 @@ function Editor() {
     try {
       pushHistory(p);
       const { job_id } = await api.remix(pid, remixText.trim());
-      await api.watchJob(job_id, (e) => { if (e.type === "progress") useStore.getState().setProgress(e.stage || "remix", e.msg || t("remix.apply"), e.pct ?? null); });
+      await watchLocal(pid, "remix", job_id, (e) => { if (e.type === "progress") useStore.getState().setProgress(e.stage || "remix", e.msg || t("remix.apply"), e.pct ?? null); });
       setRendered(false);
       setProject(await api.getProject(pid));                            // rewritten transcript -> shows in the lane
       bump(); setLane("subs");                                          // показать переписанный текст сразу
       useStore.getState().setProgress("done", t("remix.apply"), null); // done-строка в журнале
-    } catch (err) { await surfaceErr(err); }                           // было: тихий console.error -> провал не был виден
+    } catch (err) { if (err instanceof JobCancelledError) await jobCancelled("remix"); else await surfaceErr(err); }
     finally { setRemixing(false); }
   }
 
@@ -4089,15 +4078,16 @@ function BatchView() {
         const fSubs = ao ? "none" : eSubs;
         const fBurn = ao ? false : audio === "transcribe" ? true : burn;
         // Стиль перевода (#112) — параметром analyze (patch до analyze невозможен: project.json ещё нет).
-        const { job_id } = await api.analyze(project_id, tgt, eMode, src, fSubs, eRewrite, fBurn, ao ? false : detectText, false, trStyle);
-        await api.watchJob(job_id, (e) => { if (e.type === "progress") upd({ pct: e.pct ?? 0, detail: e.msg || undefined }); });
-        if (audio === "voiceover") await api.patch(project_id, { op: "voiceover_gain", gain_db: voGain });   // громкость оригинала со старта -> общий для всех проектов батча
-        // Сохранить оригинальную дорожку (#113): 2-я дорожка при mux. Только dub/voiceover, не аудио-файл.
-        if (keepOrig && !ao && doRender) await api.patch(project_id, { op: "keep_original", keep: true, container });
-        // Голоса из библиотеки (#114): раздать слоты ПЕРЕД render каждого проекта. Ошибка не роняет батч (клон-фолбэк).
-        if (voiceSrc === "library" && doRender && (slotsM.length || slotsF.length)) {
-          try { await api.voiceSlots(project_id, { male: slotsM, female: slotsF }); } catch { /* фолбэк на клон */ }
-        }
+        // Громкость оригинала, 2-я дорожка (#113) и голоса из библиотеки (#114) сервер кладёт на проект в
+        // конце анализа (и повторяет при «Продолжить»); ненайденные голоса — строкой в журнале, спикеры на клоне.
+        const post: AnalyzePost = {
+          voGain: audio === "voiceover" ? voGain : undefined,
+          keepOriginal: keepOrig && !ao && doRender ? { container } : undefined,
+          voiceSlots: voiceSrc === "library" && doRender && (slotsM.length || slotsF.length) ? { male: slotsM, female: slotsF } : undefined,
+        };
+        const { job_id } = await api.analyze(project_id, tgt, eMode, src, fSubs, eRewrite, fBurn, ao ? false : detectText, false, trStyle, false, "", "auto", post);
+        const res = await api.watchJob(job_id, (e) => { if (e.type === "progress") upd({ pct: e.pct ?? 0, detail: e.msg || undefined }); });
+        reportVoiceSlots((res as AnalyzeResult).post.voice_slots);
         if (doRender) {
           upd({ status: "rendering", pct: 0 });
           const r = await api.render(project_id);
@@ -4327,12 +4317,7 @@ function TranscriptView() {
     setStage("analyzing");
     try {
       const { job_id } = await api.retranslate(pid, tgt, mode);
-      await api.watchJob(job_id, (e) => {
-        if (e.type === "progress") {
-          if (e.msg) useStore.getState().pushActivity(e.msg, "work");
-          setProgress(e.stage || "", e.msg || "", e.pct ?? null);
-        }
-      });
+      await watchTracked(pid, "retranslate", job_id);
       const updated = await api.getProject(pid);
       if (updated.mode === "transcribe") {
         const patched = await api.patch(pid, { mode });
@@ -4341,7 +4326,14 @@ function TranscriptView() {
         setProject(updated);
       }
       setStage("editor");
-    } catch {
+    } catch (err) {
+      if (err instanceof JobCancelledError) {                        // перевод отменили на экране анализа: транскрипт остаётся транскриптом
+        useStore.getState().pushActivity(t("jobs.cancelledKind", { kind: t("jobs.kind.retranslate") }), "done");
+        try { setProject(await api.getProject(pid)); }
+        catch (e) { useStore.getState().pushActivity(String(e), "error"); }
+        setStage("editor");
+        return;
+      }
       try {
         const patched = await api.patch(pid, { mode });
         setProject(patched);
@@ -4517,6 +4509,7 @@ export default function App() {
   const setPid = useStore((s) => s.setPid);
   const setProject = useStore((s) => s.setProject);
   const setStage = useStore((s) => s.setStage);
+  const pid = useStore((s) => s.pid);
   const [cap, setCap] = useState("");
   const [capOffline, setCapOffline] = useState(false);
   useEffect(() => { api.capabilities().then((c) => {
@@ -4549,6 +4542,7 @@ export default function App() {
       {stage === "batch" && <BatchView />}
       {stage === "multilang" && <MultiLangView />}
       {stage === "editor" && (projMode === "transcribe" ? <TranscriptView /> : <Editor />)}
+      {stage === "editor" && pid && <ProjectJobBar key={pid} pid={pid} />}
       <footer className="mono h-6 px-4 flex items-center gap-2 text-[10px] text-[var(--color-muted)] border-t border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
         <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] shrink-0" /><span className="truncate" title={capOffline ? t("status.backendOffline") : cap}>{capOffline ? t("status.backendOffline") : cap}</span>
       </footer>

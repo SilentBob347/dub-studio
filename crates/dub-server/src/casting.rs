@@ -793,6 +793,28 @@ fn load_face_emb(models_root: &Path, anime: bool, progress: &Progress) -> Option
     }
 }
 
+/// Отпечаток моделей кастинга для ключа стадии: имя+размер файлов детектора/эмбеддера лица и голоса
+/// (0 — нет файла). Докачанные модели меняют ключ, и кастинг пересчитывается уже с аватарами.
+pub fn models_fingerprint(models_root: &Path, anime: bool) -> String {
+    let voice = std::env::var("DUB_FACES_WESPEAKER")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dub_faces::wespeaker_path(models_root));
+    let face: Vec<std::path::PathBuf> = if anime {
+        vec![models_root.join("faces").join("anime_face").join("model.onnx"), dub_faces::ccip_path(models_root)]
+    } else {
+        let m = FacesModels::resolve(models_root);
+        vec![m.scrfd, m.lvface]
+    };
+    face.iter()
+        .chain(std::iter::once(&voice))
+        .map(|p| {
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            format!("{}:{size}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 /// Извлечь один кадр видео в момент t (сек) -> RgbImage. Быстрый seek (-ss ПЕРЕД -i).
 fn extract_frame(video: &Path, t: f64, out: &Path) -> Result<image::RgbImage, String> {
     let res = std::process::Command::new(FFMPEG)

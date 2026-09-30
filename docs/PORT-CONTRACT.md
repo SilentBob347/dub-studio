@@ -13,16 +13,44 @@
   отвечают сразу телом Project.
 - Снапшот `OPTS` берётся в момент постановки джобы (иммунитет к конкурентному `PATCH /engine/opts`).
 - В Rust: `crates/dub-server/src/jobs.rs` — единый воркер (`spawn_blocking`), broadcast-канал на SSE,
-  oneshot для синхронного ожидания (preview/original). Реап терминальной джобы через 300с.
+  oneshot для синхронного ожидания (preview/original). У джобы есть вид (analyze|retranslate|remix|
+  dub_audio|render|export_lang|download|voices_pack|frame), проект, время и последнее событие.
+  Завершённые джобы живут в истории 10 мин (не больше 50), читать результат можно сколько угодно раз.
+- Джобы проекта (analyze/retranslate/remix/dub_audio/render/export_lang) пишут `workspace/<pid>/job.json`
+  ДО постановки: {kind, args, state queued|running|failed|interrupted|done|cancelled, stage,
+  error{code,text}, job_id, resumes, started_at, updated_at}. При старте сервиса running/queued →
+  interrupted.
+- Повторная постановка джобы того же класса по тому же проекту, пока первая не завершена → 409
+  `{"error":"job_conflict","job_id":..,"kind":..}`. Классы: text = analyze/retranslate/remix,
+  audio = dub_audio/render/export_lang.
 
 ## SSE — формат событий (`GET /jobs/{id}/events`)  — **done**
 
 ```
-data: {"type":"progress", "msg": "...", ...}
+data: {"type":"queued", "position": n}
+data: {"type":"running"}
+data: {"type":"progress", "stage": "...", "msg": "...", "resumed": true?, ...}
 data: {"type":"done", "result": <json|null>}
 data: {"type":"error", "error": "..."}
+data: {"type":"cancelled"}
 ```
-Поток завершается на `done`/`error`. 404 если job_id неизвестен. Совпадает 1:1 с app.py.
+Первым приходит терминал (если джоба уже завершена) или последнее известное событие. Поток завершается
+на `done`/`error`/`cancelled`, keep-alive комментариями. 404 если job_id неизвестен или вытеснен из
+истории. `resumed:true` — стадия/сегменты взяты из кэша прошлого прогона.
+
+## Джобы: статус, отмена, продолжение — **done**
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/jobs?pid=` | {jobs:[снапшот...], project_job: job.json|null}: активные и недавние (без frame), новые сверху; с pid — только проекта |
+| GET | `/jobs/{id}?wait=N` | Снапшот {id, kind, pid, status queued|running|done|error|cancelled, stage, msg, pct, position?, created_at, started_at, finished_at, result|error}; wait (сек, ≤55) — long-poll до завершения |
+| POST | `/jobs/{id}/cancel` | В очереди → cancelled сразу; выполняется → {"status":"cancelling"}: кооперативная отмена между стадиями/сегментами, engine.cancel() Higgs, kill учтённых дочерних процессов (ffmpeg, BSRoformer, llama-server, whisper); завершённая → 409 |
+| POST | `/projects/{pid}/resume` | Тот же kind с теми же args из job.json на ТОМ ЖЕ проекте → {job_id, kind, project_id}. Нет job.json → 404; done → 409 `{"error":"nothing_to_resume"}`; активная джоба → 409 `{"error":"job_conflict","job_id","kind"}` |
+| DELETE | `/projects/{pid}` | При незавершённой джобе проекта → 409 `{"error":"project_busy","job_id","kind"}` |
+
+Продолжение дешёвое: analyze пропускает стадии с совпавшим ключом параметров (diar.json, transcript.json,
+translated.json, ocr.json, casting.json в cache.json), render синтезирует только сегменты без файла или
+с изменившимся ключом синтеза (seg_ckpt.json, затем Segment.ckpt). Все артефакты пишутся tmp+rename.
 
 ## Эндпоинты
 
@@ -36,14 +64,15 @@ data: {"type":"error", "error": "..."}
 | GET | `/voices` | **done** | {voices: []} — у порта нет именованного voice-пака (Higgs клонирует из ref-аудио), отдаём пусто как питон при отсутствии пака (endpoints.rs::voices) |
 | GET | `/presets` | **done** | {presets: TEMPLATES{reveal,plate,font,base,plate_c?,accent?}, reveals: [...]} (fresh-семейство без plate_c, endpoints.rs::presets) |
 | POST | `/projects` | **done** | multipart-загрузка видео → `workspace/<pid>/source.<ext>` + `source.txt`; вернуть {project_id, filename} |
-| POST | `/projects/{pid}/analyze` | **part** | Query: tgt_lang, mode, src_lang, subs, rewrite. Джоба: analyze()→project.json. Вернуть {job_id}. **Раунд 2: ASR+диаризация (транскрипт-стадия): ffmpeg extract 16k mono → Nemotron 3 Diarization turns (при <2 спикеров штатная single-speaker ветка) → TDT int8 словные таймстемпы → Project (src_text, words в extra, speaker, mode/subs-дефолты). Раунд 3: стадии translate+vision через сайдкар Gemma (llama-server + mmproj) — ctx-проход vision layout/scene + audio-контекст + перевод всего транскрипта → tgt_text, captions.titles(+tgt)/sub_style/sub_y/brands, raw_ctx. Fail-safe: сбой перевода не валит транскрипт-стадию. OCR/captions/render — раунд 4.** SSE-фазы: probe/extract_audio/diarize/asr/vision/translate |
+| GET | `/projects` | **done** | Сводка проектов для «Недавних» + job_kind/job_state/job_stage/job_error из job.json |
+| POST | `/projects/{pid}/analyze` | **part** | Query: tgt_lang, mode, src_lang, subs, rewrite. Настройки стартового флоу, которые сервер кладёт на проект в конце анализа (и повторяет при resume): vo_gain (дБ, op voiceover_gain), sub_blur (0/1, op sub_blur), keep_original=1 + container mp4/mkv (op keep_original), voice_slots (JSON {male:[…], female:[…]}, как POST /voice-slots); кривое значение → 400. Результат джобы: {project_id, output, post:{voice_slots?: {assigned, speakers} \| {error:"missing_voices", names} \| {error:"no_vocals"}}}. Джоба: analyze()→project.json. Вернуть {job_id}. **Раунд 2: ASR+диаризация (транскрипт-стадия): ffmpeg extract 16k mono → Nemotron 3 Diarization turns (при <2 спикеров штатная single-speaker ветка) → TDT int8 словные таймстемпы → Project (src_text, words в extra, speaker, mode/subs-дефолты). Раунд 3: стадии translate+vision через сайдкар Gemma (llama-server + mmproj) — ctx-проход vision layout/scene + audio-контекст + перевод всего транскрипта → tgt_text, captions.titles(+tgt)/sub_style/sub_y/brands, raw_ctx. Fail-safe: сбой перевода не валит транскрипт-стадию. OCR/captions/render — раунд 4.** SSE-фазы: probe/extract_audio/diarize/asr/vision/translate |
 | POST | `/projects/{pid}/remix` | **done** | Query: instruction. Джоба: Gemma (flat_rewrite dub-translate) переписывает весь транскрипт, все dirty, audio.rewrite=instr. Вернуть {job_id} (endpoints.rs::remix_project) |
 | GET | `/projects/{pid}` | **done** | Тело Project (JSON) или 404/409 |
 | PATCH | `/projects/{pid}` | **part** | Синхронная правка Project (без GPU), `{op: ...}` — см. таблицу ниже. **Раунд 2: segment/subpos/mode (атомарно tmp+rename). Раунд 3: translate (смена tgt_lang + subs=translate, funny→rewrite, все dirty), rewrite (инструкция ре-дубляжа, mode=dub, все dirty). Прочие op → 400.** |
 | PUT | `/projects/{pid}` | **done** | Полная замена Project (undo/redo снапшот); валидирует тело как Project, сохраняет атомарно (endpoints.rs::put_project) |
 | GET | `/projects/{pid}/waveform?n=600` | **done** | Пики аудио (ffmpeg → s16le 8kHz, np.array_split-эквивалент), кэш waveform.json, CPU вне GPU-воркера (endpoints.rs::waveform + wavio::waveform_peaks) |
 | GET | `/projects/{pid}/preview?t=&rev=` | **done** | Джоба preview_frame → PNG через GPU-воркер (build_ass из ТЕКУЩЕГО Project + burn_frame). Синхронное ожидание (timeout 300с), abandoned при таймауте (endpoints.rs::preview + frame.rs::preview_frame) |
-| POST | `/projects/{pid}/render` | **done** | Джоба render()→output.mp4 (раунд 4): probe→extract 44.1k→separate(dub-sep)→Higgs clone TTS per-seg (кэш seg_XXX.wav, ре-TTS ТОЛЬКО dirty)→fit_to_slot(atempo)→timeline→mix(instr+dub)→build ASS(dub-captions)→burn(blur из blur_boxes)→mux. regen_dub если dirty; после — сбросить dirty. SSE-фазы probe/extract_audio/separate/tts/mix/build/burn/mux. Вернуть {job_id} |
+| POST | `/projects/{pid}/render` | **done** | Джоба render()→output.mp4 (раунд 4): probe→extract 44.1k→separate(dub-sep)→Higgs clone TTS per-seg (кэш seg_XXX.wav, ре-TTS ТОЛЬКО dirty)→fit_to_slot(atempo)→timeline→mix(instr+dub)→build ASS(dub-captions)→burn(blur из blur_boxes)→mux. regen_dub если dirty; после — сбросить dirty. Синтез сегмента — только если нет seg-файла или ключ синтеза (текст/спикер/слот/голос/реф/движок/нонс regen) не совпал с seg_ckpt.json. SSE-фазы probe/extract_audio/separate/tts/mix/build/burn/mux. Вернуть {job_id} |
 | GET | `/projects/{pid}/output?dl=` | **done** | Отдать output.mp4 (Range через tower-http ServeFile → 206); dl=1 → Content-Disposition attachment |
 | GET | `/projects/{pid}/original?t=` | **done** | ОДИН PNG-кадр оригинала на t (порт app.py.original → source_frame; ComparePane вставляет как `<img src>`). Джоба source_frame → PNG, timeout 60с. **ИСПРАВЛЕНО (раунд 5): раньше отдавал Range-видео — это ломало ComparePane (broken img). Сырое видео для плеера — /dub.** (endpoints.rs::original_frame) |
 | GET | `/projects/{pid}/dub` | **done** | Проигрываемое видео: output.mp4, иначе analyzed.mp4 (Range) |

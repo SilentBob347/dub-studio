@@ -1,9 +1,14 @@
 import { create } from "zustand";
-import type { Project } from "./lib/api";
+import type { JobKind, Project } from "./lib/api";
 
 type Stage = "boot" | "setup" | "empty" | "analyzing" | "editor" | "batch" | "multilang";
 export type ExportItem = { id: string; name: string; status: "rendering" | "done" | "error"; msg: string; url?: string; pid?: string };
 export type Activity = { t: number; text: string; kind: "work" | "done" | "error" };   // строка лога «что делает приложение»
+export type CurrentJob = { id: string; kind: JobKind; pid: string };
+// Джоба, за которой следит сам редактор (экспорт, озвучка, ремикс): полоса джоб проекта показывает её с «Отменить».
+export type LocalJob = { id: string; kind: JobKind; pid: string; stage: string; msg: string; ahead: number | null };
+// Джоба упала на экране анализа: ждём решения пользователя (продолжить с места остановки или назад).
+export type JobFailure = { pid: string; msg: string; resolve: (choice: "continue" | "back") => void };
 
 type State = {
   stage: Stage;
@@ -17,6 +22,7 @@ type State = {
   past: Project[];                  // undo/redo history of Project snapshots
   future: Project[];
   rev: number;                       // preview cache-buster: bumped on every backend-confirmed frame change
+  dubRev: number;                    // dub-audio cache-buster: bumped ONLY when the dub track is re-rendered (regen/export/finished job), NOT on every edit, so live edits don't reload <audio> mid-playback
   selBlur: number | null;            // selected blur-box index — SHARED between the left list and the canvas overlay
   selTitle: number | null;           // selected title index — SHARED between the left titles list and the canvas overlay
   justAnalyzed: boolean;             // только что прошёл analyze -> редактор один раз авто-генерит дуб (чтобы сразу слушать)
@@ -36,10 +42,25 @@ type State = {
   pushHistory: (p: Project) => void; // snapshot the project BEFORE a mutation (for undo)
   undo: () => Project | null;        // returns the project to restore (PUT it) or null
   redo: () => Project | null;
-  bump: () => void;                  // invalidate the rendered preview frame -> <img> refetches
+  bump: () => void;
+  bumpDub: () => void;                  // invalidate the rendered preview frame -> <img> refetches
   setSelBlur: (i: number | null) => void;
   setSelTitle: (i: number | null) => void;
   pushActivity: (text: string, kind?: Activity["kind"]) => void;   // добавить строку в журнал
+  currentJob: CurrentJob | null;     // джоба экрана анализа (для «Отменить»)
+  setCurrentJob: (j: CurrentJob | null) => void;
+  queuedAhead: number | null;        // сколько джоб впереди, пока текущая в очереди
+  setQueuedAhead: (n: number | null) => void;
+  resumedStages: string[];           // стадии, взятые из кэша прошлого прогона (отметка в степпере)
+  markResumed: (stage: string) => void;
+  clearResumed: () => void;
+  jobFailure: JobFailure | null;
+  setJobFailure: (f: JobFailure | null) => void;
+  localJobs: LocalJob[];
+  putLocalJob: (j: LocalJob) => void;
+  patchLocalJob: (id: string, patch: Partial<LocalJob>) => void;
+  dropLocalJob: (id: string) => void;
+  jobsRev: number;                   // растёт на каждом конце джобы редактора: полоса джоб перечитывает итог проекта
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -54,6 +75,7 @@ export const useStore = create<State>((set, get) => ({
   past: [],
   future: [],
   rev: 0,
+  dubRev: 0,
   selBlur: null,
   selTitle: null,
   justAnalyzed: false,
@@ -99,6 +121,7 @@ export const useStore = create<State>((set, get) => ({
     return next;
   },
   bump: () => set((s) => ({ rev: s.rev + 1 })),
+  bumpDub: () => set({ dubRev: Date.now() }),
   setSelBlur: (selBlur) => set({ selBlur }),
   setSelTitle: (selTitle) => set({ selTitle }),
   pushActivity: (text, kind = "work") => set((s) => {
@@ -108,4 +131,18 @@ export const useStore = create<State>((set, get) => ({
     if (last && last.text === clean && last.kind === kind) return {};   // дедуп повторов
     return { activities: [...s.activities, { t: Date.now(), text: clean, kind }].slice(-200) };
   }),
+  currentJob: null,
+  setCurrentJob: (currentJob) => set({ currentJob }),
+  queuedAhead: null,
+  setQueuedAhead: (queuedAhead) => set({ queuedAhead }),
+  resumedStages: [],
+  markResumed: (stage) => set((s) => (s.resumedStages.includes(stage) ? {} : { resumedStages: [...s.resumedStages, stage] })),
+  clearResumed: () => set({ resumedStages: [] }),
+  jobFailure: null,
+  setJobFailure: (jobFailure) => set({ jobFailure }),
+  localJobs: [],
+  putLocalJob: (j) => set((s) => ({ localJobs: [...s.localJobs.filter((x) => x.id !== j.id), j] })),
+  patchLocalJob: (id, patch) => set((s) => ({ localJobs: s.localJobs.map((x) => (x.id === id ? { ...x, ...patch } : x)) })),
+  dropLocalJob: (id) => set((s) => ({ localJobs: s.localJobs.filter((x) => x.id !== id), jobsRev: s.jobsRev + 1 })),
+  jobsRev: 0,
 }));

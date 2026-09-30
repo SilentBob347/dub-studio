@@ -8,7 +8,7 @@
 //! blur_boxes пустыми — analyze не падает (блюр не блокер, редактор добавит руками).
 
 use dub_core::{BlurBox, Project};
-use dub_ocr::{analyze_layout, blur, detect_regions, OcrPaths};
+use dub_ocr::{analyze_layout, blur, detect_regions, OcrPaths, RawDet, Region};
 use std::collections::HashSet;
 
 use crate::analyze::{AnalyzeArgs, AnalyzePaths, Progress};
@@ -29,12 +29,39 @@ pub fn stage(
     total: f64,
     progress: &Progress,
 ) {
+    match detect(paths, progress) {
+        Ok((regions, raw)) => compose_captions(args, paths, proj, &regions, &raw, vw, vh, total, progress),
+        Err(e) => emit(progress, "ocr_detect", &format!("{e}; без блюра")),
+    }
+}
+
+/// Дорогая часть стадии: кадры + детекция/распознавание вшитого текста. Зависит только от видео и
+/// моделей, поэтому analyze кэширует её выход целиком. Err — стадию пропустить (fail-safe у вызывающего).
+pub fn detect(paths: &AnalyzePaths, progress: &Progress) -> Result<(Vec<Region>, Vec<RawDet>), String> {
     let ocr_paths = OcrPaths::under(&paths.models_root);
     if !ocr_paths.all_exist() {
-        emit(progress, "ocr_detect", "модели OCR не найдены -> без блюр-боксов");
-        return;
+        return Err("модели OCR не найдены".into());
     }
     emit(progress, "ocr_detect", "детекция вшитого текста (PP-OCR DBNet+CRNN)");
+    // detect_regions: fps=caption_fps, дефолты как в питоне (min_dur .3, iou .3, pad 8, jitter 20, score .4).
+    let fps = paths.caption_fps.max(1);
+    detect_regions(&paths.input, &paths.work_dir, &ocr_paths, fps, 0.3, 0.3, 8, 20.0, 0.4)
+        .map_err(|e| format!("OCR-детекция не удалась ({e})"))
+}
+
+/// Раскладка + блюр субтитр-полосы + caption-композит по готовым детекциям (дёшево; зависит от перевода).
+#[allow(clippy::too_many_arguments)]
+pub fn compose_captions(
+    args: &AnalyzeArgs,
+    paths: &AnalyzePaths,
+    proj: &mut Project,
+    regions: &[Region],
+    raw: &[RawDet],
+    vw: i64,
+    vh: i64,
+    total: f64,
+    progress: &Progress,
+) {
 
     // spoken vocab из исходного транскрипта (для отсечения сцен-графики от субтитр-полосы).
     let spoken: HashSet<String> = proj
@@ -48,27 +75,8 @@ pub fn stage(
         })
         .collect();
 
-    // detect_regions: fps=caption_fps, дефолты как в питоне (min_dur .3, iou .3, pad 8, jitter 20, score .4).
     let fps = paths.caption_fps.max(1);
-    let (regions, raw) = match detect_regions(
-        &paths.input,
-        &paths.work_dir,
-        &ocr_paths,
-        fps,
-        0.3,
-        0.3,
-        8,
-        20.0,
-        0.4,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            emit(progress, "ocr_detect", &format!("OCR-детекция не удалась ({e}); без блюра"));
-            return;
-        }
-    };
-
-    let (localize, caption_boxes, sub_y_det) = analyze_layout(&regions, vh, &raw, &spoken);
+    let (localize, caption_boxes, sub_y_det) = analyze_layout(regions, vh, raw, &spoken);
 
     // ── band_blur (порт pipeline.py:416-442) ───────────────────────────────────
     // caption_boxes -> Det (x,y,w,h,t), отфильтровать центр-straddle гейтом (боковые вывески CHIYA/BAKERY

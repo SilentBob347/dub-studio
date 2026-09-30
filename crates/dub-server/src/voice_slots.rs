@@ -7,9 +7,10 @@
 //! как читает render.rs). Пустой список пола -> спикеры этого пола остаются на клонировании (слот "-").
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use dub_core::Project;
+use serde_json::{json, Value};
 
 use crate::f0;
 
@@ -39,6 +40,52 @@ pub struct SpeakerAssign {
 pub struct Slots {
     pub male: Vec<String>,
     pub female: Vec<String>,
+}
+
+impl Slots {
+    /// Из тела {male:[имена], female:[имена]}: пробелы по краям срезаются, пустые имена отбрасываются.
+    pub fn from_json(body: &Value) -> Slots {
+        let names_of = |k: &str| -> Vec<String> {
+            body.get(k)
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default()
+        };
+        Slots { male: names_of("male"), female: names_of("female") }
+    }
+
+    /// Имена слотов, которых нет среди голосов voices/ (`available`).
+    pub fn missing_in(&self, available: &[String]) -> Vec<String> {
+        self.male.iter().chain(self.female.iter()).filter(|n| !available.contains(n)).cloned().collect()
+    }
+}
+
+/// Вокал анализа для замера F0: чистый vocals16_clean.wav, иначе сырой 16k vocals16.wav; None — анализа не было.
+pub fn vocals_for(dir: &Path) -> Option<PathBuf> {
+    [dir.join("vocals16_clean.wav"), dir.join("vocals16.wav")].into_iter().find(|p| p.is_file())
+}
+
+/// Итог раздачи для ответа: {speaker: {voice, gender, f0}}.
+pub fn mapping(assigns: &[SpeakerAssign]) -> Value {
+    assigns
+        .iter()
+        .map(|a| {
+            let gender = match a.gender {
+                Some(Gender::Male) => Value::from("male"),
+                Some(Gender::Female) => Value::from("female"),
+                None => Value::Null,
+            };
+            (
+                a.speaker.clone(),
+                json!({
+                    "voice": a.voice.clone().map(Value::from).unwrap_or(Value::Null),
+                    "gender": gender,
+                    "f0": a.f0,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>()
+        .into()
 }
 
 /// Замерить медиану F0 спикера: собрать до F0_SAMPLE_SECS его реплик из вокала (вырезки по сегментам),

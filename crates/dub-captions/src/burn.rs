@@ -295,6 +295,7 @@ fn output_with_timeout(mut cmd: Command, secs: u64, log_cmd: bool) -> Result<std
     }
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("ffmpeg запуск: {e}"))?;
+    let _tracked = dub_core::proc::track(child.id());
     let mut so = child.stdout.take().expect("piped stdout");
     let mut se = child.stderr.take().expect("piped stderr");
     let th_out = std::thread::spawn(move || { let mut b = Vec::new(); let _ = so.read_to_end(&mut b); b });

@@ -6,6 +6,7 @@ license.workspace = true
 description = "Вокал/инструментал сепарация — Mel-Band Roformer voc_fv6-Q8_0 через BSRoformer.cpp (сайдкар)"
 
 [dependencies]
+dub-core = { path = "../dub-core" }
 hound = "3"
 thiserror = { workspace = true }
 

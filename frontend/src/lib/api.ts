@@ -1,4 +1,5 @@
 import i18n from "./i18n";
+import type en from "../locales/en.json";
 // Dub Studio API client — talks to the single-worker FastAPI backend over the dub-engine.
 // dev: Vite (5173) -> dub-server (8793, DUB_STUDIO_PORT). desktop/portable: the server serves the SPA
 // itself, so calls are same-origin (""). VITE_API overrides both.
@@ -33,11 +34,55 @@ export type Project = {
   render: { burn_cq: number; blur_sigma: number; blur: boolean; codec: string };
   work_dir?: string | null;
 };
+// Вид, состояние и код ошибки джобы проекта: ровно ключи jobs.kind/state/error локалей (подписи в окне).
+export type JobKind = keyof typeof en.jobs.kind;
+export type JobState = keyof typeof en.jobs.state;
+export type JobErrorCode = keyof typeof en.jobs.error;
+export type JobErrorInfo = { code: JobErrorCode; text: string };
 export type ProjectSummary = {
   pid: string; video: string; tgt_lang: string; mode: string;
   width: number; height: number; duration: number; segments: number;
   audio_only: boolean; mtime: number; done: boolean;
+  // последняя джоба проекта (job.json): прерванную/упавшую можно продолжить с места остановки
+  job_kind: JobKind | null; job_state: JobState | null; job_stage: string | null; job_error: JobErrorInfo | null;
 };
+// Снапшот джобы из очереди сервера (GET /jobs, GET /jobs/{id}).
+export type JobSnapshot = {
+  id: string; kind: JobKind; pid: string | null;
+  status: "queued" | "running" | "done" | "error" | "cancelled";
+  stage: string | null; msg: string | null; pct: number | null; position?: number | null;
+  result?: unknown; error?: string;
+};
+// job.json проекта: последняя джоба с аргументами для «Продолжить».
+export type ProjectJob = {
+  kind: JobKind; args: Record<string, unknown>; state: JobState; stage: string;
+  error: JobErrorInfo | null; job_id: string; resumes: number; started_at: number; updated_at: number;
+};
+// Джоба отменена пользователем — не ошибка, а отдельный исход (watchJob отклоняется этим классом).
+export class JobCancelledError extends Error {
+  constructor() { super("job cancelled"); this.name = "JobCancelledError"; }
+}
+// 409 при постановке: по проекту уже идёт джоба того же класса (или любая — для resume/удаления).
+export class JobConflictError extends Error {
+  readonly jobId: string;
+  readonly kind: JobKind;
+  constructor(jobId: string, kind: JobKind) {
+    super(i18n.t("jobs.busy", { kind: i18n.t(`jobs.kind.${kind}`) }));
+    this.name = "JobConflictError";
+    this.jobId = jobId;
+    this.kind = kind;
+  }
+}
+// Итог анализа: настройки стартового флоу, применённые сервером в конце анализа (голоса из библиотеки).
+export type VoiceSlotsOutcome = { assigned: number } | { error: "missing_voices"; names: string[] } | { error: "no_vocals" };
+export type AnalyzeResult = { project_id: string; output: string; post: { voice_slots?: VoiceSlotsOutcome } };
+// Настройки, которые сервер кладёт на проект в конце анализа (и повторяет при «Продолжить»).
+export type AnalyzePost = { voGain?: number; subBlur?: boolean; keepOriginal?: { container: string }; voiceSlots?: { male: string[]; female: string[] } };
+const analyzePostQuery = (p: AnalyzePost): string =>
+  (p.voGain != null ? `&vo_gain=${p.voGain}` : "")
+  + (p.subBlur != null ? `&sub_blur=${p.subBlur ? 1 : 0}` : "")
+  + (p.keepOriginal ? `&keep_original=1&container=${encodeURIComponent(p.keepOriginal.container)}` : "")
+  + (p.voiceSlots ? `&voice_slots=${encodeURIComponent(JSON.stringify(p.voiceSlots))}` : "");
 export type ModelStack = { asr: string; llm: string; vision: string; tts: string };
 // Выбор active.json: строковые слоты + флаги секретов. Ключ OpenRouter и пароль прокси сервер не отдаёт.
 export type Selection = { [slot: string]: string | boolean | undefined; or_key_set?: boolean; proxy_password_set?: boolean };
@@ -55,7 +100,7 @@ export type Capabilities = {
   // Видимые лимиты RAM (настройки): prefill-батч Gemma + длина реф-клипа клона.
   llama_ubatches?: string[]; higgs_ref_secs_opts?: string[];
 };
-export type JobEvent = { type: "progress" | "done" | "error"; stage?: string; pct?: number; msg?: string; result?: unknown; error?: string; component?: string; downloaded?: number; total?: number; parts?: { component: string; pct: number }[] };
+export type JobEvent = { type: "queued" | "running" | "progress" | "done" | "error" | "cancelled"; stage?: string; pct?: number; msg?: string; result?: unknown; error?: string; component?: string; downloaded?: number; total?: number; parts?: { component: string; pct: number }[]; position?: number; resumed?: boolean };
 
 // Кастинг персонажей (#115): бэк детектит лица (SCRFD)+эмбеддинги (LVFace)+active-speaker (LR-ASD),
 // кластеризует в персонажей. GET отдаёт список; POST сохраняет имя/заметку о речи/голос дубляжа.
@@ -87,8 +132,19 @@ export type HwSnapshot = {
 };
 
 async function j<T>(r: Response): Promise<T> {
+  if (r.status === 409) {
+    const body = await r.text();
+    const conflict = parseConflict(body);
+    if (conflict) throw new JobConflictError(conflict.job_id, conflict.kind);
+    throw new Error(`409 ${body}`);
+  }
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   return r.json() as Promise<T>;
+}
+function parseConflict(body: string): { job_id: string; kind: JobKind } | null {
+  if (!body.startsWith("{")) return null;
+  const v = JSON.parse(body) as { error?: string; job_id?: string; kind?: JobKind };
+  return (v.error === "job_conflict" || v.error === "project_busy") && v.job_id && v.kind ? { job_id: v.job_id, kind: v.kind } : null;
 }
 
 // serialize mutating PATCHes: each returns the full Project, so overlapping requests would race to setProject
@@ -183,8 +239,8 @@ export const api = {
     if (subs) fd.append("subs", subs);   // готовые субтитры (SRT/ASS) -> analyze возьмёт текст+тайминг вместо ASR
     return fetch(`${BASE}/projects`, { method: "POST", body: fd }).then(j<{ project_id: string; imported_subs?: boolean }>);
   },
-  analyze: (pid: string, tgt_lang: string, mode = "auto", src_lang = "auto", subs = "auto", rewrite = "", burn = true, detect = true, importTranslated = false, translateStyle = "", casting = false, castingRef = "", contentType = "auto") =>
-    fetch(`${BASE}/projects/${pid}/analyze?tgt_lang=${tgt_lang}&mode=${mode}&src_lang=${src_lang}&subs=${subs}&rewrite=${encodeURIComponent(rewrite)}&burn=${burn ? 1 : 0}&detect=${detect ? 1 : 0}&import_translated=${importTranslated ? 1 : 0}&translate_style=${encodeURIComponent(translateStyle)}&casting=${casting ? 1 : 0}&casting_ref=${encodeURIComponent(castingRef)}&content_type=${encodeURIComponent(contentType)}`, { method: "POST" }).then(j<{ job_id: string }>),
+  analyze: (pid: string, tgt_lang: string, mode = "auto", src_lang = "auto", subs = "auto", rewrite = "", burn = true, detect = true, importTranslated = false, translateStyle = "", casting = false, castingRef = "", contentType = "auto", post: AnalyzePost = {}) =>
+    fetch(`${BASE}/projects/${pid}/analyze?tgt_lang=${tgt_lang}&mode=${mode}&src_lang=${src_lang}&subs=${subs}&rewrite=${encodeURIComponent(rewrite)}&burn=${burn ? 1 : 0}&detect=${detect ? 1 : 0}&import_translated=${importTranslated ? 1 : 0}&translate_style=${encodeURIComponent(translateStyle)}&casting=${casting ? 1 : 0}&casting_ref=${encodeURIComponent(castingRef)}&content_type=${encodeURIComponent(contentType)}${analyzePostQuery(post)}`, { method: "POST" }).then(j<{ job_id: string }>),
   // Кастинг персонажей (#115): список найденных персонажей (аватар+пол+голос+реплики) / сохранение правок.
   casting: (pid: string) => getJson<{ characters: Character[] }>(`/projects/${pid}/casting`),
   castingAvatarUrl: (pid: string, id: string) => `${BASE}/projects/${pid}/casting/avatar?id=${encodeURIComponent(id)}`,
@@ -224,16 +280,27 @@ export const api = {
   pickFolder: () => postJson<{ dir: string | null }>("/pick-folder", {}),   // нативный диалог выбора папки (batch-экспорт в одну папку)
   saveOutput: (pid: string, dir: string, name: string) => postJson<{ ok: boolean; path?: string }>(`/projects/${pid}/save-output`, { dir, name }),   // копия готового output в dir под именем оригинала
   dubUrl: (pid: string, rev = 0) => `${BASE}/projects/${pid}/dub?rev=${rev}`,   // playable dubbed video (frames + dub audio)
+  // Джобы: активные и недавние по проекту (+ его job.json), снапшот, отмена, продолжение с места остановки.
+  jobs: (pid: string) => getJson<{ jobs: JobSnapshot[]; project_job: ProjectJob | null }>(`/jobs?pid=${encodeURIComponent(pid)}`),
+  job: (jobId: string) => getJson<JobSnapshot>(`/jobs/${jobId}`),
+  // Long-poll: снапшот при завершении джобы или через `secs` (≤55); null — джобы уже нет в истории.
+  waitJob: (jobId: string, secs: number) => fetch(`${BASE}/jobs/${jobId}?wait=${secs}`).then((r) => (r.status === 404 ? null : j<JobSnapshot>(r))),
+  cancelJob: (jobId: string) => fetch(`${BASE}/jobs/${jobId}/cancel`, { method: "POST" }).then(j<{ id: string; status: string }>),
+  resumeProject: (pid: string) => fetch(`${BASE}/projects/${pid}/resume`, { method: "POST" }).then(j<{ job_id: string; kind: string; project_id: string }>),
   // SSE job progress -> onEvent per message; resolves on done, rejects on error
-  watchJob: (jobId: string, onEvent: (e: JobEvent) => void) =>
+  // signal: the watcher went away (unmount, project switch) — the stream closes, the promise rejects with AbortError.
+  watchJob: (jobId: string, onEvent: (e: JobEvent) => void, signal?: AbortSignal) =>
     new Promise<unknown>((resolve, reject) => {
+      if (signal?.aborted) { reject(new DOMException("aborted", "AbortError")); return; }
       const es = new EventSource(`${BASE}/jobs/${jobId}/events`);
+      signal?.addEventListener("abort", () => { es.close(); reject(new DOMException("aborted", "AbortError")); }, { once: true });
       es.onmessage = (m) => {
         try {
           const e: JobEvent = JSON.parse(m.data);
           onEvent(e);                                  // a consumer throw must not leak the stream open either
           if (e.type === "done") { es.close(); resolve(e.result); }
           else if (e.type === "error") { es.close(); reject(new Error(e.error)); }
+          else if (e.type === "cancelled") { es.close(); reject(new JobCancelledError()); }
         } catch (err) { es.close(); reject(err instanceof Error ? err : new Error(String(err))); }
       };
       // EventSource fires onerror on transient drops too (it auto-reconnects) — only give up once truly CLOSED

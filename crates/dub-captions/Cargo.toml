@@ -6,6 +6,7 @@ license.workspace = true
 description = "CapCut-стиль вжжёные субтитры: ASS-генерация (26 пресетов) + ffmpeg/libass burn. Порт captions.py"
 
 [dependencies]
+dub-core = { path = "../dub-core" }
 # Метрики глифов TTF (замена PIL ImageFont.getbbox/getmetrics в питоне): чистый Rust, без сборочных
 # зависимостей. Нужны для fit-размера плашки/переноса строк, чтобы плашка хватала ink глифов.
 ab_glyph = "0.2"

@@ -76,6 +76,106 @@ fn emit(progress: &Progress, stage: &str, msg: &str) {
     progress(json!({ "stage": stage, "msg": msg }));
 }
 
+/// Ключи синтеза сегментов {sid: key} рядом с seg-файлами. Пишется атомарно сразу после каждого
+/// сегмента: оборванный рендер при повторе синтезирует только то, чего нет или что изменилось.
+pub const SEG_CKPT_FILE: &str = "seg_ckpt.json";
+/// Запись «в seg-файле оригинальная реплика (keep_original), а не синтез» — не совпадает ни с одним ключом.
+const SEG_ORIGINAL: &str = "original";
+/// Запись «синтез провалился, в seg-файле оригинальная реплика»: пока дорожка не собрана целиком,
+/// продолжение прерванного прогона синтезирует такой сегмент снова.
+const SEG_FALLBACK: &str = "fallback";
+
+/// Запись в seg_ckpt.json — настоящий ключ синтеза (а не метка оригинальной реплики).
+pub fn is_synth_key(k: &str) -> bool {
+    k != SEG_ORIGINAL && k != SEG_FALLBACK
+}
+/// Поле Segment.extra с нонсом «перегенерировать»: patch regen/regen_all меняет его, меняя и ключ.
+pub const REGEN_NONCE: &str = "regen";
+/// Версия ключа: поднимать при смене лестницы/опций синтеза, меняющей звучание уже озвученного.
+const SEG_KEY_VER: &str = "seg-key-v1";
+
+pub struct SegCkpts {
+    path: PathBuf,
+    map: std::collections::BTreeMap<String, String>,
+}
+
+impl SegCkpts {
+    /// Нет файла — пусто; битый — ошибка с причиной.
+    pub fn load(wd: &Path) -> Result<Self, String> {
+        let path = wd.join(SEG_CKPT_FILE);
+        let map = match std::fs::read_to_string(&path) {
+            Ok(t) => serde_json::from_str(&t).map_err(|e| format!("разбор {}: {e}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(e) => return Err(format!("чтение {}: {e}", path.display())),
+        };
+        Ok(SegCkpts { path, map })
+    }
+
+    pub fn get(&self, sid: &str) -> Option<&str> {
+        self.map.get(sid).map(String::as_str)
+    }
+
+    fn set(&mut self, sid: &str, key: &str) -> Result<(), String> {
+        if self.get(sid) == Some(key) {
+            return Ok(());
+        }
+        self.map.insert(sid.to_string(), key.to_string());
+        let body = serde_json::to_vec_pretty(&self.map).map_err(|e| e.to_string())?;
+        dub_core::atomic::write(&self.path, &body)
+    }
+}
+
+/// Имя seg-файла по id сегмента (только [A-Za-z0-9_]); None — в id нет допустимых символов.
+pub fn seg_file_id(id: &str) -> Option<String> {
+    let sid: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    if sid.is_empty() { None } else { Some(sid) }
+}
+
+/// Ключ синтеза сегмента: текст, спикер, слот, голос, реф, движок/квант и опции синтеза, нонс
+/// «перегенерировать». Совпал с записанным — синтез не нужен, даже если сегмент dirty.
+fn seg_key(s: &dub_core::Segment, voice: &str, reference: &str, engine: &str, opts: &str) -> String {
+    let regen = s.extra.get(REGEN_NONCE).map(|v| v.to_string()).unwrap_or_default();
+    let slot = format!("{:.2}-{:.2}", s.start, s.end);
+    let mut h = blake3::Hasher::new();
+    for part in [
+        SEG_KEY_VER,
+        s.tgt_text.trim(),
+        s.speaker.as_deref().unwrap_or("0"),
+        slot.as_str(),
+        voice,
+        reference,
+        engine,
+        opts,
+        regen.as_str(),
+    ] {
+        h.update(part.as_bytes());
+        h.update(b"\x1f");
+    }
+    h.finalize().to_hex().to_string()
+}
+
+/// Нужен ли синтез: файла нет -> да; есть записанный ключ -> если не совпал; ключа нет (проект до
+/// чекпоинтов) -> прежнее правило dirty, чтобы не переозвучивать весь старый проект.
+fn seg_needs_synth(raw_exists: bool, recorded: Option<&str>, key: &str, legacy_dirty: bool) -> bool {
+    if !raw_exists {
+        return true;
+    }
+    match recorded {
+        Some(r) => r != key,
+        None => legacy_dirty,
+    }
+}
+
+/// Отпечаток реф-файла для ключа — по содержимому: рефы пересобираются каждый рендер, и при смене
+/// источника вокала (сепарация, keep_music) имя и длина остаются прежними, а звук другой.
+fn ref_tag(p: &Path) -> String {
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match std::fs::read(p) {
+        Ok(bytes) => format!("{name}:{}", blake3::hash(&bytes).to_hex()),
+        Err(_) => format!("{name}:missing"),
+    }
+}
+
 /// Готовый результат рендера.
 #[allow(dead_code)]
 pub struct RenderResult {
@@ -155,6 +255,7 @@ pub fn run(
     let has_overlay = proj.subs.mode != "none"
         || !proj.captions.titles.is_empty()
         || !collect_blur_boxes(proj).is_empty();
+    crate::jobs::check_cancelled()?;
     bench.stage("burn");
     let captioned = if proj.subs.burn && has_overlay {
         emit(progress, "build", "сборка ASS (титры + дублированные субтитры)");
@@ -184,6 +285,7 @@ pub fn run(
     };
 
     // ── MUX ────────────────────────────────────────────────────────────────────
+    crate::jobs::check_cancelled()?;
     bench.stage("mux");
     emit(progress, "mux", "муксирование видео + аудио");
     // Экспорт с ОРИГИНАЛЬНОЙ дорожкой (#113): дубляж (default, 1-я) + оригинал (2-я). Только dub/voiceover
@@ -292,6 +394,7 @@ pub fn dub_audio(
     } else {
         paths.input.clone() // nodub/transcribe -> оригинальная дорожка
     };
+    crate::jobs::check_cancelled()?;
     let out = wd.join("dub_audio.m4a");
     // привести к browser-playable aac/m4a (build_dub уже даёт m4a; nodub -> извлечь звук из оригинала).
     media::extract_audio(&src, &out, 44_100, 2)?;
@@ -348,20 +451,53 @@ fn voice_clone_guarded(
             .map_err(|e| e.to_string());
         let _ = tx.send(r); // получателя уже нет по таймауту — send вернёт Err, не паникуем
     });
-    match rx.recv_timeout(timeout) {
-        Ok(r) => r,
-        Err(_) => {
-            engine.cancel(); // сигнал движку остановить текущую генерацию
-            // Ждём фактического выхода отменённого вызова из DLL — только тогда движок снова можно трогать.
-            match rx.recv_timeout(Duration::from_secs(GUARD_GRACE_SECS)) {
-                Ok(_) => Err(format!("таймаут синтеза >{}с — отменён, движок свободен", timeout.as_secs())),
-                Err(_) => Err(format!(
-                    "{ENGINE_STUCK}: синтез не отменяется >{}с — рендер прерван (движок завис в DLL)",
-                    timeout.as_secs() + GUARD_GRACE_SECS
-                )),
+    // Ждём порциями, чтобы отмена джобы доходила до движка, не дожидаясь таймаута синтеза.
+    let ctl = crate::jobs::current();
+    let deadline = std::time::Instant::now() + timeout;
+    let cancelled = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left.min(Duration::from_millis(200))) {
+            Ok(r) => return r,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("поток синтеза завершился без результата".to_string());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let cancelled = ctl.as_ref().is_some_and(|c| c.is_cancelled());
+                if cancelled || left.is_zero() {
+                    break cancelled;
+                }
             }
         }
+    };
+    engine.cancel(); // сигнал движку остановить текущую генерацию
+    // Ждём фактического выхода отменённого вызова из DLL — только тогда движок снова можно трогать.
+    match rx.recv_timeout(Duration::from_secs(GUARD_GRACE_SECS)) {
+        Ok(_) if cancelled => Err(crate::jobs::CANCELLED.to_string()),
+        Ok(_) => Err(format!("таймаут синтеза >{}с — отменён, движок свободен", timeout.as_secs())),
+        Err(_) => Err(format!(
+            "{ENGINE_STUCK}: синтез не отменяется >{}с — рендер прерван (движок завис в DLL)",
+            timeout.as_secs() + GUARD_GRACE_SECS
+        )),
     }
+}
+
+/// Загрузить локальный Higgs (DLL + модель выбранного кванта).
+fn load_higgs(paths: &RenderPaths) -> Result<Arc<AudiocppEngine>, String> {
+    let e = Arc::new(AudiocppEngine::load(&paths.higgs_dll).map_err(|e| format!("загрузка Higgs DLL: {e}"))?);
+    e.load_model(
+        &paths.higgs_model_root,
+        &paths.higgs_backend,
+        paths.higgs_device,
+        paths.higgs_threads,
+        Some(paths.higgs_quant.as_str()),
+    )
+    .map_err(|e| format!("Higgs load_model: {e}"))?;
+    Ok(e)
+}
+
+/// Ошибка синтеза, после которой лестницу ретраев не продолжают: движок завис или джобу отменили.
+fn synth_abort(e: &str) -> bool {
+    e.starts_with(ENGINE_STUCK) || e == crate::jobs::CANCELLED
 }
 
 /// Детект TTS-артефакта «гудение» по сэмплам фразы (in-memory, прямо из voice_clone). Речь на клипе >0.4с
@@ -562,6 +698,7 @@ fn build_dub(
     //    не строим, его identity-реф добавляется ниже из вокала (spk_refs). Существующие CSV без "-"
     //    ведут себя как раньше.
     let mut clone_slot_spks: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut pack_names: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     let pack_refs: std::collections::BTreeMap<String, PathBuf> = if proj.audio.voice.mode == "voice" {
         let names: Vec<&str> = proj.audio.voice.name.as_deref().unwrap_or("").split(',').map(|s| s.trim()).collect();
         let first_named = names
@@ -579,6 +716,7 @@ fn build_dub(
                 .collect();
             for (i, spk) in sorted.iter().enumerate() {
                 let nm = names.get(i).copied().filter(|s| !s.is_empty()).or(first_named).unwrap_or("");
+                pack_names.insert(spk.clone(), nm.to_string());
                 if nm == crate::voice_slots::CLONE_SLOT {
                     clone_slot_spks.insert(spk.clone()); // спикер на клоне — identity-реф ниже
                     continue;
@@ -683,19 +821,17 @@ fn build_dub(
         .map(|v| v != "0")
         .unwrap_or(true);
     let emo_enabled = emo_ref_on;
+    let emo_eligible = |s: &dub_core::Segment| -> bool {
+        // пак — фикс-голос юзера, эмоцию источника не переносим; короткая реплика — мало тембра;
+        // оверлап чужого спикера -> не чистый эмоц-реф.
+        emo_enabled
+            && !use_pack
+            && (s.end - s.start) >= REF_MIN_AFTER_TRIM
+            && seg_is_clean(s, s.speaker.as_deref().unwrap_or("0"), &segs)
+    };
     let emo_ref_of = |s: &dub_core::Segment, sid: &str| -> Option<PathBuf> {
-        if !emo_enabled {
+        if !emo_eligible(s) {
             return None;
-        }
-        if use_pack {
-            return None; // пак — фикс-голос юзера, эмоцию источника не переносим
-        }
-        let key = s.speaker.as_deref().unwrap_or("0");
-        if (s.end - s.start) < REF_MIN_AFTER_TRIM {
-            return None; // слишком коротко для отдельного рефа
-        }
-        if !seg_is_clean(s, key, &segs) {
-            return None; // оверлап чужого спикера -> не чистый эмоц-реф
         }
         let out = wd.join(format!("emoref_{sid}.wav"));
         // кап длины сверху ref_secs (не раздувать prefill-граф Higgs), как для identity-рефа.
@@ -707,40 +843,17 @@ fn build_dub(
         }
     };
 
-    // 4) TTS каждый сегмент через Higgs (audiocpp). Кэш: seg_XXX.wav; не-dirty переиспользуются.
-    let dirty_count = segs
-        .iter()
-        .filter(|&(_, s)| {
-            if seg_keep(s) || s.tgt_text.trim().is_empty() {
-                return false;
-            }
-            let sid: String = s.id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-            let sid = if sid.is_empty() { format!("i{}", s.id) } else { sid };
-            let raw = wd.join(format!("seg_{sid}.wav"));
-            (regen_dub && s.dirty) || !raw.is_file()
-        })
-        .count();
-    emit(progress, "tts", &format!("синтез {dirty_count} из {} сегментов", segs.len()));
+    // 4) TTS каждый сегмент через Higgs (audiocpp). Кэш: seg_XXX.wav + ключ синтеза в seg_ckpt.json.
+    crate::jobs::check_cancelled()?;
     // Облачный TTS (OpenRouter) вместо локального Higgs: тяжёлую DLL + модель НЕ грузим вовсе — в этом и
     // смысл (снять самую тяжёлую часть). engine=None; синтез идёт по облачной ветке ниже.
     let cloud_tts_on = crate::models::openrouter_stage_on(&paths.models_root, "tts");
-    let engine: Option<Arc<AudiocppEngine>> = if cloud_tts_on {
+    if cloud_tts_on {
         emit(progress, "tts", "TTS через облако (OpenRouter) — локальный Higgs не загружаем");
-        None
-    } else {
-        let e = Arc::new(
-            AudiocppEngine::load(&paths.higgs_dll).map_err(|e| format!("загрузка Higgs DLL: {e}"))?,
-        );
-        e.load_model(
-            &paths.higgs_model_root,
-            &paths.higgs_backend,
-            paths.higgs_device,
-            paths.higgs_threads,
-            Some(paths.higgs_quant.as_str()),
-        )
-        .map_err(|e| format!("Higgs load_model: {e}"))?;
-        Some(e)
-    };
+    }
+    // Локальный Higgs грузится при первом сегменте, которому нужен синтез: продолжение, где всё уже
+    // озвучено, не тратит время и VRAM на загрузку модели.
+    let mut engine: Option<Arc<AudiocppEngine>> = None;
 
     // Автокастинг облачных голосов по полу спикера: мужскому спикеру — мужской голос, женскому — женский,
     // разным спикерам — разные. Пол — F0-замер (как в кастинге), голоса модели — динамически из API, пол
@@ -826,50 +939,125 @@ fn build_dub(
         .and_then(|v| v.as_str())
         .map(|v| v != "0")
         .unwrap_or(true);
+    // Ключ синтеза каждого сегмента: совпал с записанным в seg_ckpt.json и файл на месте -> озвучка
+    // переиспользуется (продолжение после сбоя, отката правки, смены голоса туда-обратно).
+    let engine_tag = if cloud_tts_on {
+        format!(
+            "cloud:{}:{}",
+            crate::models::openrouter_model(&paths.models_root, "tts"),
+            crate::models::openrouter_tts_voice(&paths.models_root)
+        )
+    } else {
+        format!(
+            "higgs:{}:{}",
+            paths.higgs_model_root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            paths.higgs_quant
+        )
+    };
+    let opts_tag = format!(
+        "sr{}:mt{}:emo{}:ref{}",
+        u8::from(speech_rate_on),
+        u8::from(multitake_on),
+        u8::from(emo_enabled),
+        paths.ref_secs
+    );
+    let ref_tags: std::cell::RefCell<std::collections::HashMap<PathBuf, String>> = Default::default();
+    let key_of = |s: &dub_core::Segment| -> String {
+        let spk = s.speaker.as_deref().unwrap_or("0");
+        let (voice, reference) = if cloud_tts_on {
+            (cloud_voice_map.get(spk).cloned().unwrap_or_default(), String::new())
+        } else {
+            let voice = if use_pack { pack_names.get(spk).cloned().unwrap_or_default() } else { "clone".to_string() };
+            let reference = if emo_eligible(s) {
+                format!("emo:{}", s.src_text.trim())
+            } else {
+                let rp = ref_of(s);
+                let tag = ref_tags.borrow_mut().entry(rp.clone()).or_insert_with(|| ref_tag(&rp)).clone();
+                format!("{tag}|{}", reftext_of(s).unwrap_or_default())
+            };
+            (voice, reference)
+        };
+        seg_key(s, &voice, &reference, &engine_tag, &opts_tag)
+    };
+    let sid_of = |fi: usize, s: &dub_core::Segment| seg_file_id(&s.id).unwrap_or_else(|| format!("i{fi}"));
+    let keys: Vec<String> = segs
+        .iter()
+        .map(|&(_, s)| if seg_keep(s) { SEG_ORIGINAL.to_string() } else { key_of(s) })
+        .collect();
+    let mut ckpts = match SegCkpts::load(wd) {
+        Ok(c) => c,
+        Err(e) => {
+            emit(progress, "tts", &format!("{e} — ключи синтеза начаты заново"));
+            SegCkpts { path: wd.join(SEG_CKPT_FILE), map: Default::default() }
+        }
+    };
+    let needs = |ckpts: &SegCkpts, idx: usize| -> bool {
+        let (fi, s) = segs[idx];
+        let sid = sid_of(fi, s);
+        let raw = wd.join(format!("seg_{sid}.wav"));
+        let recorded = ckpts.get(&sid).or(s.ckpt.as_deref());
+        seg_needs_synth(raw.is_file(), recorded, &keys[idx], regen_dub && s.dirty)
+    };
+    let to_synth = (0..segs.len()).filter(|&i| !seg_keep(segs[i].1) && needs(&ckpts, i)).count();
+    let synthable = segs.iter().filter(|(_, s)| !seg_keep(s)).count();
+    emit(progress, "tts", &format!("синтез {to_synth} из {} сегментов", segs.len()));
+    if to_synth < synthable {
+        crate::jobs::emit_resumed(progress, "tts", &format!("озвучка из кэша: {} сегментов", synthable - to_synth));
+    }
+
     // ПАРАЛЛЕЛЬНЫЙ ПРЕ-СИНТЕЗ облачного TTS: OpenRouter держит десятки конкурентных запросов, поэтому все
     // сегменты к синтезу гоним в N потоков (настройка or_concurrency) ДО последовательной укладки — она
     // потом просто подхватит уже готовые seg-файлы (network-latency больше не по одному). Провал сегмента ->
-    // файл отсутствует -> цикл ниже синтезирует его сам (ретрай/фолбэк).
+    // ключ не записан -> цикл ниже синтезирует его сам (ретрай/фолбэк).
     if cloud_tts_on {
         let conc = crate::models::openrouter_concurrency(&paths.models_root);
         let mut jobs: Vec<(PathBuf, String, String)> = Vec::new();
-        for &(fi, s) in segs.iter() {
-            if seg_keep(s) {
+        let mut job_segs: Vec<usize> = Vec::new();
+        for (idx, &(_, s)) in segs.iter().enumerate() {
+            if seg_keep(s) || !needs(&ckpts, idx) {
                 continue;
             }
             let tgt = s.tgt_text.trim();
             if tgt.is_empty() {
                 continue;
             }
-            let sid: String = s.id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-            let sid = if sid.is_empty() { format!("i{fi}") } else { sid };
-            let raw = wd.join(format!("seg_{sid}.wav"));
-            if !((regen_dub && s.dirty) || !raw.is_file()) {
-                continue; // уже в кэше
-            }
+            let raw = wd.join(format!("seg_{}.wav", sid_of(segs[idx].0, s)));
             let voice = cloud_voice_map.get(s.speaker.as_deref().unwrap_or("0")).cloned().unwrap_or_default();
             jobs.push((raw, tgt.to_string(), voice));
+            job_segs.push(idx);
         }
         if jobs.len() > 1 && conc > 1 {
             emit(progress, "tts", &format!("облачный TTS: {} сегментов в {} параллельных потоков", jobs.len(), conc));
-            let ok = crate::cloud_tts::synth_batch(&paths.models_root, jobs, conc);
+            let done = crate::cloud_tts::synth_batch(&paths.models_root, jobs, conc);
+            let mut ok = 0usize;
+            for (&idx, &good) in job_segs.iter().zip(&done) {
+                if good {
+                    ckpts.set(&sid_of(segs[idx].0, segs[idx].1), &keys[idx])?;
+                    ok += 1;
+                }
+            }
             emit(progress, "tts", &format!("облачный TTS: пре-синтез готов ({ok} сегментов)"));
+            crate::jobs::check_cancelled()?;
         }
     }
-    for &(fi, s) in segs.iter() {
+    // Сегменты, где синтез провалился и стоит оригинальная реплика: их ключ записывается только когда
+    // дорожка собрана целиком (как раньше сброс dirty) — прерванный прогон при продолжении их повторит.
+    let mut fallback_keys: Vec<(String, String)> = Vec::new();
+    for (idx, &(fi, s)) in segs.iter().enumerate() {
+        crate::jobs::check_cancelled()?;
         // Кэш-файл сегмента — ПО ЕГО ID, не по индексу fi. Кэш переиспользуется между рендерами (не-dirty
         // сегменты не ре-синтезируются). При индекс-имени удаление/перестановка сегмента сдвигает индексы —
         // и чистый сегмент подхватил бы seg_{fi}.wav ПРЕДЫДУЩЕГО жильца индекса => чужая речь/длительность =
         // ДРИФТ дубляжа (регресс кэша порта; питон синтезил заново каждый рендер). ID стабилен -> кэш привязан
         // к контенту. Слот next.start (nxt) остаётся по индексу — это про таймлайн-позицию, не про кэш.
-        let sid: String = s.id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-        let sid = if sid.is_empty() { format!("i{fi}") } else { sid };
+        let sid = sid_of(fi, s);
         let raw = wd.join(format!("seg_{sid}.wav"));
         // 'оставить оригинал': вырезаем ИСХОДНУЮ речь сюда, без TTS и без atempo-подгонки (порт _build_dub keep-ветки).
         // Режем СРАЗУ в 24к моно (питон media.trim(..., sr=24000)) — timeline кладёт по sr ПЕРВОГО файла (TTS=24к),
         // без ресемпла; 44.1к-вырез играл бы не на той скорости. Без промежуточного 16к (не терять ВЧ).
         if seg_keep(s) {
             media::trim(&vocals, &raw, s.start, s.end, 24_000)?;
+            ckpts.set(&sid, SEG_ORIGINAL)?;
             let at = s.start.max(cursor);
             let d = media::duration(&raw)?;
             cursor = at + d;
@@ -877,12 +1065,11 @@ fn build_dub(
             continue;
         }
         let tgt = s.tgt_text.trim();
-        // Синтез ТОЛЬКО если сегмент dirty (правился текст/спикер/голос) ИЛИ нет кэша. Реф-клипы
-        // пересобираются каждый рендер, поэтому mtime-сравнение с рефом («stale_ref») ошибочно
-        // помечало ВЕСЬ кэш устаревшим на каждом рендере → экспорт ре-роллил уже одобренную озвучку
-        // («скидывалось»). Смена голоса и так метит все сегменты dirty (op_recast/op_segment), так что
-        // dirty-флага достаточно: не-dirty сегменты переиспользуют свой seg_XXX.wav между рендерами.
-        let need_synth = (regen_dub && s.dirty) || !raw.is_file();
+        // Синтез ТОЛЬКО если нет файла или ключ синтеза (текст/спикер/голос/реф/движок/нонс regen) не
+        // совпал с записанным. dirty — флаг UI; для проектов без записанных ключей решает он.
+        let key = keys[idx].as_str();
+        let recorded = ckpts.get(&sid).or(s.ckpt.as_deref()).map(str::to_string);
+        let need_synth = needs(&ckpts, idx);
         // Полный провал лестницы на КОРОТКОМ сегменте -> оригинальная реплика вместо артефакта
         // (объявлен на уровне итерации: ниже гейтит и ASR-QC этого сегмента).
         let mut kept_original = false;
@@ -897,7 +1084,7 @@ fn build_dub(
                 .unwrap_or("");
             match crate::cloud_tts::synth_audio(&paths.models_root, tgt, cv) {
                 Ok(wav) => {
-                    std::fs::write(&raw, &wav).map_err(|e| format!("запись облачного seg{fi}: {e}"))?;
+                    dub_core::atomic::write(&raw, &wav).map_err(|e| format!("запись облачного seg{fi}: {e}"))?;
                 }
                 Err(e) => {
                     emit(progress, "tts", &format!("⚠ сегмент {fi}: облачный TTS не удался ({e}) — оригинал"));
@@ -911,6 +1098,10 @@ fn build_dub(
             // стабильный identity-реф спикера. ref_text эмоц-рефа = src_text ЭТОГО сегмента (совпадает с
             // аудио по построению); для identity-рефа — заранее посчитанный reftext_of. Считаем ТОЛЬКО при
             // синтезе (не тратить ffmpeg-обрезку на закэшированные не-dirty сегменты).
+            if engine.is_none() {
+                emit(progress, "tts", "загрузка Higgs");
+                engine = Some(load_higgs(paths)?);
+            }
             let emo_ref = emo_ref_of(s, &sid);
             let (ref_wav, ref_text): (PathBuf, Option<String>) = match &emo_ref {
                 Some(er) => {
@@ -991,7 +1182,7 @@ fn build_dub(
                 let eng = engine.as_ref().expect("локальный Higgs (не облако)");
                 let (samples, sr) = match voice_clone_guarded(eng, tgt, &rw.to_string_lossy(), rt, &opts, vc_to) {
                     Ok(v) => v,
-                    Err(e) if e.starts_with(ENGINE_STUCK) => return Err(e), // движок завис в DLL — обрыв, не гоняем параллельно
+                    Err(e) if synth_abort(&e) => return Err(e), // движок завис в DLL или отмена — обрыв, не гоняем параллельно
                     Err(e) => {
                         retried = true;
                         total_retries += 1;
@@ -1047,7 +1238,7 @@ fn build_dub(
             };
             if !kept_original {
                 let wav = AudiocppEngine::encode_wav(&samples, sr, 1);
-                std::fs::write(&raw, &wav).map_err(|e| format!("запись seg{fi}: {e}"))?;
+                dub_core::atomic::write(&raw, &wav).map_err(|e| format!("запись seg{fi}: {e}"))?;
             }
             // Много ретраев подряд/суммарно = систем. проблема (стенд/VRAM или реф-клипы) → стоп с ошибкой.
             if retried {
@@ -1084,6 +1275,7 @@ fn build_dub(
             let ref_text_mt = reftext_of(s);
             let tok_cap: u32 = ((((s.end - s.start).max(0.6) * 75.0 * 1.5).ceil() as u32) + 32).clamp(64, 2048);
             for take_i in 1..=2u64 {
+                crate::jobs::check_cancelled()?;
                 let take_path = wd.join(format!("seg_{sid}_take{take_i}.wav"));
                 let seed = (fi as u64) * 10000 + take_i * 100 + 77;
                 let temp = if take_i == 1 { 0.25 } else { 0.35 };
@@ -1107,14 +1299,23 @@ fn build_dub(
                             }
                         }
                     }
+                    Err(e) if synth_abort(&e) => return Err(e),
                     Err(_) => {} // провал дубля — пропускаем, используем имеющийся лучший
                 }
             }
             // Если лучший дубль — не первый, подменяем raw-файл
             if best_path != raw {
-                let _ = std::fs::copy(&best_path, &raw);
+                dub_core::atomic::copy(&best_path, &raw)?;
                 emit(progress, "tts", &format!("сегмент {fi}: multi-take — выбран дубль ближе к слоту ({best_score:.2}с отклонение)"));
             }
+        }
+        // Файл сегмента готов (синтез с выбранным дублем или принятый старый файл без ключа): ключ пишется
+        // только теперь, чтобы обрыв посреди дублей не выдал первый дубль за готовый.
+        if kept_original {
+            ckpts.set(&sid, SEG_FALLBACK)?;
+            fallback_keys.push((sid.clone(), key.to_string()));
+        } else if need_synth || recorded.is_none() {
+            ckpts.set(&sid, key)?;
         }
 
         // Целевая длительность слота: при ВКЛЮЧЕННОМ «Динамическом темпе речи» берем ТОЧНЫЕ границы
@@ -1220,6 +1421,7 @@ fn build_dub(
         if !bad_idx.is_empty() {
             emit(progress, "tts", &format!("QC: {} фраз не совпали с переводом — пересинтез", bad_idx.len()));
             for &i in &bad_idx {
+                crate::jobs::check_cancelled()?;
                 let (fi, pidx, raw, tgtq, spk, room, fitp) = &qc_list[i];
                 let s = &proj.segments[*fi];
                 let main_rw = ref_of(s);
@@ -1247,14 +1449,14 @@ fn build_dub(
                     let vc_to = Duration::from_secs((((s.end - s.start) * 8.0).ceil() as u64).max(45));
                     let (smp, r) = match voice_clone_guarded(engine.as_ref().expect("локальный Higgs (QC не для облака)"), tgtq, &rw.to_string_lossy(), rt, &opts, vc_to) {
                         Ok(v) => v,
-                        Err(e) if e.starts_with(ENGINE_STUCK) => return Err(e), // движок завис — обрыв, не гоняем параллельно
+                        Err(e) if synth_abort(&e) => return Err(e), // движок завис или отмена — обрыв, не гоняем параллельно
                         Err(_) => continue,
                     };
                     if synth_defect(&smp, r, tgt_chars).is_some() {
                         continue;
                     }
                     let wav = AudiocppEngine::encode_wav(&smp, r, 1);
-                    if std::fs::write(raw, &wav).is_ok() {
+                    if dub_core::atomic::write(raw, &wav).is_ok() {
                         // пере-fit в тот же слот и подмена в placed (позиция at не меняется, длит. обновляем).
                         // Кап = потолок дрейфа (2.0): основной проход мог дрейф-капнуть этот сегмент выше
                         // seg_cap; пересинтез с seg_cap дал бы более ДЛИННЫЙ дубль и порвал синк (#116 [6]).
@@ -1383,6 +1585,9 @@ fn build_dub(
             mixed
         }
     };
+    for (sid, key) in &fallback_keys {
+        ckpts.set(sid, key)?;
+    }
     // 8) монтажный гейн всей дорожки (если задан) — наша opt-in фича «усилить всё» поверх нормализации.
     let gain_db = proj.audio.gain_db;
     if gain_db.abs() > 0.05 {
@@ -2339,5 +2544,67 @@ mod tests {
         let ass = build_to_string(&proj, vw, vh);
         let y = first_sub_y(&ass);
         assert!((630..=650).contains(&y), "fallback: без маркеров едем по всему набору: y={y}");
+    }
+
+    #[test]
+    fn segment_with_matching_key_is_not_resynthesized() {
+        let s = seg("s0", 1.0, 2.5, "Привет");
+        let key = seg_key(&s, "clone", "ref_spk0.wav:1000|", "higgs:m:q8_0", "sr1");
+        // dirty (правка текста туда-обратно, смена голоса и обратно) не заставляет пересинтезировать.
+        assert!(!seg_needs_synth(true, Some(&key), &key, true));
+        assert!(seg_needs_synth(true, Some("другой"), &key, false));
+        assert!(seg_needs_synth(false, Some(&key), &key, false));
+        // Проект без записанных ключей — прежнее правило dirty.
+        assert!(!seg_needs_synth(true, None, &key, false));
+        assert!(seg_needs_synth(true, None, &key, true));
+        // Оригинальная реплика вместо провалившегося синтеза — при продолжении синтез повторяется.
+        assert!(seg_needs_synth(true, Some(SEG_FALLBACK), &key, false));
+        assert!(!is_synth_key(SEG_FALLBACK) && !is_synth_key(SEG_ORIGINAL) && is_synth_key(&key));
+    }
+
+    #[test]
+    fn segment_key_tracks_what_changes_the_sound() {
+        let a = seg("s0", 1.0, 2.5, "Привет");
+        let base = seg_key(&a, "clone", "r", "e", "o");
+        let mut dirty = a.clone();
+        dirty.dirty = true;
+        assert_eq!(seg_key(&dirty, "clone", "r", "e", "o"), base);
+        assert_ne!(seg_key(&seg("s0", 1.0, 2.5, "Пока"), "clone", "r", "e", "o"), base);
+        assert_ne!(seg_key(&a, "Anna", "r", "e", "o"), base);
+        assert_ne!(seg_key(&a, "clone", "r2", "e", "o"), base);
+        assert_ne!(seg_key(&a, "clone", "r", "higgs:q4", "o"), base);
+        let mut regen = a.clone();
+        regen.extra.insert(REGEN_NONCE.into(), serde_json::json!("n1"));
+        assert_ne!(seg_key(&regen, "clone", "r", "e", "o"), base);
+        let mut moved = a.clone();
+        moved.end = 3.0;
+        assert_ne!(seg_key(&moved, "clone", "r", "e", "o"), base);
+    }
+
+    #[test]
+    fn unfinished_tmp_is_not_a_cached_segment() {
+        let wd = std::env::temp_dir().join(format!("dub_segckpt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wd);
+        std::fs::create_dir_all(&wd).unwrap();
+        let raw = wd.join("seg_s0.wav");
+        // Обрыв записи: остался только временный файл, ключ записан не был.
+        std::fs::write(dub_core::atomic::tmp_path(&raw), b"RIFF-half").unwrap();
+        let ck = SegCkpts::load(&wd).unwrap();
+        assert!(!raw.is_file());
+        assert!(seg_needs_synth(raw.is_file(), ck.get("s0"), "k", false));
+        // Полная запись: файл + ключ -> повтор не синтезирует.
+        dub_core::atomic::write(&raw, b"RIFF-full").unwrap();
+        let mut ck = SegCkpts::load(&wd).unwrap();
+        ck.set("s0", "k").unwrap();
+        let ck = SegCkpts::load(&wd).unwrap();
+        assert!(!seg_needs_synth(raw.is_file(), ck.get("s0"), "k", true));
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn seg_file_id_matches_render_naming() {
+        assert_eq!(seg_file_id("s12").as_deref(), Some("s12"));
+        assert_eq!(seg_file_id("u-lk3.9").as_deref(), Some("ulk39"));
+        assert_eq!(seg_file_id("--"), None);
     }
 }
