@@ -816,12 +816,15 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "settings_set",
-                description: "Change one setting (a key settings_get lists) to a text value: \"1\" or \"0\" for a switch. Applies from the next job. The OpenRouter key is set with openrouter_set_key.",
+                description: "Change one setting (a key settings_get lists) to a text value: \"1\" or \"0\" for a switch. Applies from the next job. The OpenRouter key is set with openrouter_set_key, the proxy's address with proxy_settings_set.",
                 schema: || object(json!({ "key": { "type": "string" }, "value": { "type": "string" } }), &["key", "value"]),
                 call: |args| {
                     let key = text(args, "key")?;
                     if key == "or_key" {
                         return Err("The OpenRouter key is set with openrouter_set_key.".into());
+                    }
+                    if key == "proxy_url" {
+                        return Err("The proxy's address is set with proxy_settings_set.".into());
                     }
                     let value = match args.get("value") {
                         Some(Value::String(value)) => value.clone(),
@@ -846,9 +849,15 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "proxy_test",
-                description: "Check whether Hugging Face (model downloads) and OpenRouter (the cloud stages) are reachable through a proxy - an http, https or socks5 URL, user:pass@ allowed - or directly when url is empty.",
-                schema: || object(json!({ "url": { "type": "string" } }), &[]),
-                call: |args| post("/engine/proxy/test".into(), json!({ "url": args.get("url").and_then(Value::as_str).unwrap_or_default() })),
+                description: "Check whether Hugging Face (model downloads) and OpenRouter (the cloud stages) are reachable through a proxy - an http, https or socks5 URL, user:pass@ allowed - or directly when url is empty. password goes with a url that names the user without one; the stored password is used only for the stored address.",
+                schema: || object(json!({ "url": { "type": "string" }, "password": { "type": "string" } }), &[]),
+                call: |args| {
+                    let mut body = json!({ "url": args.get("url").and_then(Value::as_str).unwrap_or_default() });
+                    if let Some(password) = args.get("password").and_then(Value::as_str) {
+                        body["password"] = password.into();
+                    }
+                    post("/engine/proxy/test".into(), body)
+                },
             },
             Tool {
                 name: "proxy_settings_get",
@@ -2196,6 +2205,7 @@ mod tests {
         assert_eq!(call.path, "/jobs");
         assert!((find("project_get").call)(&json!({})).is_err(), "a missing id is refused");
         assert!((find("settings_set").call)(&json!({ "key": "or_key", "value": "sk" })).is_err(), "the key goes through openrouter_set_key");
+        assert!((find("settings_set").call)(&json!({ "key": "proxy_url", "value": "http://host:1" })).is_err(), "the proxy goes through proxy_settings_set");
         assert!((find("project_create").call)(&json!({ "path": "Z:/nowhere/clip.mp4" })).is_err(), "a file that is not there is refused before the upload");
     }
 
