@@ -51,6 +51,8 @@ rfd = "0.17"
 # content-addressable per-stage кэш (analyze::cache): лёгкий, чистый хэш без C-зависимостей.
 # Префикс-хэш длинных wav (первые+последние N байт + размер) — быстрый ключ инвалидации стадий.
 blake3 = "1"
+# SHA-256 скачанных моделей и движков против закреплённых хэшей (HF lfs.oid, digest GitHub, PyPI/NVIDIA).
+sha2 = "0.11"
 
 # job object с kill-on-close: сайдкары не переживают студию (process_group.rs).
 [target.'cfg(windows)'.dependencies]

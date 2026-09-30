@@ -88,3 +88,220 @@ pub fn snapshot() -> HardwareSnapshot {
 
     snap
 }
+
+// ── Видеокарта против требований CUDA 13 ─────────────────────────────────────
+//
+// Весь GPU-стек (llama.cpp, Higgs, onnxruntime CUDA-EP, BSRoformer) собран под CUDA 13: ему нужен драйвер,
+// поддерживающий CUDA 13 (ветка 580+, «minor version compatibility» NVIDIA), и карта не старше Turing
+// (compute capability 7.5: CUDA 13 убрала Maxwell, Pascal и Volta). Решение берётся у самого драйвера CUDA
+// (nvcuda.dll: cuDriverGetVersion и атрибуты устройства 0 — той карты, что возьмут движки); NVML — только
+// имя карты и версия драйвера для показа.
+
+/// Первый драйвер ветки CUDA 13 (Windows и Linux).
+pub const CUDA13_DRIVER: u32 = 580;
+/// Turing — самая старая архитектура, под которую собирает CUDA 13.
+pub const CUDA13_OLDEST: (u32, u32) = (7, 5);
+/// cuDriverGetVersion драйвера, поддерживающего CUDA 13.0 (1000 * major + 10 * minor).
+const CUDA13_DRIVER_API: u32 = 13_000;
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuReport {
+    /// Драйвер NVIDIA есть (nvcuda.dll грузится).
+    pub nvidia: bool,
+    pub name: Option<String>,
+    /// Версия драйвера для показа, например "581.29" (NVML).
+    pub driver_version: Option<String>,
+    /// Какую CUDA поддерживает драйвер, например "13.0".
+    pub cuda_driver: Option<String>,
+    /// Compute capability карты 0, например "8.9".
+    pub compute: Option<String>,
+    /// Локальные стадии можно считать на GPU этой сборкой.
+    pub cuda13_ok: bool,
+    /// Почему нельзя: no_nvidia | no_device | cuda_init | driver_old | gpu_old.
+    pub reason: Option<&'static str>,
+    pub min_driver: u32,
+    pub min_compute: String,
+}
+
+impl GpuReport {
+    /// Строка для колонки «драйвер» в «Первом запуске».
+    pub fn summary(&self) -> Option<String> {
+        let parts: Vec<String> = [
+            self.name.clone(),
+            self.driver_version.clone(),
+            self.cuda_driver.as_ref().map(|c| format!("CUDA {c}")),
+            self.compute.as_ref().map(|c| format!("CC {c}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+}
+
+/// Годится ли карта с этой compute capability на драйвере с этой версией CUDA (cuDriverGetVersion) под
+/// сборку CUDA 13. Старая карта важнее старого драйвера: обновление драйвера её не спасёт.
+pub fn cuda13_verdict(compute: (u32, u32), cuda_driver: u32) -> Result<(), &'static str> {
+    if compute < CUDA13_OLDEST {
+        Err("gpu_old")
+    } else if cuda_driver < CUDA13_DRIVER_API {
+        Err("driver_old")
+    } else {
+        Ok(())
+    }
+}
+
+/// Отчёт о видеокарте (считается один раз за процесс: драйвер не меняется без перезапуска приложения).
+pub fn gpu_report() -> GpuReport {
+    static R: OnceLock<GpuReport> = OnceLock::new();
+    R.get_or_init(probe_gpu).clone()
+}
+
+fn probe_gpu() -> GpuReport {
+    let mut r = GpuReport { min_driver: CUDA13_DRIVER, min_compute: format!("{}.{}", CUDA13_OLDEST.0, CUDA13_OLDEST.1), ..Default::default() };
+    match cuda_driver_probe() {
+        CudaProbe::NoDriver => {
+            r.reason = Some("no_nvidia");
+            return r;
+        }
+        CudaProbe::NoDevice => {
+            r.nvidia = true;
+            r.reason = Some("no_device");
+        }
+        CudaProbe::Failed(what) => {
+            r.nvidia = true;
+            tracing::warn!("CUDA-драйвер не отвечает: {what}");
+            r.reason = Some("cuda_init");
+        }
+        CudaProbe::Ok { version, compute } => {
+            r.nvidia = true;
+            r.cuda_driver = Some(format!("{}.{}", version / 1000, (version % 1000) / 10));
+            r.compute = Some(format!("{}.{}", compute.0, compute.1));
+            match cuda13_verdict(compute, version) {
+                Ok(()) => r.cuda13_ok = true,
+                Err(why) => r.reason = Some(why),
+            }
+        }
+    }
+    let mut ng = nvml().lock().unwrap_or_else(|e| e.into_inner());
+    if ng.is_none() {
+        match Nvml::init() {
+            Ok(n) => *ng = Some(n),
+            Err(e) => tracing::warn!("NVML init: {e} — имя карты и версия драйвера не показываются"),
+        }
+    }
+    if let Some(n) = ng.as_ref() {
+        r.driver_version = n.sys_driver_version().ok();
+        r.name = n.device_by_index(0).and_then(|d| d.name()).ok();
+    }
+    r
+}
+
+enum CudaProbe {
+    NoDriver,
+    NoDevice,
+    Failed(String),
+    Ok { version: u32, compute: (u32, u32) },
+}
+
+#[cfg(windows)]
+fn cuda_driver_probe() -> CudaProbe {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    type CuInit = unsafe extern "system" fn(u32) -> i32;
+    type CuDriverGetVersion = unsafe extern "system" fn(*mut i32) -> i32;
+    type CuDeviceGetCount = unsafe extern "system" fn(*mut i32) -> i32;
+    type CuDeviceGetAttribute = unsafe extern "system" fn(*mut i32, i32, i32) -> i32;
+    // CUdevice_attribute из cuda.h.
+    const COMPUTE_CAPABILITY_MAJOR: i32 = 75;
+    const COMPUTE_CAPABILITY_MINOR: i32 = 76;
+
+    let wide: Vec<u16> = std::ffi::OsStr::new("nvcuda.dll").encode_wide().chain(std::iter::once(0)).collect();
+    // Модуль не выгружаем: движки процесса всё равно работают через тот же драйвер.
+    let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+    if module.is_null() {
+        return CudaProbe::NoDriver;
+    }
+    let sym = |name: &[u8]| -> *mut c_void { unsafe { GetProcAddress(module, name.as_ptr()) } };
+    let (init, version, count, attr) = (sym(b"cuInit\0"), sym(b"cuDriverGetVersion\0"), sym(b"cuDeviceGetCount\0"), sym(b"cuDeviceGetAttribute\0"));
+    if init.is_null() || version.is_null() || count.is_null() || attr.is_null() {
+        return CudaProbe::Failed("nvcuda.dll без функций driver API".into());
+    }
+    unsafe {
+        let init = std::mem::transmute::<*mut c_void, CuInit>(init);
+        let version = std::mem::transmute::<*mut c_void, CuDriverGetVersion>(version);
+        let count = std::mem::transmute::<*mut c_void, CuDeviceGetCount>(count);
+        let attr = std::mem::transmute::<*mut c_void, CuDeviceGetAttribute>(attr);
+        let mut v = 0i32;
+        let rc = version(&mut v);
+        if rc != 0 {
+            return CudaProbe::Failed(format!("cuDriverGetVersion: CUresult {rc}"));
+        }
+        let rc = init(0);
+        if rc == 100 {
+            return CudaProbe::NoDevice; // CUDA_ERROR_NO_DEVICE
+        }
+        if rc != 0 {
+            return CudaProbe::Failed(format!("cuInit: CUresult {rc}"));
+        }
+        let mut n = 0i32;
+        let rc = count(&mut n);
+        if rc != 0 {
+            return CudaProbe::Failed(format!("cuDeviceGetCount: CUresult {rc}"));
+        }
+        if n < 1 {
+            return CudaProbe::NoDevice;
+        }
+        let (mut major, mut minor) = (0i32, 0i32);
+        let rc = attr(&mut major, COMPUTE_CAPABILITY_MAJOR, 0);
+        let rc2 = attr(&mut minor, COMPUTE_CAPABILITY_MINOR, 0);
+        if rc != 0 || rc2 != 0 {
+            return CudaProbe::Failed(format!("cuDeviceGetAttribute: CUresult {rc}/{rc2}"));
+        }
+        CudaProbe::Ok { version: v.max(0) as u32, compute: (major.max(0) as u32, minor.max(0) as u32) }
+    }
+}
+
+#[cfg(windows)]
+extern "system" {
+    fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
+    fn GetProcAddress(module: *mut std::ffi::c_void, name: *const u8) -> *mut std::ffi::c_void;
+}
+
+/// Вне Windows версия драйвера не проверяется: драйвер = libcuda.so.1 на месте, решение за ним.
+#[cfg(not(windows))]
+fn cuda_driver_probe() -> CudaProbe {
+    let present = std::path::Path::new("/usr/lib/x86_64-linux-gnu/libcuda.so.1").exists()
+        || std::path::Path::new("/usr/lib/libcuda.so.1").exists();
+    if present {
+        CudaProbe::Ok { version: CUDA13_DRIVER_API, compute: CUDA13_OLDEST }
+    } else {
+        CudaProbe::NoDriver
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cuda13_needs_turing_and_a_cuda13_driver() {
+        assert_eq!(cuda13_verdict((7, 5), 13_000), Ok(()), "GTX 1660 на драйвере 580");
+        assert_eq!(cuda13_verdict((8, 9), 13_040), Ok(()));
+        assert_eq!(cuda13_verdict((12, 0), 13_000), Ok(()));
+        assert_eq!(cuda13_verdict((8, 6), 12_080), Err("driver_old"), "RTX 30 на драйвере 566");
+        assert_eq!(cuda13_verdict((6, 1), 13_000), Err("gpu_old"), "Pascal CUDA 13 не поддерживает");
+        assert_eq!(cuda13_verdict((7, 0), 12_000), Err("gpu_old"), "старая карта важнее старого драйвера");
+        assert_eq!(cuda13_verdict((5, 2), 13_040), Err("gpu_old"));
+    }
+
+    #[test]
+    fn the_report_is_consistent_on_this_machine() {
+        let r = gpu_report();
+        assert_eq!(r.cuda13_ok, r.reason.is_none(), "{r:?}");
+        if !r.nvidia {
+            assert_eq!(r.reason, Some("no_nvidia"));
+        }
+    }
+}

@@ -56,3 +56,15 @@ scripts\build-release.ps1 -ReleaseNotes "..." -ModelsSource "F:\AI\Dub Studio"
 `installer-hooks.nsi` удаляет старое имя exe при обновлении, а при деинсталляции с галочкой «Удалить данные» убирает
 перечисленные каталоги данных (не `$INSTDIR` целиком). `installer-english.nsh` и `installer-russian.nsh` — языковые
 файлы установщика (английский и русский) с понятной ошибкой WebView2.
+
+## Проверка комплекта бандла
+
+Все пять DLL VC++ runtime (`MSVCP140.dll`, `MSVCP140_1.dll`, `VCOMP140.DLL`, `VCRUNTIME140.dll`,
+`VCRUNTIME140_1.dll`) — из одного VC++ Redistributable (например, `VC/Redist/MSVC/<версия>/x64/Microsoft.VC145.CRT`
+и `.OpenMP` из Build Tools); `MSVCP140_1.dll` нужен onnxruntime 1.28. Без него релиз запирает на «Первом запуске»
+всех, у кого VC++ Redistributable нет в системе: докачать Bundled-компонент нельзя. Комплект staging (и
+распакованного портатива) проверяется по манифесту:
+
+```bash
+DUB_RELEASE_STAGING="$PWD/desktop/src-tauri/staging" cargo test -p dub-server --lib setup::tests::the_release_staging_carries_every_bundled_file -- --ignored
+```

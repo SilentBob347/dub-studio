@@ -1,46 +1,54 @@
 //! setup — «первый запуск»: манифест всех внешних компонентов (модели, движки-сайдкары, системные
-//! библиотеки) + диагностика их наличия на диске + фоновая автозакачка одной кнопкой: свести
-//! ручную установку к
+//! библиотеки) + диагностика их наличия на диске + закачка одной кнопкой: свести ручную установку к
 //! единственному шагу (драйвер NVIDIA), убрав из README требование ставить CUDA Toolkit, VC++ и
 //! качать веса вручную.
 //!
-//! Эталон паттернов — Higgs-Ultimate desktop/src-tauri/src/envdeps.rs (env_check / download_env_deps /
-//! extract_dlls_from_wheel) и download.rs (прогресс-машина). Здесь адаптировано под axum-сервер: тот же
-//! job-контракт SSE, что analyze/render, а прогресс идёт из download-loop в колбэк джобы.
+//! Каждый скачиваемый файл закреплён: HF — коммитом в URL, GitHub/PyPI/NVIDIA — версией в пути, и у каждого
+//! есть точный размер и SHA-256. Файл публикуется только после сверки хэша; архив раскладывается и оставляет
+//! рядом запись `<архив>.json` (sha256 архива + что и какого размера он положил) — по ней «установлено»
+//! значит «установлено ИМЕННО закреплённой версией», а удаление снимает ровно положенные файлы.
 //!
-//! Классы источников (все URL — ровно те, что уже использованы; см. crates/README.md, PORT-CONTRACT.md,
-//! Higgs voiceclean.rs):
-//!   • модели — прямые файлы HF (higgs-q8_0/*, gemma-4 + mmproj, parakeet-tdt int8, nemotron 3 diarization,
-//!     roformer voc_fv6-Q8_0);
+//! Закачка идёт вне GPU-очереди (фоновый менеджер `downloads`, а on-demand догрузка — внутри джобы), кусками
+//! по Range с докачкой после обрыва/перезапуска; 429/5xx — ожидание, а не ошибка; общий бюджет соединений на
+//! все закачки процесса.
+//!
+//! Классы источников:
+//!   • модели — прямые файлы HF (higgs-q8_0/*, gemma-4 + mmproj, parakeet-tdt int8, nemotron 3
+//!     diarization, roformer voc_fv6-Q8_0);
 //!   • сайдкары/движки — zip-релизы GitHub (BSRoformer.cpp v0.1.0, llama.cpp b11146 win-cuda-13.4,
 //!     onnxruntime 1.28.2, ffmpeg BtbN) + audiocpp_engine.dll (HF);
 //!   • CUDA-runtime — PyPI-wheel'ы NVIDIA (cudart 13.4.92 / cublas 13.8.0.4 / cuDNN 9.27.0.42) + redist cuFFT
 //!     12.4.0.43, распаковка *.dll плоско;
 //!   • VC++ runtime + OCR-модели — БАНДЛ (кладутся в релиз рядом с exe, как VC++ в Higgs); не качаются,
 //!     но статус показываем;
-//!   • драйвер NVIDIA — детект (nvcuda.dll), «скачивание» = открыть сайт (кнопка во фронте).
+//!   • драйвер NVIDIA — диагностика версии драйвера и compute capability (hw::gpu_report), «скачивание» =
+//!     открыть сайт (кнопка во фронте).
 
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
 // ── Тип файла-члена компонента ──────────────────────────────────────────────
 
-/// Одна закачиваемая единица компонента: URL + относительный путь назначения (от repo_root) + ожидаемый
-/// размер (для проверки «докачано целиком» и для UI). Для zip/wheel — это временный архив, распаковка
-/// раскладывает содержимое (см. `Extract`).
+/// Одна закачиваемая единица компонента: закреплённый URL + относительный путь назначения (от repo_root) +
+/// точный размер и SHA-256 того, что отдаёт этот URL. Для zip/wheel dest_rel задаёт каталог распаковки и имя
+/// записи об установке (`<dest_rel>.json`), сам архив лежит только на время закачки (см. `Extract`).
 #[derive(Clone, Debug)]
 pub struct FileSpec {
     pub url: &'static str,
-    /// Куда лечь ФАЙЛУ (для прямых файлов) ИЛИ временный путь архива (для zip/wheel). Относительно repo_root.
+    /// Куда лечь ФАЙЛУ (для прямых файлов) ИЛИ имя архива в каталоге распаковки (для zip/wheel).
     pub dest_rel: &'static str,
-    /// Ожидаемый размер в байтах (0 = неизвестно/rolling-релиз). Для файлов-моделей — точный (сверен с диском).
+    /// Точный размер в байтах.
     pub size: u64,
+    /// SHA-256 (hex, нижний регистр): HF — lfs.oid закреплённой ревизии, GitHub — digest ассета, PyPI/NVIDIA —
+    /// их манифесты.
+    pub sha256: &'static str,
     pub extract: Extract,
 }
 
@@ -98,18 +106,19 @@ pub struct Component {
     pub size: u64,
     /// Файлы к закачке (для Delivery::Download). Пусто у Bundled/External.
     pub files: &'static [FileSpec],
-    /// Пути-«маркеры» существования (относительно repo_root). Компонент installed, когда ВСЕ маркеры на
-    /// месте и (для файлов с известным размером) их размер совпадает.
+    /// Пути-«маркеры» (относительно repo_root): ключевые файлы, по которым видно компонент на диске. Для
+    /// скачиваемого компонента установленность решают его files (см. `component_status`), маркеры —
+    /// дополнительное условие и то, что снимает удаление старой установки без записи об архиве.
     pub markers: &'static [Marker],
     /// URL внешней страницы (для Delivery::External — сайт драйвера).
     pub external_url: Option<&'static str>,
 }
 
-/// Маркер наличия: путь + опц. минимальный размер (0 = только существование).
+/// Маркер наличия: путь + точный размер (0 = только существование).
 #[derive(Clone, Copy, Debug)]
 pub struct Marker {
     pub rel: &'static str,
-    /// Ожидаемый точный размер (0 = не проверять). Файл «целый», если размер == expect (для докачки/резюме).
+    /// Точный размер (0 = не проверять).
     pub expect: u64,
 }
 
@@ -123,7 +132,7 @@ pub struct Marker {
 const HF_NEMOTRON_DIAR: &str = "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/nemotron-3-diarization/nemotron3_diar_v3.onnx";
 const HF_NEMOTRON_DIAR_LICENSE: &str = "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/nemotron-3-diarization/LICENSE";
 // HF: Mel-Band Roformer voc_fv6-Q8_0 (chenmozhijin/BSRoformer-GGUF).
-const HF_ROFORMER: &str = "https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/main/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q8_0.gguf";
+const HF_ROFORMER: &str = "https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/df802a6773d25ba6ef785ff619daa3e510503168/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q8_0.gguf";
 // GitHub: BSRoformer.cpp движок win-cuda-13.1.0 zip (chenmozhijin/BSRoformer.cpp v0.1.0).
 const GH_BSROFORMER_ENGINE: &str =
     "https://github.com/chenmozhijin/BSRoformer.cpp/releases/download/v0.1.0/BSRoformer-windows-cuda-13.1.0.zip";
@@ -145,9 +154,10 @@ const GH_ORT: &str =
 // Содержит onnxruntime.dll(GPU) + onnxruntime_providers_cuda.dll + onnxruntime_providers_shared.dll.
 const GH_ORT_GPU: &str =
     "https://github.com/microsoft/onnxruntime/releases/download/v1.28.2/onnxruntime-win-x64-gpu_cuda13-1.28.2.zip";
-// GitHub: ffmpeg static win64 GPL (BtbN/FFmpeg-Builds) — тот же источник, что install.bat.
+// GitHub: ffmpeg static win64 GPL (BtbN/FFmpeg-Builds), master-сборка последнего дня месяца: дневные
+// autobuild BtbN удаляет через пару недель, а сборки последнего дня месяца хранит, поэтому закреплена такая.
 const GH_FFMPEG: &str =
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-N-126342-gf88b741dbf-win64-gpl.zip";
 // PyPI-wheel'ы NVIDIA CUDA 13 runtime (CUDA 13.4 Update 2: cudart 13.4.92, cuBLAS 13.8.0.4).
 // Дают cudart64_13.dll, cublas64_13.dll, cublasLt64_13.dll.
 const WHEEL_CUDART: &str = "https://files.pythonhosted.org/packages/86/00/d5436004268f049214193659ebc36550b5ef3925c3d13b4cc980e13be6f5/nvidia_cuda_runtime-13.4.92-py3-none-win_amd64.whl";
@@ -182,14 +192,14 @@ pub fn manifest() -> Vec<Component> {
             purpose: "Синтез дубляжа и клон голоса (TTS)",
             requirement: Requirement::Required,
             delivery: Delivery::Download,
-            size: 5_534_363_733,
+            size: 5_530_678_590,
             files: &[
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/q8_0.gguf", dest_rel: "models/higgs-q8_0/q8_0.gguf", size: 5_519_235_296, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/config.json", dest_rel: "models/higgs-q8_0/config.json", size: 2_755, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/chat_template.jinja", dest_rel: "models/higgs-q8_0/chat_template.jinja", size: 2_427, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/tokenizer.json", dest_rel: "models/higgs-q8_0/tokenizer.json", size: 11_433_924, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/tokenizer_config.json", dest_rel: "models/higgs-q8_0/tokenizer_config.json", size: 1_937, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q8_0/higgs_audio_v2_tokenizer_config.json", dest_rel: "models/higgs-q8_0/higgs_audio_v2_tokenizer_config.json", size: 2_251, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q8_0/q8_0.gguf", dest_rel: "models/higgs-q8_0/q8_0.gguf", size: 5_519_235_296, sha256: "b857344af06b1b2497f4f8c1d0f0c134d0eeaf9c089c0d28ae6e58084d90f901", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q8_0/config.json", dest_rel: "models/higgs-q8_0/config.json", size: 2_755, sha256: "2ead4442c079ee35c2123a5b197e126e18eccfc0bdb65d31c94767e75d7864d4", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q8_0/chat_template.jinja", dest_rel: "models/higgs-q8_0/chat_template.jinja", size: 2_427, sha256: "44d5f08f3f72b837eaad09f13a54c1f9f4eb58d75240334548b7fd52a5437fa5", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q8_0/tokenizer.json", dest_rel: "models/higgs-q8_0/tokenizer.json", size: 11_433_924, sha256: "eb883de2de5adc5113f1f02b54830a0ea7cd6ef191cde65c41aceb3737d4d1c1", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q8_0/tokenizer_config.json", dest_rel: "models/higgs-q8_0/tokenizer_config.json", size: 1_937, sha256: "b4d632e1239569fb1829bf0bfa3c674fa54f22c42e9cb2669d77c438d4b4e02c", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q8_0/higgs_audio_v2_tokenizer_config.json", dest_rel: "models/higgs-q8_0/higgs_audio_v2_tokenizer_config.json", size: 2_251, sha256: "1f96f10516c2bb59d5a127e04e659a331a50fb1684217b1492fabd1dc94def26", extract: Extract::None },
             ],
             markers: &[
                 Marker { rel: "models/higgs-q8_0/q8_0.gguf", expect: 5_519_235_296 },
@@ -206,7 +216,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 71_727_104,
             files: &[
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/engines/audiocpp_engine.dll", dest_rel: "models/higgs-engine/audiocpp_engine.dll", size: 71_727_104, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/engines/audiocpp_engine.dll", dest_rel: "models/higgs-engine/audiocpp_engine.dll", size: 71_727_104, sha256: "25dcf30acf54bdee059810f94c5e46ea9c59022a0b53f134d8a422291188449c", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/higgs-engine/audiocpp_engine.dll", expect: 71_727_104 }],
             external_url: None,
@@ -219,8 +229,8 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 7_150_992_992,
             files: &[
-                FileSpec { url: "https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf/resolve/main/gemma-4-12b-it-qat-q4_0.gguf", dest_rel: "models/mt/gemma-4-12b-it-qat-q4_0.gguf", size: 6_975_877_728, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf/resolve/main/mmproj-gemma-4-12b-it-qat-q4_0.gguf", dest_rel: "models/mt/mmproj-gemma-4-12b-it-qat-q4_0.gguf", size: 175_115_264, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf/resolve/2b318d6ebebf093f50ca4376e858325f10703358/gemma-4-12b-it-qat-q4_0.gguf", dest_rel: "models/mt/gemma-4-12b-it-qat-q4_0.gguf", size: 6_975_877_728, sha256: "faff1a63667fac17ac5e777f47114688fcefea96e220e211aaa8d62c2c4561f1", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf/resolve/2b318d6ebebf093f50ca4376e858325f10703358/mmproj-gemma-4-12b-it-qat-q4_0.gguf", dest_rel: "models/mt/mmproj-gemma-4-12b-it-qat-q4_0.gguf", size: 175_115_264, sha256: "e70b0e5cd80323d5d588b4ed06780356b7b1ba03995a4b8164c6ae9db0ff5989", extract: Extract::None },
             ],
             markers: &[
                 Marker { rel: "models/mt/gemma-4-12b-it-qat-q4_0.gguf", expect: 6_975_877_728 },
@@ -237,8 +247,8 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 8_588_690_400,
             files: &[
-                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q5_K_M.gguf", dest_rel: "models/mt-q5_0/gemma-4-12b-it-Q5_K_M.gguf", size: 8_413_574_560, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf", dest_rel: "models/mt-q5_0/mmproj-F16.gguf", size: 175_115_840, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/d997c805aafe035a8024f961c6e1afd6b30d79a5/gemma-4-12b-it-Q5_K_M.gguf", dest_rel: "models/mt-q5_0/gemma-4-12b-it-Q5_K_M.gguf", size: 8_413_574_560, sha256: "1bc633ec98817858bec10f73fa026481c9662449aae4b80a05dfb28ef784c278", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/d997c805aafe035a8024f961c6e1afd6b30d79a5/mmproj-F16.gguf", dest_rel: "models/mt-q5_0/mmproj-F16.gguf", size: 175_115_840, sha256: "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/mt-q5_0/gemma-4-12b-it-Q5_K_M.gguf", expect: 8_413_574_560 }, Marker { rel: "models/mt-q5_0/mmproj-F16.gguf", expect: 175_115_840 }],
             external_url: None,
@@ -251,8 +261,8 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 9_961_137_120,
             files: &[
-                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q6_K.gguf", dest_rel: "models/mt-q6_k/gemma-4-12b-it-Q6_K.gguf", size: 9_786_021_280, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf", dest_rel: "models/mt-q6_k/mmproj-F16.gguf", size: 175_115_840, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/d997c805aafe035a8024f961c6e1afd6b30d79a5/gemma-4-12b-it-Q6_K.gguf", dest_rel: "models/mt-q6_k/gemma-4-12b-it-Q6_K.gguf", size: 9_786_021_280, sha256: "e1602ddc224c159584eb4c7d6a6c8d682fc6afb2efb8f76c10bfd63ba71436a2", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/d997c805aafe035a8024f961c6e1afd6b30d79a5/mmproj-F16.gguf", dest_rel: "models/mt-q6_k/mmproj-F16.gguf", size: 175_115_840, sha256: "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/mt-q6_k/gemma-4-12b-it-Q6_K.gguf", expect: 9_786_021_280 }, Marker { rel: "models/mt-q6_k/mmproj-F16.gguf", expect: 175_115_840 }],
             external_url: None,
@@ -265,8 +275,8 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 12_844_762_080,
             files: &[
-                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q8_0.gguf", dest_rel: "models/mt-q8_0/gemma-4-12b-it-Q8_0.gguf", size: 12_669_646_240, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf", dest_rel: "models/mt-q8_0/mmproj-F16.gguf", size: 175_115_840, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/d997c805aafe035a8024f961c6e1afd6b30d79a5/gemma-4-12b-it-Q8_0.gguf", dest_rel: "models/mt-q8_0/gemma-4-12b-it-Q8_0.gguf", size: 12_669_646_240, sha256: "74d2d4f0b5b08ca8589d1a5f50e689c0984469f3cedbdc7d67458c6e9e35496a", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/d997c805aafe035a8024f961c6e1afd6b30d79a5/mmproj-F16.gguf", dest_rel: "models/mt-q8_0/mmproj-F16.gguf", size: 175_115_840, sha256: "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/mt-q8_0/gemma-4-12b-it-Q8_0.gguf", expect: 12_669_646_240 }, Marker { rel: "models/mt-q8_0/mmproj-F16.gguf", expect: 175_115_840 }],
             external_url: None,
@@ -277,13 +287,13 @@ pub fn manifest() -> Vec<Component> {
             purpose: "Распознавание речи со словными таймстемпами (ASR)",
             requirement: Requirement::Required,
             delivery: Delivery::Download,
-            size: 688_819_567,
+            size: 670_619_803,
             files: &[
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.int8.onnx", dest_rel: "models/tdt/encoder-model.int8.onnx", size: 652_183_999, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.int8.onnx", dest_rel: "models/tdt/decoder_joint-model.int8.onnx", size: 18_202_004, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/nemo128.onnx", dest_rel: "models/tdt/nemo128.onnx", size: 139_764, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt", dest_rel: "models/tdt/vocab.txt", size: 93_939, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/config.json", dest_rel: "models/tdt/config.json", size: 97, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.int8.onnx", dest_rel: "models/tdt/encoder-model.int8.onnx", size: 652_183_999, sha256: "6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/decoder_joint-model.int8.onnx", dest_rel: "models/tdt/decoder_joint-model.int8.onnx", size: 18_202_004, sha256: "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/nemo128.onnx", dest_rel: "models/tdt/nemo128.onnx", size: 139_764, sha256: "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/vocab.txt", dest_rel: "models/tdt/vocab.txt", size: 93_939, sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/config.json", dest_rel: "models/tdt/config.json", size: 97, sha256: "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466", extract: Extract::None },
             ],
             markers: &[
                 Marker { rel: "models/tdt/encoder-model.int8.onnx", expect: 652_183_999 },
@@ -299,16 +309,16 @@ pub fn manifest() -> Vec<Component> {
             purpose: "Синтез дубляжа и клон голоса (TTS) — вариант полегче Q8_0",
             requirement: Requirement::Optional,
             delivery: Delivery::Download,
-            size: 5_035_000_000,
+            size: 5_035_080_542,
             files: &[
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/q6_k.gguf", dest_rel: "models/higgs-q6_k/q6_k.gguf", size: 5_023_637_248, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/config.json", dest_rel: "models/higgs-q6_k/config.json", size: 0, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/chat_template.jinja", dest_rel: "models/higgs-q6_k/chat_template.jinja", size: 0, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/tokenizer.json", dest_rel: "models/higgs-q6_k/tokenizer.json", size: 11_433_924, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/tokenizer_config.json", dest_rel: "models/higgs-q6_k/tokenizer_config.json", size: 0, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q6_k/higgs_audio_v2_tokenizer_config.json", dest_rel: "models/higgs-q6_k/higgs_audio_v2_tokenizer_config.json", size: 0, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q6_k/q6_k.gguf", dest_rel: "models/higgs-q6_k/q6_k.gguf", size: 5_023_637_248, sha256: "764399ced4439adaf3d5d3ca95720276b8ab06fc92a6439f9ce28f3ad671ba4c", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q6_k/config.json", dest_rel: "models/higgs-q6_k/config.json", size: 2_755, sha256: "2ead4442c079ee35c2123a5b197e126e18eccfc0bdb65d31c94767e75d7864d4", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q6_k/chat_template.jinja", dest_rel: "models/higgs-q6_k/chat_template.jinja", size: 2_427, sha256: "44d5f08f3f72b837eaad09f13a54c1f9f4eb58d75240334548b7fd52a5437fa5", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q6_k/tokenizer.json", dest_rel: "models/higgs-q6_k/tokenizer.json", size: 11_433_924, sha256: "eb883de2de5adc5113f1f02b54830a0ea7cd6ef191cde65c41aceb3737d4d1c1", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q6_k/tokenizer_config.json", dest_rel: "models/higgs-q6_k/tokenizer_config.json", size: 1_937, sha256: "b4d632e1239569fb1829bf0bfa3c674fa54f22c42e9cb2669d77c438d4b4e02c", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q6_k/higgs_audio_v2_tokenizer_config.json", dest_rel: "models/higgs-q6_k/higgs_audio_v2_tokenizer_config.json", size: 2_251, sha256: "1f96f10516c2bb59d5a127e04e659a331a50fb1684217b1492fabd1dc94def26", extract: Extract::None },
             ],
-            markers: &[Marker { rel: "models/higgs-q6_k/q6_k.gguf", expect: 5_023_637_248 }, Marker { rel: "models/higgs-q6_k/tokenizer.json", expect: 0 }],
+            markers: &[Marker { rel: "models/higgs-q6_k/q6_k.gguf", expect: 5_023_637_248 }, Marker { rel: "models/higgs-q6_k/tokenizer.json", expect: 11_433_924 }],
             external_url: None,
         },
         Component {
@@ -317,16 +327,16 @@ pub fn manifest() -> Vec<Component> {
             purpose: "Синтез дубляжа и клон голоса (TTS) — самый лёгкий вариант",
             requirement: Requirement::Optional,
             delivery: Delivery::Download,
-            size: 4_098_000_000,
+            size: 4_098_366_270,
             files: &[
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/q4_k_m.gguf", dest_rel: "models/higgs-q4_k_m/q4_k_m.gguf", size: 4_086_922_976, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/config.json", dest_rel: "models/higgs-q4_k_m/config.json", size: 0, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/chat_template.jinja", dest_rel: "models/higgs-q4_k_m/chat_template.jinja", size: 0, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/tokenizer.json", dest_rel: "models/higgs-q4_k_m/tokenizer.json", size: 11_433_924, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/tokenizer_config.json", dest_rel: "models/higgs-q4_k_m/tokenizer_config.json", size: 0, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/main/models/higgs-q4_k_m/higgs_audio_v2_tokenizer_config.json", dest_rel: "models/higgs-q4_k_m/higgs_audio_v2_tokenizer_config.json", size: 0, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q4_k_m/q4_k_m.gguf", dest_rel: "models/higgs-q4_k_m/q4_k_m.gguf", size: 4_086_922_976, sha256: "a6c8a9b5c8c72965865988c6ef411d32446aeb0df730f59e7bd4a3e801cea3a1", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q4_k_m/config.json", dest_rel: "models/higgs-q4_k_m/config.json", size: 2_755, sha256: "2ead4442c079ee35c2123a5b197e126e18eccfc0bdb65d31c94767e75d7864d4", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q4_k_m/chat_template.jinja", dest_rel: "models/higgs-q4_k_m/chat_template.jinja", size: 2_427, sha256: "44d5f08f3f72b837eaad09f13a54c1f9f4eb58d75240334548b7fd52a5437fa5", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q4_k_m/tokenizer.json", dest_rel: "models/higgs-q4_k_m/tokenizer.json", size: 11_433_924, sha256: "eb883de2de5adc5113f1f02b54830a0ea7cd6ef191cde65c41aceb3737d4d1c1", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q4_k_m/tokenizer_config.json", dest_rel: "models/higgs-q4_k_m/tokenizer_config.json", size: 1_937, sha256: "b4d632e1239569fb1829bf0bfa3c674fa54f22c42e9cb2669d77c438d4b4e02c", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/drbaph/Higgs-Audio-v3-Studio/resolve/c6e9db5a2062c15accc1b9bfa54d927bbdb124dc/models/higgs-q4_k_m/higgs_audio_v2_tokenizer_config.json", dest_rel: "models/higgs-q4_k_m/higgs_audio_v2_tokenizer_config.json", size: 2_251, sha256: "1f96f10516c2bb59d5a127e04e659a331a50fb1684217b1492fabd1dc94def26", extract: Extract::None },
             ],
-            markers: &[Marker { rel: "models/higgs-q4_k_m/q4_k_m.gguf", expect: 4_086_922_976 }, Marker { rel: "models/higgs-q4_k_m/tokenizer.json", expect: 0 }],
+            markers: &[Marker { rel: "models/higgs-q4_k_m/q4_k_m.gguf", expect: 4_086_922_976 }, Marker { rel: "models/higgs-q4_k_m/tokenizer.json", expect: 11_433_924 }],
             external_url: None,
         },
         // Альтернативный квант ASR: fp32 (точнее, тяжелее int8). Отдельная папка (fp32 приоритетнее int8).
@@ -336,14 +346,14 @@ pub fn manifest() -> Vec<Component> {
             purpose: "Распознавание речи (ASR) — полная точность fp32",
             requirement: Requirement::Optional,
             delivery: Delivery::Download,
-            size: 2_560_000_000,
+            size: 2_549_945_719,
             files: &[
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.onnx", dest_rel: "models/tdt-fp32/encoder-model.onnx", size: 41_770_866, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.onnx.data", dest_rel: "models/tdt-fp32/encoder-model.onnx.data", size: 2_435_420_160, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.onnx", dest_rel: "models/tdt-fp32/decoder_joint-model.onnx", size: 72_520_893, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/nemo128.onnx", dest_rel: "models/tdt-fp32/nemo128.onnx", size: 139_764, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt", dest_rel: "models/tdt-fp32/vocab.txt", size: 93_939, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/config.json", dest_rel: "models/tdt-fp32/config.json", size: 0, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.onnx", dest_rel: "models/tdt-fp32/encoder-model.onnx", size: 41_770_866, sha256: "98a74b21b4cc0017c1e7030319a4a96f4a9506e50f0708f3a516d02a77c96bb1", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.onnx.data", dest_rel: "models/tdt-fp32/encoder-model.onnx.data", size: 2_435_420_160, sha256: "9a22d372c51455c34f13405da2520baefb7125bd16981397561423ed32d24f36", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/decoder_joint-model.onnx", dest_rel: "models/tdt-fp32/decoder_joint-model.onnx", size: 72_520_893, sha256: "e978ddf6688527182c10fde2eb4b83068421648985ef23f7a86be732be8706c1", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/nemo128.onnx", dest_rel: "models/tdt-fp32/nemo128.onnx", size: 139_764, sha256: "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/vocab.txt", dest_rel: "models/tdt-fp32/vocab.txt", size: 93_939, sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/config.json", dest_rel: "models/tdt-fp32/config.json", size: 97, sha256: "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/tdt-fp32/encoder-model.onnx", expect: 41_770_866 }, Marker { rel: "models/tdt-fp32/encoder-model.onnx.data", expect: 2_435_420_160 }, Marker { rel: "models/tdt-fp32/vocab.txt", expect: 93_939 }],
             external_url: None,
@@ -359,12 +369,12 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 2_596_031_917,
             files: &[
-                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/encoder-model.onnx", dest_rel: "models/tdt-ultra/encoder-model.onnx", size: 87_857_063, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/encoder-model.onnx.data", dest_rel: "models/tdt-ultra/encoder-model.onnx.data", size: 2_435_420_160, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/decoder_joint-model.onnx", dest_rel: "models/tdt-ultra/decoder_joint-model.onnx", size: 72_520_894, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/vocab.txt", dest_rel: "models/tdt-ultra/vocab.txt", size: 93_939, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/tdt/nemo128.onnx", dest_rel: "models/tdt-ultra/nemo128.onnx", size: 139_764, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/config.json", dest_rel: "models/tdt-ultra/config.json", size: 97, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/encoder-model.onnx", dest_rel: "models/tdt-ultra/encoder-model.onnx", size: 87_857_063, sha256: "76f835e57d62d82f1485c7a84706782e44a123a69f4efa86ed3b4ad56e236051", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/encoder-model.onnx.data", dest_rel: "models/tdt-ultra/encoder-model.onnx.data", size: 2_435_420_160, sha256: "6aeb9438f1f45dafc17d27c61a12bc406c0c2ccb8c17219aeeb3f898c283a8e6", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/decoder_joint-model.onnx", dest_rel: "models/tdt-ultra/decoder_joint-model.onnx", size: 72_520_894, sha256: "a5911fe202e8fba44251fce252a6c9c7c0a7c724c882a13f81d96611fa2d7ccb", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/parakeet-ultra/vocab.txt", dest_rel: "models/tdt-ultra/vocab.txt", size: 93_939, sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/tdt/nemo128.onnx", dest_rel: "models/tdt-ultra/nemo128.onnx", size: 139_764, sha256: "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/config.json", dest_rel: "models/tdt-ultra/config.json", size: 97, sha256: "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466", extract: Extract::None },
             ],
             markers: &[
                 Marker { rel: "models/tdt-ultra/encoder-model.onnx", expect: 87_857_063 },
@@ -385,7 +395,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 87_654_143,
             files: &[
-                FileSpec { url: "https://github.com/Purfview/whisper-standalone-win/releases/download/faster-whisper/Whisper-Faster_r192.3_windows.zip", dest_rel: "tools/whisper/_whisper.zip", size: 0, extract: Extract::ZipFlat },
+                FileSpec { url: "https://github.com/Purfview/whisper-standalone-win/releases/download/faster-whisper/Whisper-Faster_r192.3_windows.zip", dest_rel: "tools/whisper/_whisper.zip", size: 87_654_143, sha256: "8150ad257fd8e46d817bb7e667260c2ce4c493d9e58973862e6409c592b44ba5", extract: Extract::ZipFlat },
             ],
             markers: &[Marker { rel: "tools/whisper/whisper-faster.exe", expect: 0 }],
             external_url: None,
@@ -401,8 +411,8 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 1_125_090_089,
             files: &[
-                FileSpec { url: REDIST_WHISPER_CUBLAS, dest_rel: "tools/whisper/_wcublas.zip", size: 0, extract: Extract::WheelDlls },
-                FileSpec { url: REDIST_WHISPER_CUDNN, dest_rel: "tools/whisper/_wcudnn.zip", size: 0, extract: Extract::WheelDlls },
+                FileSpec { url: REDIST_WHISPER_CUBLAS, dest_rel: "tools/whisper/_wcublas.zip", size: 420_850_025, sha256: "67b0934a6359e4ee26fff823c356021589d392c4fd49ca12624f570edc08e2b9", extract: Extract::WheelDlls },
+                FileSpec { url: REDIST_WHISPER_CUDNN, dest_rel: "tools/whisper/_wcudnn.zip", size: 704_240_064, sha256: "5e45478efe71a96329e6c0d2a3a2f79c747c15b2a51fead4b84c89b02cbf1671", extract: Extract::WheelDlls },
             ],
             markers: &[
                 Marker { rel: "tools/whisper/cublas64_11.dll", expect: 0 },
@@ -418,10 +428,10 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 78_203_619,
             files: &[
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/model.bin", dest_rel: "models/whisper/faster-whisper-tiny/model.bin", size: 75_538_270, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/config.json", dest_rel: "models/whisper/faster-whisper-tiny/config.json", size: 2_249, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/tokenizer.json", dest_rel: "models/whisper/faster-whisper-tiny/tokenizer.json", size: 2_203_239, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/vocabulary.txt", dest_rel: "models/whisper/faster-whisper-tiny/vocabulary.txt", size: 459_861, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-tiny/resolve/d90ca5fe260221311c53c58e660288d3deb8d356/model.bin", dest_rel: "models/whisper/faster-whisper-tiny/model.bin", size: 75_538_270, sha256: "dcb76c6586fc06cbdac6dd21f14cfd129cc4cdd9dce19bf4ffa62e59cbe6e6d1", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-tiny/resolve/d90ca5fe260221311c53c58e660288d3deb8d356/config.json", dest_rel: "models/whisper/faster-whisper-tiny/config.json", size: 2_249, sha256: "a73a28cdfe1c43ccc7202fa333d1f89c202477271407ae9a7f19afa52039cac8", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-tiny/resolve/d90ca5fe260221311c53c58e660288d3deb8d356/tokenizer.json", dest_rel: "models/whisper/faster-whisper-tiny/tokenizer.json", size: 2_203_239, sha256: "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-tiny/resolve/d90ca5fe260221311c53c58e660288d3deb8d356/vocabulary.txt", dest_rel: "models/whisper/faster-whisper-tiny/vocabulary.txt", size: 459_861, sha256: "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/whisper/faster-whisper-tiny/model.bin", expect: 75_538_270 }, Marker { rel: "models/whisper/faster-whisper-tiny/tokenizer.json", expect: 2_203_239 }],
             external_url: None,
@@ -434,10 +444,10 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 147_882_941,
             files: &[
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-base/resolve/main/model.bin", dest_rel: "models/whisper/faster-whisper-base/model.bin", size: 145_217_532, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-base/resolve/main/config.json", dest_rel: "models/whisper/faster-whisper-base/config.json", size: 2_309, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-base/resolve/main/tokenizer.json", dest_rel: "models/whisper/faster-whisper-base/tokenizer.json", size: 2_203_239, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-base/resolve/main/vocabulary.txt", dest_rel: "models/whisper/faster-whisper-base/vocabulary.txt", size: 459_861, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/model.bin", dest_rel: "models/whisper/faster-whisper-base/model.bin", size: 145_217_532, sha256: "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/config.json", dest_rel: "models/whisper/faster-whisper-base/config.json", size: 2_309, sha256: "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/tokenizer.json", dest_rel: "models/whisper/faster-whisper-base/tokenizer.json", size: 2_203_239, sha256: "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/vocabulary.txt", dest_rel: "models/whisper/faster-whisper-base/vocabulary.txt", size: 459_861, sha256: "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/whisper/faster-whisper-base/model.bin", expect: 145_217_532 }, Marker { rel: "models/whisper/faster-whisper-base/tokenizer.json", expect: 2_203_239 }],
             external_url: None,
@@ -450,10 +460,10 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 486_212_372,
             files: &[
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-small/resolve/main/model.bin", dest_rel: "models/whisper/faster-whisper-small/model.bin", size: 483_546_902, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-small/resolve/main/config.json", dest_rel: "models/whisper/faster-whisper-small/config.json", size: 2_370, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-small/resolve/main/tokenizer.json", dest_rel: "models/whisper/faster-whisper-small/tokenizer.json", size: 2_203_239, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-small/resolve/main/vocabulary.txt", dest_rel: "models/whisper/faster-whisper-small/vocabulary.txt", size: 459_861, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/model.bin", dest_rel: "models/whisper/faster-whisper-small/model.bin", size: 483_546_902, sha256: "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/config.json", dest_rel: "models/whisper/faster-whisper-small/config.json", size: 2_370, sha256: "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json", dest_rel: "models/whisper/faster-whisper-small/tokenizer.json", size: 2_203_239, sha256: "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt", dest_rel: "models/whisper/faster-whisper-small/vocabulary.txt", size: 459_861, sha256: "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/whisper/faster-whisper-small/model.bin", expect: 483_546_902 }, Marker { rel: "models/whisper/faster-whisper-small/tokenizer.json", expect: 2_203_239 }],
             external_url: None,
@@ -466,10 +476,10 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 1_530_571_735,
             files: &[
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-medium/resolve/main/model.bin", dest_rel: "models/whisper/faster-whisper-medium/model.bin", size: 1_527_906_378, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-medium/resolve/main/config.json", dest_rel: "models/whisper/faster-whisper-medium/config.json", size: 2_257, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-medium/resolve/main/tokenizer.json", dest_rel: "models/whisper/faster-whisper-medium/tokenizer.json", size: 2_203_239, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-medium/resolve/main/vocabulary.txt", dest_rel: "models/whisper/faster-whisper-medium/vocabulary.txt", size: 459_861, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-medium/resolve/08e178d48790749d25932bbc082711ddcfdfbc4f/model.bin", dest_rel: "models/whisper/faster-whisper-medium/model.bin", size: 1_527_906_378, sha256: "9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-medium/resolve/08e178d48790749d25932bbc082711ddcfdfbc4f/config.json", dest_rel: "models/whisper/faster-whisper-medium/config.json", size: 2_257, sha256: "3622a2ddc41ec0e0fd4e68c13c6830f03b90c38d89aaad184de02c8c642cf807", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-medium/resolve/08e178d48790749d25932bbc082711ddcfdfbc4f/tokenizer.json", dest_rel: "models/whisper/faster-whisper-medium/tokenizer.json", size: 2_203_239, sha256: "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-medium/resolve/08e178d48790749d25932bbc082711ddcfdfbc4f/vocabulary.txt", dest_rel: "models/whisper/faster-whisper-medium/vocabulary.txt", size: 459_861, sha256: "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/whisper/faster-whisper-medium/model.bin", expect: 1_527_906_378 }, Marker { rel: "models/whisper/faster-whisper-medium/tokenizer.json", expect: 2_203_239 }],
             external_url: None,
@@ -482,11 +492,11 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 3_090_835_702,
             files: &[
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/model.bin", dest_rel: "models/whisper/faster-whisper-large-v3/model.bin", size: 3_087_284_237, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/config.json", dest_rel: "models/whisper/faster-whisper-large-v3/config.json", size: 2_394, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/preprocessor_config.json", dest_rel: "models/whisper/faster-whisper-large-v3/preprocessor_config.json", size: 340, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/tokenizer.json", dest_rel: "models/whisper/faster-whisper-large-v3/tokenizer.json", size: 2_480_617, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/vocabulary.json", dest_rel: "models/whisper/faster-whisper-large-v3/vocabulary.json", size: 1_068_114, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/model.bin", dest_rel: "models/whisper/faster-whisper-large-v3/model.bin", size: 3_087_284_237, sha256: "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/config.json", dest_rel: "models/whisper/faster-whisper-large-v3/config.json", size: 2_394, sha256: "a9306624f5ec14270a014b647e5c316b6e03a662c369758d1b90697a7b0655b9", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/preprocessor_config.json", dest_rel: "models/whisper/faster-whisper-large-v3/preprocessor_config.json", size: 340, sha256: "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/tokenizer.json", dest_rel: "models/whisper/faster-whisper-large-v3/tokenizer.json", size: 2_480_617, sha256: "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/vocabulary.json", dest_rel: "models/whisper/faster-whisper-large-v3/vocabulary.json", size: 1_068_114, sha256: "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/whisper/faster-whisper-large-v3/model.bin", expect: 3_087_284_237 }, Marker { rel: "models/whisper/faster-whisper-large-v3/tokenizer.json", expect: 2_480_617 }],
             external_url: None,
@@ -499,11 +509,11 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 1_621_665_983,
             files: &[
-                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/model.bin", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/model.bin", size: 1_617_884_929, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/config.json", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/config.json", size: 2_263, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/preprocessor_config.json", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/preprocessor_config.json", size: 340, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/tokenizer.json", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/tokenizer.json", size: 2_710_337, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/vocabulary.json", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/vocabulary.json", size: 1_068_114, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/4df90f75321148c3a29a9e2351b7ddf8f5b115a8/model.bin", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/model.bin", size: 1_617_884_929, sha256: "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/4df90f75321148c3a29a9e2351b7ddf8f5b115a8/config.json", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/config.json", size: 2_263, sha256: "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/4df90f75321148c3a29a9e2351b7ddf8f5b115a8/preprocessor_config.json", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/preprocessor_config.json", size: 340, sha256: "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/4df90f75321148c3a29a9e2351b7ddf8f5b115a8/tokenizer.json", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/tokenizer.json", size: 2_710_337, sha256: "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/4df90f75321148c3a29a9e2351b7ddf8f5b115a8/vocabulary.json", dest_rel: "models/whisper/faster-whisper-large-v3-turbo/vocabulary.json", size: 1_068_114, sha256: "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/whisper/faster-whisper-large-v3-turbo/model.bin", expect: 1_617_884_929 }, Marker { rel: "models/whisper/faster-whisper-large-v3-turbo/tokenizer.json", expect: 2_710_337 }],
             external_url: None,
@@ -519,8 +529,8 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 400_509_316,
             files: &[
-                FileSpec { url: HF_NEMOTRON_DIAR, dest_rel: "models/nemotron-diar/nemotron3_diar_v3.onnx", size: 400_506_656, extract: Extract::None },
-                FileSpec { url: HF_NEMOTRON_DIAR_LICENSE, dest_rel: "models/nemotron-diar/LICENSE", size: 2_660, extract: Extract::None },
+                FileSpec { url: HF_NEMOTRON_DIAR, dest_rel: "models/nemotron-diar/nemotron3_diar_v3.onnx", size: 400_506_656, sha256: "915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a", extract: Extract::None },
+                FileSpec { url: HF_NEMOTRON_DIAR_LICENSE, dest_rel: "models/nemotron-diar/LICENSE", size: 2_660, sha256: "14cf93aed5ee7c72516170ecb65fb6d7e54ef19217d328c8b00b78eaf61c8b36", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/nemotron-diar/nemotron3_diar_v3.onnx", expect: 400_506_656 }],
             external_url: None,
@@ -533,7 +543,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 251_707_744,
             files: &[
-                FileSpec { url: HF_ROFORMER, dest_rel: "models/bsroformer/voc_fv6-Q8_0.gguf", size: 251_707_744, extract: Extract::None },
+                FileSpec { url: HF_ROFORMER, dest_rel: "models/bsroformer/voc_fv6-Q8_0.gguf", size: 251_707_744, sha256: "2cd84c9f24513749b0cb1a6ab3e3be5c5e2f7d0e8533e50512c1f394d2828a73", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/bsroformer/voc_fv6-Q8_0.gguf", expect: 251_707_744 }],
             external_url: None,
@@ -547,7 +557,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 167_303_008,
             files: &[
-                FileSpec { url: "https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/main/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q5_0.gguf", dest_rel: "models/bsroformer/voc_fv6-Q5_0.gguf", size: 167_303_008, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/df802a6773d25ba6ef785ff619daa3e510503168/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q5_0.gguf", dest_rel: "models/bsroformer/voc_fv6-Q5_0.gguf", size: 167_303_008, sha256: "85e465d209684c5269f595a2982ab21dce18d192a591b9f3309386bb57e6a86b", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/bsroformer/voc_fv6-Q5_0.gguf", expect: 167_303_008 }],
             external_url: None,
@@ -560,7 +570,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 139_168_096,
             files: &[
-                FileSpec { url: "https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/main/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q4_0.gguf", dest_rel: "models/bsroformer/voc_fv6-Q4_0.gguf", size: 139_168_096, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/df802a6773d25ba6ef785ff619daa3e510503168/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q4_0.gguf", dest_rel: "models/bsroformer/voc_fv6-Q4_0.gguf", size: 139_168_096, sha256: "11441e362f9815f4f06b1f4dea8c4b33cafae8083aefb7b9e10e43fe9c2841a1", extract: Extract::None },
             ],
             markers: &[Marker { rel: "models/bsroformer/voc_fv6-Q4_0.gguf", expect: 139_168_096 }],
             external_url: None,
@@ -582,12 +592,12 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 1_331_548_084,
             files: &[
-                FileSpec { url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/detection/model.onnx", dest_rel: "models/faces/det_10g.onnx", size: 16_923_827, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/bytedance-research/LVFace/resolve/main/LVFace-L_Glint360K/LVFace-L_Glint360K.onnx", dest_rel: "models/faces/LVFace-L_Glint360K.onnx", size: 1_022_938_188, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/deepghs/ccip_onnx/resolve/main/ccip-caformer-24-randaug-pruned/model_feat.onnx", dest_rel: "models/faces/ccip/model_feat.onnx", size: 150_248_245, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/deepghs/anime_face_detection/resolve/main/face_detect_v1.4_s/model.onnx", dest_rel: "models/faces/anime_face/model.onnx", size: 44_583_229, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/facefusion/models-3.1.0/resolve/main/xseg_1.onnx", dest_rel: "models/faces/occluder/xseg_1.onnx", size: 70_324_286, extract: Extract::None },
-                FileSpec { url: "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx", dest_rel: "models/faces/wespeaker/voxceleb_resnet34_LM.onnx", size: 26_530_309, extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/immich-app/buffalo_l/resolve/d09715916a0778919a770c343533641e250b8699/detection/model.onnx", dest_rel: "models/faces/det_10g.onnx", size: 16_923_827, sha256: "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/bytedance-research/LVFace/resolve/b12702ab1f5c721748e054a66dc90e1edd1f0724/LVFace-L_Glint360K/LVFace-L_Glint360K.onnx", dest_rel: "models/faces/LVFace-L_Glint360K.onnx", size: 1_022_938_188, sha256: "49389036a4a5b69e0efcddfe34839ac72c7a71ce6b4dc1b6821e2ac368c87063", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/deepghs/ccip_onnx/resolve/eb2acdd29af1703388d3d0c04221add322bc9110/ccip-caformer-24-randaug-pruned/model_feat.onnx", dest_rel: "models/faces/ccip/model_feat.onnx", size: 150_248_245, sha256: "4ea118d16496274f4f6e08d3afc768cc592389e8f7f32f8732ce2215c228ac5f", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/deepghs/anime_face_detection/resolve/784dc4c0bb692351ddcdbe6131a050b17d3025d5/face_detect_v1.4_s/model.onnx", dest_rel: "models/faces/anime_face/model.onnx", size: 44_583_229, sha256: "403b5bc93b6ff789b7d183418df4a1364049bac00c24acd927604a7ff6891483", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/facefusion/models-3.1.0/resolve/c9e3a503d8e84e91c5cd89ee2d510fe5e793e570/xseg_1.onnx", dest_rel: "models/faces/occluder/xseg_1.onnx", size: 70_324_286, sha256: "c4d1498b8a03b5fe2a3a5d2ef2a0402ab03bd51edaf5b2d8d5fb764702a97dd3", extract: Extract::None },
+                FileSpec { url: "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/f0c48c298fd835726c27956a5d617bad7115627e/voxceleb_resnet34_LM.onnx", dest_rel: "models/faces/wespeaker/voxceleb_resnet34_LM.onnx", size: 26_530_309, sha256: "7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068", extract: Extract::None },
             ],
             markers: &[
                 Marker { rel: "models/faces/det_10g.onnx", expect: 16_923_827 },
@@ -608,7 +618,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 164_990_561,
             files: &[
-                FileSpec { url: GH_BSROFORMER_ENGINE, dest_rel: "tools/bsroformer/_engine.zip", size: 164_990_561, extract: Extract::ZipFlat },
+                FileSpec { url: GH_BSROFORMER_ENGINE, dest_rel: "tools/bsroformer/_engine.zip", size: 164_990_561, sha256: "a7c330774c0a40ec4de09ca0613af48fdc23c28bd0d90212425697daf7b1db74", extract: Extract::ZipFlat },
             ],
             markers: &[Marker { rel: "tools/bsroformer/bs_roformer-cli.exe", expect: 0 }],
             external_url: None,
@@ -621,7 +631,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 671_031,
             files: &[
-                FileSpec { url: GH_BSROFORMER_ENGINE_CPU, dest_rel: "tools/bsroformer-cpu/_engine.zip", size: 671_031, extract: Extract::ZipFlat },
+                FileSpec { url: GH_BSROFORMER_ENGINE_CPU, dest_rel: "tools/bsroformer-cpu/_engine.zip", size: 671_031, sha256: "e002811d56605bce6a51c275cf8f9ba447a3707771289ea6fbcca7f4d3e9ba1f", extract: Extract::ZipFlat },
             ],
             markers: &[Marker { rel: "tools/bsroformer-cpu/bs_roformer-cli.exe", expect: 0 }],
             external_url: None,
@@ -635,7 +645,7 @@ pub fn manifest() -> Vec<Component> {
             // Размер сжатого zip (для прогресса закачки); распакованный footprint ~183 МБ.
             size: 149_758_833,
             files: &[
-                FileSpec { url: GH_LLAMA, dest_rel: "tools/llama/_llama.zip", size: 149_758_833, extract: Extract::ZipFlat },
+                FileSpec { url: GH_LLAMA, dest_rel: "tools/llama/_llama.zip", size: 149_758_833, sha256: "b1866c0ce76bc7bfb0c24b33e9a37e9669f1be18539b12c74ce361f81c41f047", extract: Extract::ZipFlat },
             ],
             markers: &[Marker { rel: "tools/llama/llama-server.exe", expect: 0 }],
             external_url: None,
@@ -648,7 +658,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 78_620_837,
             files: &[
-                FileSpec { url: GH_ORT, dest_rel: "models/runtime/_ort.zip", size: 78_620_837, extract: Extract::ZipTree },
+                FileSpec { url: GH_ORT, dest_rel: "models/runtime/_ort.zip", size: 78_620_837, sha256: "c4eedd29489d5feca21866d054638416f3655bf6b18851b3b6b85c8313e95c35", extract: Extract::ZipTree },
             ],
             // dub-asr::ensure_ort_dylib ищет ровно этот путь под models/runtime.
             markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-1.28.2/lib/onnxruntime.dll", expect: 0 }],
@@ -662,7 +672,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 365_562_963,
             files: &[
-                FileSpec { url: GH_ORT_GPU, dest_rel: "models/runtime/_ort_gpu.zip", size: 365_562_963, extract: Extract::ZipTree },
+                FileSpec { url: GH_ORT_GPU, dest_rel: "models/runtime/_ort_gpu.zip", size: 365_562_963, sha256: "4b7a2d01a3cc96b12d06c8266af2c8f42c96365c4a0100d45fd874c71b4a2e19", extract: Extract::ZipTree },
             ],
             markers: &[Marker { rel: "models/runtime/onnxruntime-win-x64-gpu_cuda13-1.28.2/lib/onnxruntime.dll", expect: 0 }],
             external_url: None,
@@ -673,9 +683,9 @@ pub fn manifest() -> Vec<Component> {
             purpose: "Декод/энкод видео и аудио (NVENC)",
             requirement: Requirement::Required,
             delivery: Delivery::Download,
-            size: 168_601_393,
+            size: 170_732_198,
             files: &[
-                FileSpec { url: GH_FFMPEG, dest_rel: "tools/ffmpeg/_ffmpeg.zip", size: 0, extract: Extract::ZipPick },
+                FileSpec { url: GH_FFMPEG, dest_rel: "tools/ffmpeg/_ffmpeg.zip", size: 170_732_198, sha256: "b4da332540eaebc6939181b59e267f163dd57407ef6596f7f3452845921d1d91", extract: Extract::ZipPick },
             ],
             markers: &[Marker { rel: "tools/ffmpeg/ffmpeg.exe", expect: 0 }],
             external_url: None,
@@ -689,10 +699,10 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 585_648_133,
             files: &[
-                FileSpec { url: WHEEL_CUDART, dest_rel: "models/higgs-engine/_cudart.whl", size: 2_778_543, extract: Extract::WheelDlls },
-                FileSpec { url: WHEEL_CUBLAS, dest_rel: "models/higgs-engine/_cublas.whl", size: 423_266_897, extract: Extract::WheelDlls },
+                FileSpec { url: WHEEL_CUDART, dest_rel: "models/higgs-engine/_cudart.whl", size: 2_778_543, sha256: "08dca5e4aba480c2fd5b55075c0fa71b84ef9dcf0521f2d58baa14a803a7311c", extract: Extract::WheelDlls },
+                FileSpec { url: WHEEL_CUBLAS, dest_rel: "models/higgs-engine/_cublas.whl", size: 423_266_897, sha256: "8c5494423bb8a46822cb6b0cb95d7fa4be2d7b96a31155dff083839ec8297910", extract: Extract::WheelDlls },
                 // cuFFT (cufft64_12.dll) — обязателен для CUDA-EP onnxruntime (диаризация/Parakeet на GPU).
-                FileSpec { url: REDIST_CUFFT, dest_rel: "models/higgs-engine/_cufft.zip", size: 159_602_693, extract: Extract::WheelDlls },
+                FileSpec { url: REDIST_CUFFT, dest_rel: "models/higgs-engine/_cufft.zip", size: 159_602_693, sha256: "69d0ad8dc3a1be66f01a748a8206d0ceaafa56939474663fbe790dc3e91d2009", extract: Extract::WheelDlls },
             ],
             markers: &[
                 Marker { rel: "models/higgs-engine/cudart64_13.dll", expect: 0 },
@@ -710,7 +720,7 @@ pub fn manifest() -> Vec<Component> {
             delivery: Delivery::Download,
             size: 436_469_905,
             files: &[
-                FileSpec { url: WHEEL_CUDNN, dest_rel: "models/higgs-engine/_cudnn.whl", size: 436_469_905, extract: Extract::WheelDlls },
+                FileSpec { url: WHEEL_CUDNN, dest_rel: "models/higgs-engine/_cudnn.whl", size: 436_469_905, sha256: "7d96f634adafd55c72231eb0500ca77ab109ec8ebff7b33000b76e081bc4558e", extract: Extract::WheelDlls },
             ],
             markers: &[Marker { rel: "models/higgs-engine/cudnn64_9.dll", expect: 0 }],
             external_url: None,
@@ -721,10 +731,13 @@ pub fn manifest() -> Vec<Component> {
             purpose: "Системные DLL движков (идут в комплекте)",
             requirement: Requirement::Required,
             delivery: Delivery::Bundled,
-            size: 1_084_896,
+            size: 1_120_664,
             files: &[],
+            // MSVCP140_1.dll импортирует onnxruntime 1.28 (ASR/диаризация/OCR на CPU) — без него на машине без
+            // VC++ Redistributable рантайм не грузится (scripts/check-dll-imports.ps1).
             markers: &[
                 Marker { rel: "models/higgs-engine/MSVCP140.dll", expect: 0 },
+                Marker { rel: "models/higgs-engine/MSVCP140_1.dll", expect: 0 },
                 Marker { rel: "models/higgs-engine/VCRUNTIME140.dll", expect: 0 },
                 Marker { rel: "models/higgs-engine/VCRUNTIME140_1.dll", expect: 0 },
                 Marker { rel: "models/higgs-engine/VCOMP140.DLL", expect: 0 },
@@ -771,15 +784,19 @@ pub struct ComponentStatus {
     pub purpose: String,
     pub requirement: Requirement,
     pub delivery: Delivery,
-    /// Ожидаемый совокупный размер, байт.
+    /// Размер закачки компонента, байт (сумма files).
     pub size: u64,
-    /// Установлен ли (для External — детект драйвера; иначе — все маркеры на месте с верным размером).
+    /// External — драйвер и видеокарта годятся под CUDA 13; Download — все files закреплённой версии на месте
+    /// (прямые файлы точного размера, архивы с записью об установке) и маркеры целы.
     pub installed: bool,
-    /// Сколько байт уже на диске (для докачки/UI прогресса частично скачанного).
+    /// Сколько байт закачки уже на диске: целые файлы, принятые архивы и докачанные куски .part.
     pub bytes_on_disk: u64,
-    /// Список отсутствующих/битых маркеров (для диагностики).
+    /// Сколько места на томе моделей нужно, чтобы докачать компонент (остаток + распаковка архивов).
+    pub space_needed: u64,
+    /// Чего не хватает (пути относительно repo_root).
     pub missing: Vec<String>,
-    /// Для External: версия драйвера, если задетектена.
+    /// External — видеокарта, драйвер, CUDA и compute capability; ffmpeg — "PATH", если взят оттуда;
+    /// vcruntime — "system", если часть DLL даёт системный каталог.
     pub detail: Option<String>,
     /// URL внешней страницы (драйвер).
     pub external_url: Option<String>,
@@ -809,24 +826,159 @@ fn vram_estimate(id: &str) -> u64 {
     }
 }
 
-/// Существует ли маркер и «целый» ли он (размер совпадает, если expect != 0).
+/// Файл на месте и (если размер задан) ровно этого размера. Ревизии закреплены, поэтому допуска нет:
+/// другой размер — другой или оборванный файл.
+fn file_ok(path: &Path, size: u64) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && (size == 0 || m.len() == size))
+        .unwrap_or(false)
+}
+
 fn marker_ok(repo_root: &Path, m: &Marker) -> bool {
-    let p = repo_root.join(m.rel);
-    match std::fs::metadata(&p) {
-        // Файл на месте и не оборван. Размер сверяем С ДОПУСКОМ (≥97% expect), а не точным ==: апстрим-веса
-        // на HF могут слегка отличаться от зашитого expect (переезд/переупаковка) -> точное == давало ложный
-        // «не установлено» → ready навсегда false → «Скачать всё» в бесконечном цикле (баг-репорт беты).
-        // Частичная закачка живёт в .part и сюда не попадает (download финализирует только полный файл),
-        // поэтому ≥97% ловит реальные обрывки, но терпит дрейф размера в обе стороны.
-        Ok(meta) if meta.is_file() => {
-            m.expect == 0 || meta.len().saturating_mul(100) >= m.expect.saturating_mul(97)
-        }
-        _ => false,
+    file_ok(&repo_root.join(m.rel), m.expect)
+}
+
+/// Компоненты, чьи DLL годятся и из системного каталога: VC++ Redistributable кладёт их в System32, а
+/// загрузчик ищет зависимости движков там раньше PATH (где models/higgs-engine).
+const FOUND_IN_SYSTEM_DIR: &[&str] = &["vcruntime"];
+
+/// Маркер-DLL лежит в системном каталоге.
+fn in_system_dir(system: &Path, m: &Marker) -> bool {
+    Path::new(m.rel).file_name().is_some_and(|name| file_ok(&system.join(name), m.expect))
+}
+
+#[cfg(windows)]
+fn system_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    let mut buf = [0u16; 1024];
+    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n == 0 || n >= buf.len() {
+        tracing::warn!("GetSystemDirectoryW не ответил ({}) — DLL из системного каталога не засчитываются", std::io::Error::last_os_error());
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])))
+}
+
+#[cfg(not(windows))]
+fn system_dir() -> Option<PathBuf> {
+    None
+}
+
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Каталог архивов на время закачки — на томе моделей: не забивает системный диск и переживает чистку %TEMP%.
+fn download_dir(repo_root: &Path) -> PathBuf {
+    repo_root.join("models").join(".download")
+}
+
+/// Куда качается файл до проверки: прямой — рядом с финальным (публикация = rename на том же томе), архив —
+/// в каталог закачек.
+fn part_path(repo_root: &Path, f: &FileSpec) -> PathBuf {
+    match f.extract {
+        Extract::None => with_suffix(&repo_root.join(f.dest_rel), ".part"),
+        _ => download_dir(repo_root).join(format!("{}.part", f.dest_rel.replace('/', "_"))),
     }
 }
 
-fn marker_bytes(repo_root: &Path, m: &Marker) -> u64 {
-    std::fs::metadata(repo_root.join(m.rel)).map(|x| x.len()).unwrap_or(0)
+/// Манифест завершённых чанков рядом с .part: офсеты готовых чанков (u64 LE) для докачки.
+fn done_manifest_path(part: &Path) -> PathBuf {
+    with_suffix(part, ".done")
+}
+
+/// Офсеты готовых чанков из манифеста (нет манифеста — ничего не готово).
+fn completed_offsets(part: &Path, total: u64) -> std::collections::HashSet<u64> {
+    std::fs::read(done_manifest_path(part))
+        .map(|b| {
+            b.as_chunks::<8>() // рваный хвост (<8 байт при килле) отбрасывается
+                .0
+                .iter()
+                .map(|c| u64::from_le_bytes(*c))
+                .filter(|off| *off < total && off % CHUNK == 0)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Сколько байт файла уже докачано в .part (по манифесту готовых чанков).
+fn resumed_bytes(part: &Path, total: u64) -> u64 {
+    if total == 0 || file_len(part) != total {
+        return 0;
+    }
+    completed_offsets(part, total).iter().map(|off| CHUNK.min(total - off)).sum()
+}
+
+// ── Запись об установке архива ───────────────────────────────────────────────
+
+#[derive(Serialize, serde::Deserialize)]
+struct ArchiveRecord {
+    sha256: String,
+    url: String,
+    files: Vec<RecordedFile>,
+}
+
+#[derive(Serialize, serde::Deserialize)]
+struct RecordedFile {
+    /// Относительно repo_root, через '/'.
+    path: String,
+    size: u64,
+}
+
+fn record_path(repo_root: &Path, f: &FileSpec) -> PathBuf {
+    with_suffix(&repo_root.join(f.dest_rel), ".json")
+}
+
+fn read_record(repo_root: &Path, f: &FileSpec) -> Option<ArchiveRecord> {
+    let p = record_path(repo_root, f);
+    let text = std::fs::read_to_string(&p).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::warn!("запись об установке {} не читается ({e}) — архив считается не установленным", p.display());
+            None
+        }
+    }
+}
+
+/// Архив установлен, когда его запись называет закреплённый sha256 и всё, что он положил, на месте того же
+/// размера. Так видна и замена версии при тех же именах файлов: cudart64_13.dll из CUDA 13.3 и 13.4 одного
+/// размера, различает их только sha256 архива.
+fn archive_installed(repo_root: &Path, f: &FileSpec) -> bool {
+    read_record(repo_root, f).is_some_and(|r| {
+        r.sha256 == f.sha256
+            && !r.files.is_empty()
+            && r.files.iter().all(|x| file_ok(&repo_root.join(&x.path), x.size))
+    })
+}
+
+fn file_installed(repo_root: &Path, f: &FileSpec) -> bool {
+    match f.extract {
+        Extract::None => file_ok(&repo_root.join(f.dest_rel), f.size),
+        _ => archive_installed(repo_root, f),
+    }
+}
+
+fn write_record(repo_root: &Path, f: &FileSpec, written: &[PathBuf]) -> Result<(), DlError> {
+    let files = written
+        .iter()
+        .map(|p| RecordedFile {
+            path: p.strip_prefix(repo_root).unwrap_or(p).to_string_lossy().replace('\\', "/"),
+            size: file_len(p),
+        })
+        .collect();
+    let rec = ArchiveRecord { sha256: f.sha256.to_string(), url: f.url.to_string(), files };
+    let path = record_path(repo_root, f);
+    let tmp = with_suffix(&path, ".tmp");
+    let body = serde_json::to_vec_pretty(&rec).map_err(|e| DlError::new("io", format!("запись об установке: {e}")))?;
+    std::fs::write(&tmp, body).map_err(|e| DlError::new("io", format!("запись {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, &path).map_err(|e| DlError::new("io", format!("запись {}: {e}", path.display())))
 }
 
 /// ffmpeg доступен в системном PATH? (Command::new("ffmpeg") найдёт его при рендере.)
@@ -837,33 +989,63 @@ fn ffmpeg_on_path() -> bool {
         .unwrap_or(false)
 }
 
+/// Место под докачку одного файла: чего ещё не занял его .part (под докачку по Range он сразу занимает полный
+/// размер) плюс, для архива, двойной его размер под распаковку.
+fn file_space_needed(repo_root: &Path, f: &FileSpec) -> u64 {
+    if file_installed(repo_root, f) {
+        return 0;
+    }
+    let rest = f.size - file_len(&part_path(repo_root, f)).min(f.size);
+    if f.extract == Extract::None { rest } else { rest + 2 * f.size }
+}
+
 /// Статус компонента на диске.
 pub fn component_status(repo_root: &Path, c: &Component) -> ComponentStatus {
-    let (installed, detail) = if c.delivery == Delivery::External {
-        // Драйвер: детект по загрузке nvcuda.dll (часть драйвера). Версию не тянем (без NVML-зависимости).
-        (detect_driver(), None)
-    } else if c.id == "ffmpeg" {
-        // ffmpeg дублирует пайплайн через PATH: если он уже в системе (Command::new("ffmpeg") найдёт) —
-        // считаем установленным и НЕ навязываем закачку. Иначе — по маркеру в tools/ffmpeg.
-        let by_marker = c.markers.iter().all(|m| marker_ok(repo_root, m));
-        if by_marker {
-            (true, Some("tools/ffmpeg".to_string()))
-        } else if ffmpeg_on_path() {
-            (true, Some("PATH".to_string()))
+    let system = if FOUND_IN_SYSTEM_DIR.contains(&c.id) { system_dir() } else { None };
+    status_with_system_dir(repo_root, c, system.as_deref())
+}
+
+/// `system` — системный каталог, где засчитываются маркеры компонентов FOUND_IN_SYSTEM_DIR.
+fn status_with_system_dir(repo_root: &Path, c: &Component, system: Option<&Path>) -> ComponentStatus {
+    let mut missing: Vec<String> = Vec::new();
+    let mut bytes_on_disk = 0u64;
+    let mut space_needed = 0u64;
+    for f in c.files {
+        if file_installed(repo_root, f) {
+            bytes_on_disk += f.size;
         } else {
-            (false, None)
+            missing.push(f.dest_rel.to_string());
+            bytes_on_disk += resumed_bytes(&part_path(repo_root, f), f.size);
+            space_needed += file_space_needed(repo_root, f);
         }
-    } else {
-        let all = c.markers.iter().all(|m| marker_ok(repo_root, m));
-        (all, None)
+    }
+    let mut from_system = false;
+    for m in c.markers {
+        if marker_ok(repo_root, m) || missing.iter().any(|x| x == m.rel) {
+            continue;
+        }
+        if system.is_some_and(|dir| in_system_dir(dir, m)) {
+            from_system = true;
+        } else {
+            missing.push(m.rel.to_string());
+        }
+    }
+    if c.delivery == Delivery::Bundled {
+        bytes_on_disk = c.markers.iter().map(|m| file_len(&repo_root.join(m.rel))).sum();
+    }
+    let (installed, detail) = match c.delivery {
+        Delivery::External => {
+            let gpu = crate::hw::gpu_report();
+            (gpu.cuda13_ok, gpu.summary())
+        }
+        _ if c.id == "ffmpeg" && !missing.is_empty() && ffmpeg_on_path() => {
+            // ffmpeg из PATH годится пайплайну (Command::new("ffmpeg") его найдёт) — закачку не навязываем.
+            missing.clear();
+            space_needed = 0;
+            (true, Some("PATH".to_string()))
+        }
+        _ => (missing.is_empty(), from_system.then(|| "system".to_string())),
     };
-    let missing: Vec<String> = c
-        .markers
-        .iter()
-        .filter(|m| !marker_ok(repo_root, m))
-        .map(|m| m.rel.to_string())
-        .collect();
-    let bytes_on_disk: u64 = c.markers.iter().map(|m| marker_bytes(repo_root, m)).sum();
     ComponentStatus {
         id: c.id.to_string(),
         name: c.name.to_string(),
@@ -873,6 +1055,7 @@ pub fn component_status(repo_root: &Path, c: &Component) -> ComponentStatus {
         size: c.size,
         installed,
         bytes_on_disk,
+        space_needed,
         missing,
         detail,
         external_url: c.external_url.map(|s| s.to_string()),
@@ -880,40 +1063,10 @@ pub fn component_status(repo_root: &Path, c: &Component) -> ComponentStatus {
     }
 }
 
-// ── Детект драйвера NVIDIA ───────────────────────────────────────────────────
-
-/// Драйвер установлен, если грузится nvcuda.dll (Windows) / libcuda (Linux) — часть драйвера, не Toolkit.
-/// Лёгкий детект без NVML-зависимости: пробуем LoadLibrary. На не-Windows — наличие libcuda в загрузке.
-#[cfg(windows)]
-pub fn detect_driver() -> bool {
-    use std::os::windows::ffi::OsStrExt;
-    // LoadLibraryW("nvcuda.dll"); успех => драйвер есть. FreeLibrary опускаем (процесс короткоживущий тут).
-    let wide: Vec<u16> = std::ffi::OsStr::new("nvcuda.dll")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        let h = LoadLibraryW(wide.as_ptr());
-        !h.is_null()
-    }
-}
-
-#[cfg(windows)]
-extern "system" {
-    fn LoadLibraryW(lpLibFileName: *const u16) -> *mut std::ffi::c_void;
-}
-
-#[cfg(not(windows))]
-pub fn detect_driver() -> bool {
-    // На Linux драйвер = libcuda.so.1 в загрузчике. Для портатива на Windows это ветка не активна.
-    std::path::Path::new("/usr/lib/x86_64-linux-gnu/libcuda.so.1").exists()
-        || std::path::Path::new("/usr/lib/libcuda.so.1").exists()
-}
-
 // ── Импорт готовых моделей из выбранной папки ────────────────────────────────
 
-/// Рекурсивно собрать карту basename(lower) -> [(path, size)] под dir (лимит глубины/файлов, чтоб не
-/// уйти в бесконечность на большом диске).
+/// Рекурсивно собрать карту basename(lower) -> [(path, size)] под dir (лимит глубины/файлов, чтоб не уйти в
+/// бесконечность на большом диске). Скрытые каталоги (.git, .download, .cache) пропускаем.
 fn index_dir(dir: &Path, map: &mut std::collections::HashMap<String, Vec<(PathBuf, u64)>>, depth: usize, budget: &mut usize) {
     if depth > 8 || *budget == 0 {
         return;
@@ -924,53 +1077,142 @@ fn index_dir(dir: &Path, map: &mut std::collections::HashMap<String, Vec<(PathBu
             return;
         }
         let p = e.path();
+        let Some(name) = p.file_name().and_then(|s| s.to_str()).map(str::to_string) else { continue };
         if p.is_dir() {
-            index_dir(&p, map, depth + 1, budget);
-        } else if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            if !name.starts_with('.') {
+                index_dir(&p, map, depth + 1, budget);
+            }
+        } else {
             let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-            map.entry(name.to_lowercase()).or_default().push((p, size)); // p дальше не нужен -> move
+            map.entry(name.to_lowercase()).or_default().push((p, size));
             *budget -= 1;
         }
     }
 }
 
-/// Импортировать готовые файлы компонентов из src_dir: для каждого маркера, которого нет на месте, ищем
-/// в src_dir файл с тем же именем (и размером, если известен) и КОПИРУЕМ на ожидаемый путь. Возвращает
-/// список импортированных id.
-pub fn import_from_dir(repo_root: &Path, src_dir: &Path, only: Option<&str>) -> Vec<String> {
+/// Итог импорта: компоненты, ставшие установленными, число положенных файлов и ошибки по файлам.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    pub imported: Vec<String>,
+    pub files: usize,
+    pub errors: Vec<String>,
+}
+
+/// Положить src на место dest: жёсткая ссылка (тот же том — мгновенно и без второй копии гигабайт), иначе
+/// копия через .part + rename (частичной копии под финальным именем не бывает).
+fn adopt_file(src: &Path, dest: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if dest.exists() {
+        std::fs::remove_file(dest)?;
+    }
+    if std::fs::hard_link(src, dest).is_ok() {
+        return Ok(());
+    }
+    let tmp = with_suffix(dest, ".import");
+    std::fs::copy(src, &tmp)?;
+    std::fs::rename(&tmp, dest)
+}
+
+/// Импорт готовых весов из папки без закачки: для каждого недостающего ПРЯМОГО файла компонента ищем в src_dir
+/// файл того же имени и ТОЧНО того же размера. Архивные компоненты (движки, CUDA) не импортируются: по россыпи
+/// файлов не проверить, что это закреплённая версия, — их докачивает «Первый запуск».
+pub fn import_from_dir(repo_root: &Path, src_dir: &Path, only: Option<&str>) -> ImportReport {
     let mut map = std::collections::HashMap::new();
     let mut budget = 200_000usize;
     index_dir(src_dir, &mut map, 0, &mut budget);
-    let mut imported = Vec::new();
+    let mut report = ImportReport::default();
     for c in manifest() {
-        if c.delivery != Delivery::Download {
+        if c.delivery != Delivery::Download || only.is_some_and(|id| c.id != id) {
             continue;
         }
-        if let Some(id) = only {
-            if c.id != id {
-                continue;
-            }
-        }
         let mut any = false;
-        for m in c.markers {
-            let dest = repo_root.join(m.rel);
-            if marker_ok(repo_root, m) {
+        for f in c.files.iter().filter(|f| f.extract == Extract::None) {
+            let dest = repo_root.join(f.dest_rel);
+            if file_ok(&dest, f.size) {
                 continue;
             }
-            if let Some(src) = pick_import_source(&c, m, &map) {
-                if let Some(parent) = dest.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if std::fs::copy(src, &dest).is_ok() {
+            let src = match c.markers.iter().find(|m| m.rel == f.dest_rel) {
+                Some(m) => pick_import_source(&c, m, &map).filter(|p| file_len(p) == f.size),
+                None => Path::new(f.dest_rel)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_lowercase())
+                    .and_then(|base| map.get(&base))
+                    .and_then(|cands| cands.iter().find(|(_, sz)| *sz == f.size))
+                    .map(|(p, _)| p),
+            };
+            let Some(src) = src else { continue };
+            match adopt_file(src, &dest) {
+                Ok(()) => {
+                    let part = part_path(repo_root, f);
+                    let _ = std::fs::remove_file(done_manifest_path(&part));
+                    let _ = std::fs::remove_file(&part);
+                    report.files += 1;
                     any = true;
                 }
+                Err(e) => report.errors.push(format!("{} -> {}: {e}", src.display(), dest.display())),
             }
         }
         if any && component_status(repo_root, &c).installed {
-            imported.push(c.id.to_string());
+            report.imported.push(c.id.to_string());
         }
     }
-    imported
+    report
+}
+
+// ── Место на диске ───────────────────────────────────────────────────────────
+
+/// Свободное место на томе пути (для пользователя, с учётом квот), байт. Путь может ещё не существовать —
+/// берём ближайший существующий каталог. None — ОС не ответила (или не Windows): место тогда не проверяем.
+#[cfg(windows)]
+pub fn free_bytes(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let dir = path.ancestors().find(|p| p.is_dir())?;
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut avail = 0u64;
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, std::ptr::null_mut(), std::ptr::null_mut()) };
+    (ok != 0).then_some(avail)
+}
+
+#[cfg(windows)]
+extern "system" {
+    fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+    fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
+}
+
+#[cfg(not(windows))]
+pub fn free_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
+fn fmt_gb(n: u64) -> String {
+    format!("{:.1} ГБ", n as f64 / 1e9)
+}
+
+/// Отказ, если на томе моделей меньше места, чем нужно под докачку `need` байт.
+fn ensure_space(repo_root: &Path, need: u64) -> Result<(), DlError> {
+    let models = repo_root.join("models");
+    match free_bytes(&models) {
+        Some(free) if free < need => Err(DlError::new(
+            "disk_space",
+            format!("не хватает места: нужно {}, свободно {} ({})", fmt_gb(need), fmt_gb(free), models.display()),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Проверка места под докачку выбранных компонентов до старта (без хэширования — по размерам и записям).
+pub fn check_space(repo_root: &Path, ids: &[String]) -> Result<(), DlError> {
+    let need: u64 = manifest()
+        .iter()
+        .filter(|c| c.delivery == Delivery::Download && ids.iter().any(|x| x == c.id))
+        .flat_map(|c| c.files.iter())
+        .map(|f| file_space_needed(repo_root, f))
+        .sum();
+    ensure_space(repo_root, need)
 }
 
 /// Размер `sz` годится для маркера: неизвестный expect — любой, иначе в пределах ±3% от expect.
@@ -1023,10 +1265,18 @@ pub struct SetupStatus {
     pub ready: bool,
     /// Совокупный размер того, что ещё надо скачать (обязательное+рекомендованное, что missing и Download).
     pub download_pending: u64,
-    /// Драйвер NVIDIA найден.
+    /// Драйвер NVIDIA найден (nvcuda.dll грузится); годится ли он под CUDA 13 — в gpu.
     pub driver_ok: bool,
     /// build-строки для диагностики (llama-билд и т.п.).
     pub llama_build: String,
+    /// Папка моделей (куда кладёт «Первый запуск»).
+    pub models_dir: String,
+    /// Свободно на томе моделей, байт; None — ОС не ответила, место не проверяется.
+    pub free_bytes: Option<u64>,
+    /// Видеокарта и драйвер против требований CUDA 13.
+    pub gpu: crate::hw::GpuReport,
+    /// Фоновая закачка (идёт, на паузе, прервана перезапуском, упала или завершилась). Заполняет обработчик.
+    pub active: Option<crate::downloads::DownloadJob>,
 }
 
 pub fn setup_status(repo_root: &Path) -> SetupStatus {
@@ -1068,10 +1318,8 @@ pub fn setup_status(repo_root: &Path) -> SetupStatus {
             c.requirement = Requirement::Optional;
         }
     }
-    // ready = всё СКАЧИВАЕМОЕ/бандл-обязательное на месте. External (драйвер NVIDIA) НЕ гейтит: его
-    // detect_driver() (LoadLibraryW nvcuda.dll) даёт ложные негативы (нет NVIDIA / DLL не в пути / CPU-бокс)
-    // -> раньше первый экран ВИСЕЛ на 100%, хотя всё скачано (баг-репорт). Драйвер остаётся строкой-
-    // предупреждением (driver_ok ниже), но не блокирует вход в приложение.
+    // ready = всё СКАЧИВАЕМОЕ/бандл-обязательное на месте. External (драйвер NVIDIA) НЕ гейтит: без NVIDIA
+    // приложение работает на CPU/в облаке, а старый драйвер — предупреждение на экране, а не запертый вход.
     let ready = comps
         .iter()
         .filter(|c| c.requirement == Requirement::Required && c.delivery != Delivery::External)
@@ -1081,377 +1329,435 @@ pub fn setup_status(repo_root: &Path) -> SetupStatus {
         .filter(|c| c.delivery == Delivery::Download && !c.installed)
         .map(|c| c.size.saturating_sub(c.bytes_on_disk))
         .sum();
-    let driver_ok = comps.iter().find(|c| c.id == "nvidia-driver").map(|c| c.installed).unwrap_or(false);
+    let gpu = crate::hw::gpu_report();
     SetupStatus {
         components: comps,
         ready,
         download_pending,
-        driver_ok,
+        driver_ok: gpu.nvidia,
         llama_build: GH_LLAMA_BUILD.to_string(),
+        models_dir: mroot.to_string_lossy().to_string(),
+        free_bytes: free_bytes(&mroot),
+        gpu,
+        active: None,
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  ЗАКАЧКА (тело джобы; прогресс -> колбэк, как у analyze/render)
-// ═══════════════════════════════════════════════════════════════════════════
+// ── Удаление компонентов ─────────────────────────────────────────────────────
 
-/// Колбэк прогресса скачивания: сервер оборачивает его в SSE-событие джобы.
-pub type ProgressCb<'a> = dyn Fn(Value) + 'a;
-
-/// Путь манифеста завершённых чанков рядом с загружаемым файлом (<file>.done). Хранит offset'ы готовых
-/// чанков (u64 LE) -> при следующем запуске резюмируем, пропуская их (докачка больших файлов).
-fn done_manifest_path(dl_target: &Path) -> PathBuf {
-    let mut s = dl_target.as_os_str().to_os_string();
-    s.push(".done");
-    PathBuf::from(s)
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalReport {
+    pub removed: Vec<String>,
+    pub freed_bytes: u64,
+    /// Файлы, которые не удалось снять (например, заняты работающим движком).
+    pub errors: Vec<String>,
 }
 
-/// Скачать набор компонентов по id (идемпотентно: уже целые файлы пропускаем). Возвращает JSON-результат
-/// с итоговым статусом каждого компонента. Тело синхронное (вызывается из spawn_blocking джобы).
-pub fn download_components(
-    repo_root: &Path,
-    ids: &[String],
-    cancel: &dyn Fn() -> bool,
-    progress: &ProgressCb,
-) -> Result<Value, String> {
+/// Удалить скачанные компоненты и освободить место: прямые файлы, всё, что положили их архивы (по записи об
+/// установке — в общих каталогах вроде models/higgs-engine снимается ровно своё), недокачанные .part/.done и
+/// маркеры старой установки без записи. Выбор варианта в active.json, указывающий на удалённый квант,
+/// снимается — резолв возьмёт установленный. Идущую закачку этих компонентов не трогаем (отказ «busy»).
+pub fn remove_components(repo_root: &Path, ids: &[String]) -> Result<RemovalReport, DlError> {
     let all = manifest();
-    let selected: Vec<&Component> = all
-        .iter()
-        .filter(|c| ids.iter().any(|x| x == c.id) && c.delivery == Delivery::Download)
-        .collect();
-    if selected.is_empty() {
-        return Err("нет скачиваемых компонентов среди выбранных id".to_string());
-    }
-
-    // Один агент на весь job: если включён прокси — все GET (probe + чанки) идут через него. Клонируется в
-    // каждый воркер (общий пул соединений). Живая смена прокси без рестарта: агент строится из active.json тут.
-    let agent = dl_agent(repo_root);
-
-    let tmp_dir = std::env::temp_dir().join("dub-studio-setup");
-    let _ = std::fs::create_dir_all(&tmp_dir);
-
-    // Файлы к загрузке (пропускаем уже целые прямые файлы). ci — индекс компонента в selected: прогресс
-    // считаем ПОКОМПОНЕНТНО, чтобы бар каждой модели заполнялся отдельно (все параллельно).
-    struct Planned {
-        ci: usize,
-        dest: PathBuf,
-        target: PathBuf,
-        extract: Extract,
-        url: &'static str,
-    }
-    let mut planned: Vec<Planned> = Vec::new();
-    for (ci, c) in selected.iter().enumerate() {
-        for f in c.files {
-            let dest = repo_root.join(f.dest_rel);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("создать {}: {e}", parent.display()))?;
-            }
-            if f.extract == Extract::None && f.size != 0 {
-                if let Ok(meta) = std::fs::metadata(&dest) {
-                    if meta.len() == f.size {
-                        continue; // уже на месте
-                    }
-                }
-            }
-            let target = if f.extract != Extract::None {
-                tmp_dir.join(
-                    Path::new(f.dest_rel)
-                        .file_name()
-                        .map(|s| s.to_os_string())
-                        .unwrap_or_else(|| "archive.tmp".into()),
-                )
-            } else {
-                dest.clone()
-            };
-            planned.push(Planned { ci, dest, target, extract: f.extract, url: f.url });
-        }
-    }
-
-    // Уже всё на месте — ничего не качаем.
-    if planned.is_empty() {
-        let results: Vec<Value> = selected
+    let mut targets: Vec<&Component> = Vec::new();
+    for id in ids {
+        let c = all
             .iter()
-            .map(|c| {
-                let st = component_status(repo_root, c);
-                json!({ "id": c.id, "installed": st.installed, "missing": st.missing })
-            })
-            .collect();
-        let overall = setup_status(repo_root);
-        return Ok(json!({ "components": results, "ready": overall.ready }));
-    }
-
-    progress(json!({ "msg": "Скачиваю модели…", "stage": "download" }));
-
-    // Чанки всех файлов в ОДНУ очередь; счётчик прогресса — на КАЖДЫЙ компонент (comp_done[ci]).
-    enum Task {
-        // done — манифест завершённых чанков (дозапись offset при успехе) для РЕЗЮМА при следующем запуске.
-        Range { file: Arc<File>, url: &'static str, start: u64, end: u64, ci: usize, done: Arc<Mutex<File>> },
-        Whole { url: &'static str, dest: PathBuf, ci: usize },
-    }
-    let ncomp = selected.len();
-    let comp_done: Vec<Arc<AtomicU64>> = (0..ncomp).map(|_| Arc::new(AtomicU64::new(0))).collect();
-    let mut comp_total = vec![0u64; ncomp];
-    let mut tasks: Vec<Task> = Vec::new();
-    let mut open_files: Vec<Arc<File>> = Vec::new(); // держим хендлы живыми до конца пула
-    // Прямые файлы (Extract::None) качаем во ВРЕМЕННЫЙ <target>.part и переименовываем в финал ТОЛЬКО после
-    // валидации (размер + GGUF-магия). Иначе set_len создаёт файл полного размера сразу -> маркер по размеру
-    // считает его «установленным» ещё до докачки / при обрыве -> llama-server грузит нули ('????'). (part, финал, total).
-    let mut parts: Vec<(PathBuf, PathBuf, u64)> = Vec::new();
-    for p in &planned {
-        if cancel() {
-            return Err("отменено".to_string());
+            .find(|c| c.id == id)
+            .ok_or_else(|| DlError::new("unknown_component", format!("нет компонента {id}")))?;
+        if c.delivery != Delivery::Download {
+            return Err(DlError::new("not_removable", format!("{id} ставится не приложением")));
         }
-        let (total, ranges_ok) = probe_size(&agent, p.url);
-        comp_total[p.ci] += total;
-        let dl_target: PathBuf = if p.extract == Extract::None {
-            let mut s = p.target.clone().into_os_string();
-            s.push(".part");
-            let part = PathBuf::from(s);
-            parts.push((part.clone(), p.target.clone(), total));
-            part
-        } else {
-            p.target.clone() // архивы качаем в tmp напрямую — extract их сам валидирует
+        targets.push(c);
+    }
+    let claim_ids: Vec<String> = targets.iter().map(|c| c.id.to_string()).collect();
+    let Some(_claim) = try_claim(&claim_ids) else {
+        return Err(DlError::new("busy", "компонент сейчас качается — поставьте закачку на паузу"));
+    };
+    let mut report = RemovalReport::default();
+    let mroot = crate::models_root(repo_root);
+    for c in targets {
+        let before = report.freed_bytes;
+        let mut touched: Vec<PathBuf> = Vec::new();
+        let mut drop_file = |p: &Path, report: &mut RemovalReport| {
+            let Ok(meta) = std::fs::metadata(p) else { return };
+            if !meta.is_file() {
+                return;
+            }
+            match std::fs::remove_file(p) {
+                Ok(()) => {
+                    report.freed_bytes += meta.len();
+                    touched.push(p.to_path_buf());
+                }
+                Err(e) => report.errors.push(format!("{}: {e}", p.display())),
+            }
         };
-        if ranges_ok && total > 0 {
-            // РЕЗЮМ большого файла: .part уже нужного размера И рядом манифест .done -> дочитываем ТОЛЬКО
-            // недостающие чанки (обрыв Xet на 12ГБ больше НЕ заставляет качать с нуля). Иначе — свежая закачка.
-            let done_path = done_manifest_path(&dl_target);
-            let resuming = std::fs::metadata(&dl_target).map(|m| m.len() == total).unwrap_or(false)
-                && done_path.is_file();
-            let completed: std::collections::HashSet<u64> = if resuming {
-                std::fs::read(&done_path)
-                    .ok()
-                    .map(|b| {
-                        b.chunks_exact(8) // рваный хвост (<8 байт при килле) chunks_exact игнорирует
-                            .filter_map(|c| <[u8; 8]>::try_from(c).ok().map(u64::from_le_bytes))
-                            // только валидные границы чанков в пределах файла (защита от мусора в манифесте)
-                            .filter(|off| *off < total && off % CHUNK == 0)
-                            .collect()
-                    })
-                    .unwrap_or_default()
+        for f in c.files {
+            let part = part_path(repo_root, f);
+            drop_file(&part, &mut report);
+            drop_file(&done_manifest_path(&part), &mut report);
+            if f.extract == Extract::None {
+                drop_file(&repo_root.join(f.dest_rel), &mut report);
             } else {
-                let _ = std::fs::remove_file(&done_path); // свежая закачка -> старый манифест долой
-                std::collections::HashSet::new()
-            };
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(!resuming) // резюм -> НЕ обнуляем уже скачанное
-                .open(&dl_target)
-                .map_err(|e| format!("создать {}: {e}", dl_target.display()))?;
-            if !resuming {
-                file.set_len(total).map_err(|e| format!("set_len: {e}"))?;
-            }
-            let file = Arc::new(file);
-            open_files.push(file.clone());
-            let done = Arc::new(Mutex::new(
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&done_path)
-                    .map_err(|e| format!("манифест {}: {e}", done_path.display()))?,
-            ));
-            let mut start = 0u64;
-            while start < total {
-                let end = (start + CHUNK - 1).min(total - 1);
-                if completed.contains(&start) {
-                    comp_done[p.ci].fetch_add(end - start + 1, Ordering::Relaxed); // учесть в прогрессе, не качать
-                } else {
-                    tasks.push(Task::Range { file: file.clone(), url: p.url, start, end, ci: p.ci, done: done.clone() });
+                if let Some(rec) = read_record(repo_root, f) {
+                    for x in &rec.files {
+                        drop_file(&repo_root.join(&x.path), &mut report);
+                    }
                 }
-                start += CHUNK;
+                drop_file(&record_path(repo_root, f), &mut report);
             }
-        } else {
-            tasks.push(Task::Whole { url: p.url, dest: dl_target, ci: p.ci });
+        }
+        for m in c.markers {
+            drop_file(&repo_root.join(m.rel), &mut report);
+        }
+        prune_empty_dirs(repo_root, &touched);
+        if report.freed_bytes > before {
+            report.removed.push(c.id.to_string());
+        }
+        for (engine, variant) in crate::models::component_selection(c.id) {
+            if engine == "asr_engine" {
+                continue;
+            }
+            if let Err(e) = crate::models::clear_selection_if(&mroot, engine, &variant) {
+                report.errors.push(format!("active.json ({engine}): {e}"));
+            }
         }
     }
-    let grand_total: u64 = comp_total.iter().sum();
+    Ok(report)
+}
 
-    // ── Общий пул: POOL_SLOTS воркеров разбирают ОДНУ очередь чанков всех файлов. Разные модели качаются
-    //    одновременно, но суммарно не больше POOL_SLOTS соединений (не 8×N -> без бана HF CDN). ──
-    let n = POOL_SLOTS.min(tasks.len()).max(1);
-    let queue = Arc::new(Mutex::new(std::collections::VecDeque::from(tasks)));
-    let finished = Arc::new(AtomicUsize::new(0));
-    let abort = Arc::new(AtomicBool::new(false));
-    let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-
-    std::thread::scope(|sc| {
-        for _ in 0..n {
-            let (queue, comp_done, finished, abort, error, agent) = (
-                queue.clone(),
-                comp_done.clone(),
-                finished.clone(),
-                abort.clone(),
-                error.clone(),
-                agent.clone(),
-            );
-            sc.spawn(move || {
-                loop {
-                    if abort.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let task = { queue.lock().unwrap().pop_front() };
-                    let task = match task {
-                        Some(t) => t,
-                        None => break, // очередь пуста
-                    };
-                    let res = match &task {
-                        Task::Range { file, url, start, end, ci, done } => {
-                            download_range(&agent, url, file, *start, *end, &comp_done[*ci], &abort, done)
-                        }
-                        Task::Whole { url, dest, ci } => {
-                            download_whole(&agent, url, dest, &comp_done[*ci], &abort)
-                        }
-                    };
-                    if let Err(e) = res {
-                        if e != "отменено" {
-                            abort.store(true, Ordering::Relaxed);
-                            let mut slot = error.lock().unwrap();
-                            if slot.is_none() {
-                                *slot = Some(e);
-                            }
-                        }
-                        break;
-                    }
-                }
-                finished.fetch_add(1, Ordering::SeqCst);
-            });
-        }
-        // Главный поток: агрегатный + ПОКОМПОНЕНТНЫЙ прогресс (parts) + проверка отмены.
-        let t0 = std::time::Instant::now();
-        loop {
-            if cancel() {
-                abort.store(true, Ordering::Relaxed);
-            }
-            let got: u64 = comp_done.iter().map(|a| a.load(Ordering::Relaxed)).sum();
-            let secs = t0.elapsed().as_secs_f64();
-            let mbps = if secs > 0.0 { (got as f64 / 1_000_000.0) / secs } else { 0.0 };
-            let overall = if grand_total > 0 { (got as f64 / grand_total as f64) * 100.0 } else { 0.0 };
-            let parts: Vec<Value> = (0..ncomp)
-                .filter(|&i| comp_total[i] > 0)
-                .map(|i| {
-                    let d = comp_done[i].load(Ordering::Relaxed);
-                    let p = (d as f64 / comp_total[i] as f64 * 100.0).min(100.0);
-                    json!({ "component": selected[i].id, "pct": p })
-                })
-                .collect();
-            progress(json!({
-                "stage": "download",
-                "msg": "Скачиваю модели…",
-                "downloaded": got,
-                "total": grand_total,
-                "speed_mbps": mbps,
-                "pct": overall.min(100.0),
-                "parts": parts,
-            }));
-            if finished.load(Ordering::SeqCst) >= n {
+/// Снять опустевшие каталоги после удаления (вверх до models/ или tools/, сами они остаются).
+fn prune_empty_dirs(repo_root: &Path, removed: &[PathBuf]) {
+    let stops = [repo_root.join("models"), repo_root.join("tools"), repo_root.to_path_buf()];
+    for p in removed {
+        let mut dir = p.parent();
+        while let Some(d) = dir {
+            if stops.iter().any(|s| s == d) || !d.starts_with(repo_root) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-    });
-
-    drop(open_files); // закрыть хендлы до распаковки (иначе zip не откроет файл на чтение)
-
-    // Сбой vs отмена. При СБОЕ (обрыв сети) НЕ удаляем .part и .done-манифест — следующий запуск ДОКАЧАЕТ
-    // недостающие чанки (главный фикс для больших файлов на флаки-сети). При ОТМЕНЕ пользователем — чистим
-    // всё (он не хочет продолжать). Готовые финальные файлы не трогаем в любом случае.
-    let cleanup = |keep_for_resume: bool| {
-        if keep_for_resume {
-            return; // .part + .done остаются -> докачка при повторе
-        }
-        for (part, _, _) in &parts {
-            let _ = std::fs::remove_file(part);
-            let _ = std::fs::remove_file(done_manifest_path(part));
-        }
-        for p in &planned {
-            if p.extract != Extract::None {
-                let _ = std::fs::remove_file(&p.target);
-                let _ = std::fs::remove_file(done_manifest_path(&p.target));
+            if std::fs::remove_dir(d).is_err() {
+                break; // не пуст (или занят) — выше тем более не пуст
             }
-        }
-    };
-    if let Some(e) = error.lock().unwrap().take() {
-        cleanup(true); // сохранить прогресс для докачки
-        return Err(e);
-    }
-    if cancel() {
-        cleanup(false); // отмена -> удалить незавершённое
-        return Err("отменено".to_string());
-    }
-
-    // Успех: валидируем каждый .part (размер == probed total; .gguf -> магия GGUF) и АТОМАРНО переименовываем
-    // в финал. Битый/неполный .part -> удаляем + ошибка; финальный файл не появляется -> маркер честно «не
-    // установлен» (не даём llama-server грузить файл с дырами). Ловит и Xet-обрыв, и прерванную докачку.
-    for (part, target, total) in &parts {
-        let sz = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
-        if *total > 0 && sz != *total {
-            let _ = std::fs::remove_file(part);
-            return Err(format!("докачка {}: неполный размер {sz}/{total}", target.display()));
-        }
-        if target.extension().and_then(|s| s.to_str()) == Some("gguf") {
-            let mut magic = [0u8; 4]; // трейт Read импортирован на уровне модуля
-
-            let ok = std::fs::File::open(part)
-                .and_then(|mut f| f.read_exact(&mut magic))
-                .is_ok();
-            if !ok || &magic != b"GGUF" {
-                let _ = std::fs::remove_file(part);
-                return Err(format!("докачка {}: не GGUF (magic={magic:02x?}) — файл битый", target.display()));
-            }
-        }
-        std::fs::rename(part, target)
-            .map_err(|e| format!("переименовать {}: {e}", target.display()))?;
-        let _ = std::fs::remove_file(done_manifest_path(part)); // файл целиком собран -> манифест не нужен
-    }
-
-    // Распаковка/финализация архивов — последовательно, вне сети.
-    for p in &planned {
-        let dir = p.dest.parent().unwrap_or(repo_root);
-        match p.extract {
-            Extract::None => {}
-            Extract::ZipFlat => {
-                extract_zip_flat(&p.target, dir)?;
-                let _ = std::fs::remove_file(&p.target);
-            }
-            Extract::ZipPick => {
-                extract_zip_pick(&p.target, dir)?;
-                let _ = std::fs::remove_file(&p.target);
-            }
-            Extract::ZipTree => {
-                extract_zip_tree(&p.target, dir)?;
-                let _ = std::fs::remove_file(&p.target);
-            }
-            Extract::WheelDlls => {
-                extract_wheel_dlls(&p.target, dir)?;
-                let _ = std::fs::remove_file(&p.target);
-            }
+            dir = d.parent();
         }
     }
-
-    let mut results = Vec::new();
-    for c in &selected {
-        let st = component_status(repo_root, c);
-        // Скачанный вариант модели -> делаем активным (models/active.json). Резолв при следующей
-        // генерации подхватит без рестарта; иначе скан взял бы дефолт (q8_0 первым) и альт бы не применился.
-        if st.installed {
-            for (engine, variant) in crate::models::component_selection(c.id) {
-                let _ = crate::models::set_selection(&crate::models_root(repo_root), engine, &variant);
-            }
-        }
-        results.push(json!({ "id": c.id, "installed": st.installed, "missing": st.missing }));
-    }
-    let overall = setup_status(repo_root);
-    Ok(json!({ "components": results, "ready": overall.ready }))
 }
 
-// Общий пул соединений на ВСЁ задание: чанки всех файлов в одной очереди, POOL_SLOTS воркеров разбирают её.
-// Разные модели качаются одновременно, но суммарно не больше POOL_SLOTS коннектов (не 8×N -> без бана HF CDN).
-// 4, не 16: HF Xet-CAS (cas-bridge.xethub.hf.co — туда уехали все альт-кванты) роняет соединения при
-// высокой параллели, файл собирается с дырами и молча бьётся. 4 коннекта Xet держит; обычный CDN и на
-// 4 сатурирует канал. Плюс ретраи диапазонов (RANGE_RETRIES) добивают транзиентные дропы.
+// ═══════════════════════════════════════════════════════════════════════════
+//  ЗАКАЧКА (фоновый менеджер downloads или on-demand догрузка внутри джобы)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Колбэк прогресса скачивания: менеджер пишет его в своё состояние, джоба — в SSE.
+pub type ProgressCb<'a> = dyn Fn(Value) + 'a;
+
+/// Ошибка закачки: код для UI/агента и подробность для журнала.
+#[derive(Clone, Debug)]
+pub struct DlError {
+    pub code: &'static str,
+    pub detail: String,
+}
+
+impl DlError {
+    pub fn new(code: &'static str, detail: impl Into<String>) -> Self {
+        DlError { code, detail: detail.into() }
+    }
+}
+
+impl std::fmt::Display for DlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+/// Код «остановлено пользователем»: закачка на паузе, .part и манифесты чанков остаются для докачки.
+pub const CANCELLED: &str = "cancelled";
+
+fn cancelled() -> DlError {
+    DlError::new(CANCELLED, "закачка поставлена на паузу")
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// ── Занятые компоненты: один писатель на компонент ───────────────────────────
+//
+// Фоновая закачка и on-demand догрузка внутри джобы могут идти одновременно; два писателя в один .part
+// испортили бы файл. Компонент «занят» на всё время закачки — вторая закачка того же компонента ждёт первую
+// (и затем видит файл готовым), закачки разных компонентов идут параллельно в общем бюджете соединений.
+
+struct Claims {
+    ids: Mutex<std::collections::HashSet<String>>,
+    freed: Condvar,
+}
+
+fn claims() -> &'static Claims {
+    static C: OnceLock<Claims> = OnceLock::new();
+    C.get_or_init(|| Claims { ids: Mutex::new(Default::default()), freed: Condvar::new() })
+}
+
+struct ClaimGuard {
+    ids: Vec<String>,
+}
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        let c = claims();
+        let mut held = lock(&c.ids);
+        for id in &self.ids {
+            held.remove(id);
+        }
+        c.freed.notify_all();
+    }
+}
+
+fn try_claim(ids: &[String]) -> Option<ClaimGuard> {
+    let mut held = lock(&claims().ids);
+    if ids.iter().any(|id| held.contains(id)) {
+        return None;
+    }
+    held.extend(ids.iter().cloned());
+    Some(ClaimGuard { ids: ids.to_vec() })
+}
+
+fn claim(ids: &[String], stop: &dyn Fn() -> bool, on_wait: &dyn Fn()) -> Result<ClaimGuard, DlError> {
+    let mut told = false;
+    loop {
+        if let Some(g) = try_claim(ids) {
+            return Ok(g);
+        }
+        if stop() {
+            return Err(cancelled());
+        }
+        if !told {
+            on_wait();
+            told = true;
+        }
+        let c = claims();
+        let held = lock(&c.ids);
+        let _ = c.freed.wait_timeout(held, Duration::from_millis(500));
+    }
+}
+
+// ── Бюджет соединений и ожидание сервера ─────────────────────────────────────
+
+// Общий пул соединений на ВЕСЬ процесс: сколько бы закачек ни шло, одновременно открыто не больше POOL_SLOTS
+// соединений. 4, не 16: HF Xet-CAS (cas-bridge.xethub.hf.co — туда уехали все альт-кванты) роняет соединения
+// при высокой параллели, файл собирается с дырами. Слот держится всё время передачи тела, а не только запроса.
 const POOL_SLOTS: usize = 4;
 const CHUNK: u64 = 16 * 1024 * 1024; // 16МБ на задачу — балансирует очередь между большими и мелкими файлами
+/// Попыток на один кусок/пробу при сетевом сбое (экспоненциальная пауза 0.5, 1, 2… с). Ожидание по 429/5xx
+/// попытки не тратит.
+const RETRIES: u32 = 8;
+/// Сколько всего можно ждать сервер, отвечающий 429/5xx, прежде чем сдаться: лимиты HF сбрасываются минутами.
+const RATE_LIMIT_BUDGET_S: u64 = 20 * 60;
+/// Ниже стольких оставшихся запросов в окне RateLimit закачка сама ждёт сброса окна, а не упирается в 429.
+const KEEP_IN_RESERVE: u64 = 25;
+
+struct Slots {
+    used: Mutex<usize>,
+    freed: Condvar,
+}
+
+fn slots() -> &'static Slots {
+    static S: OnceLock<Slots> = OnceLock::new();
+    S.get_or_init(|| Slots { used: Mutex::new(0), freed: Condvar::new() })
+}
+
+struct SlotGuard;
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        let s = slots();
+        *lock(&s.used) -= 1;
+        s.freed.notify_one();
+    }
+}
+
+fn acquire_slot(stop: &dyn Fn() -> bool) -> Result<SlotGuard, DlError> {
+    let s = slots();
+    let mut used = lock(&s.used);
+    loop {
+        if *used < POOL_SLOTS {
+            *used += 1;
+            return Ok(SlotGuard);
+        }
+        if stop() {
+            return Err(cancelled());
+        }
+        used = s.freed.wait_timeout(used, Duration::from_millis(200)).unwrap_or_else(|e| e.into_inner()).0;
+    }
+}
+
+/// До какого момента все закачки процесса не шлют запросов (сервер попросил подождать).
+fn hold_until() -> &'static Mutex<Option<Instant>> {
+    static H: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    H.get_or_init(|| Mutex::new(None))
+}
+
+/// Секунд, сколько закачка сейчас ждёт сервер (0 — не ждёт). Идёт в прогресс: очередь, а не зависание.
+static WAITING: AtomicU64 = AtomicU64::new(0);
+
+pub fn waiting_for_server() -> u64 {
+    WAITING.load(Ordering::Relaxed)
+}
+
+fn hold_off(secs: u64) {
+    let until = Instant::now() + Duration::from_secs(secs);
+    let mut h = lock(hold_until());
+    if h.is_none_or(|t| t < until) {
+        *h = Some(until);
+    }
+}
+
+fn wait_for_server(stop: &dyn Fn() -> bool) -> Result<(), DlError> {
+    loop {
+        let until = *lock(hold_until());
+        match until {
+            Some(t) if t > Instant::now() => {
+                WAITING.store((t - Instant::now()).as_secs().max(1), Ordering::Relaxed);
+                if stop() {
+                    return Err(cancelled());
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            _ => {
+                WAITING.store(0, Ordering::Relaxed);
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn sleep_or_stop(d: Duration, stop: &dyn Fn() -> bool) -> Result<(), DlError> {
+    let end = Instant::now() + d;
+    while Instant::now() < end {
+        if stop() {
+            return Err(cancelled());
+        }
+        std::thread::sleep((end - Instant::now()).min(Duration::from_millis(100)));
+    }
+    Ok(())
+}
+
+/// Окно лимита из заголовка RateLimit (черновик IETF, так его шлёт HF): `"resolvers";r=2871;t=143` —
+/// (запросов осталось, секунд до сброса).
+fn parse_rate_limit(v: &str) -> Option<(u64, u64)> {
+    let field = |name: &str| {
+        v.split(';')
+            .filter_map(|p| p.trim().split_once('='))
+            .find(|(k, _)| k.trim() == name)
+            .and_then(|(_, x)| x.trim().parse::<u64>().ok())
+    };
+    Some((field("r")?, field("t").unwrap_or(300)))
+}
+
+fn header_str<'a>(h: &'a ureq::http::HeaderMap, name: &str) -> Option<&'a str> {
+    h.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// Сколько ждать по ответу 429/5xx: Retry-After (секунды), иначе сброс окна RateLimit, иначе 30 с.
+fn asked_to_wait(h: &ureq::http::HeaderMap) -> u64 {
+    header_str(h, "retry-after")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| header_str(h, "ratelimit").and_then(parse_rate_limit).map(|w| w.1))
+        .unwrap_or(30)
+        .clamp(1, 310)
+}
+
+type Resp = ureq::http::Response<ureq::Body>;
+
+/// Один GET со слотом из общего бюджета. 429/5xx — не ошибка, а очередь: ждём, сколько попросил сервер, не
+/// тратя попыток; слот на время ожидания отпускается. Вернувшийся слот держать до конца чтения тела.
+fn send(agent: &ureq::Agent, url: &str, range: Option<(u64, u64)>, stop: &dyn Fn() -> bool) -> Result<(Resp, SlotGuard), DlError> {
+    let mut waited = 0u64;
+    loop {
+        wait_for_server(stop)?;
+        let slot = acquire_slot(stop)?;
+        let mut req = agent.get(url);
+        if let Some((a, b)) = range {
+            // Заглохшее соединение (Xet под нагрузкой) иначе висит вечно: кусок — не дольше 10 минут, потом повтор.
+            req = req
+                .header("Range", &format!("bytes={a}-{b}"))
+                .config()
+                .timeout_recv_body(Some(Duration::from_secs(600)))
+                .build();
+        }
+        let resp = req.call().map_err(|e| DlError::new("network", format!("{url}: {e}")))?;
+        let status = resp.status().as_u16();
+        if status == 429 || (500..600).contains(&status) {
+            let pause = asked_to_wait(resp.headers());
+            drop(resp);
+            drop(slot);
+            if waited + pause > RATE_LIMIT_BUDGET_S {
+                return Err(DlError::new(
+                    "rate_limited",
+                    format!("{url}: сервер отвечает {status} уже {} мин", waited / 60),
+                ));
+            }
+            waited += pause;
+            hold_off(pause);
+            continue;
+        }
+        if let Some((left, resets)) = header_str(resp.headers(), "ratelimit").and_then(parse_rate_limit) {
+            if left < KEEP_IN_RESERVE {
+                hold_off(resets.clamp(1, 310));
+            }
+        }
+        return Ok((resp, slot));
+    }
+}
+
+/// Построить ureq-агента для закачки. Статусы 4xx/5xx читаем сами (429 и заголовки ожидания). Прокси из
+/// active.json — все запросы через него; иначе Config::default берёт HTTP(S)_PROXY из env.
+fn dl_agent(repo_root: &Path) -> Result<ureq::Agent, DlError> {
+    let mut cfg = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)));
+    if let Some(url) = crate::models::proxy_url(&repo_root.join("models")) {
+        let proxy = ureq::Proxy::new(&url).map_err(|e| DlError::new("proxy", format!("некорректный URL прокси: {e}")))?;
+        cfg = cfg.proxy(Some(proxy));
+    }
+    Ok(cfg.build().into())
+}
+
+/// Размер файла + поддержка byte-range: 1-байтовый ranged-пробник. HF CDN (в т.ч. Xet-CAS) отдаёт 206 +
+/// content-range на ureq-запрос (reqwest/curl-UA CAS душит 403). Сетевой сбой — повтор с паузой.
+fn probe(agent: &ureq::Agent, url: &str, stop: &dyn Fn() -> bool) -> Result<(u64, bool), DlError> {
+    let mut last = String::new();
+    for attempt in 0..RETRIES {
+        match probe_once(agent, url, stop) {
+            Ok(v) => return Ok(v),
+            Err(e) if e.code != "network" => return Err(e),
+            Err(e) => last = e.detail,
+        }
+        sleep_or_stop(Duration::from_millis(500 << attempt.min(7)), stop)?;
+    }
+    Err(DlError::new("network", format!("{url}: не удалось начать за {RETRIES} попыток: {last}")))
+}
+
+fn probe_once(agent: &ureq::Agent, url: &str, stop: &dyn Fn() -> bool) -> Result<(u64, bool), DlError> {
+    let (resp, _slot) = send(agent, url, Some((0, 0)), stop)?;
+    let status = resp.status().as_u16();
+    let header_num = |name: &str, last_part: bool| {
+        header_str(resp.headers(), name)
+            .map(|s| if last_part { s.rsplit('/').next().unwrap_or("") } else { s })
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    if status == 206 {
+        let total = header_num("content-range", true);
+        if total > 0 {
+            return Ok((total, true));
+        }
+    }
+    if !(200..300).contains(&status) {
+        return Err(DlError::new("http_status", format!("{url}: статус {status}")));
+    }
+    Ok((header_num("content-length", false), false))
+}
 
 #[cfg(windows)]
 fn write_at(f: &File, buf: &[u8], off: u64) -> std::io::Result<usize> {
@@ -1464,57 +1770,11 @@ fn write_at(f: &File, buf: &[u8], off: u64) -> std::io::Result<usize> {
     f.write_at(buf, off)
 }
 
-/// Построить ureq-агента для закачки: включён прокси в active.json -> ВСЕ GET идут через него; иначе дефолтный
-/// агент (Config::default сам подхватит HTTP(S)_PROXY из env, если он задан на старте). Некорректный URL прокси
-/// -> лог + дефолт: закачка по прямому пути честно упадёт на заблокированном соединении, а не молча пойдёт мимо
-/// прокси. Один агент на весь job (общий пул соединений) -> клонируется в воркеры (Agent = cheap Clone).
-fn dl_agent(repo_root: &Path) -> ureq::Agent {
-    if let Some(url) = crate::models::proxy_url(&repo_root.join("models")) {
-        match ureq::Proxy::new(&url) {
-            Ok(proxy) => return ureq::Agent::config_builder().proxy(Some(proxy)).build().into(),
-            Err(e) => tracing::warn!("некорректный URL прокси ({e}) — закачка без прокси; проверьте настройки"),
-        }
-    }
-    ureq::Agent::new_with_defaults()
-}
-
-/// Размер файла + поддержка byte-range: 1-байтовый ranged-пробник. HF CDN (в т.ч. Xet-CAS) отдаёт 206 +
-/// content-range на ureq-запрос (reqwest/curl-UA CAS душит 403). Порт Higgs probe_size.
-fn probe_size(agent: &ureq::Agent, url: &str) -> (u64, bool) {
-    match agent.get(url).header("Range", "bytes=0-0").call() {
-        Ok(resp) => {
-            if resp.status().as_u16() == 206 {
-                let total = resp
-                    .headers()
-                    .get("content-range")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.rsplit('/').next())
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-                    .unwrap_or(0);
-                (total, total > 0)
-            } else {
-                let total = resp
-                    .headers()
-                    .get("content-length")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                (total, false)
-            }
-        }
-        Err(_) => (0, false),
-    }
-}
-
-/// Сколько раз повторяем ОДИН диапазон при сбое. HF Xet-CAS (cas-bridge.xethub.hf.co) роняет соединения
-/// под параллелью (Peer disconnected) ИЛИ отдаёт неполный range — это ТРАНЗИЕНТНО, ретрай спасает. 8 (не 6):
-/// на больших файлах (Gemma Q8 ~12ГБ, 750 чанков) вероятность транзиентного дропа выше; плюс есть докачка.
-const RANGE_RETRIES: u32 = 8;
-
-/// Скачать ОДИН диапазон [start,end] в общий файл по офсету (write_at, без seek-гонок). abort -> стоп всех.
-/// Порт Higgs download_range (ureq + Range) + РЕТРАИ (Xet-CAS дропает под параллелью). downloaded — общий
-/// счётчик прогресса; на неудачной попытке откатываем её вклад, чтобы ретрай не задвоил прогресс.
-/// Обязательна проверка полноты диапазона: 206 + РОВНО (end-start+1) байт, иначе дыра в файле = битый GGUF.
+/// Скачать ОДИН диапазон [start,end] в общий файл по офсету (write_at, без seek-гонок). HF Xet-CAS роняет
+/// соединения под параллелью или отдаёт неполный range — это транзиентно, повтор спасает. downloaded —
+/// счётчик прогресса; вклад неудачной попытки откатываем, чтобы повтор не задвоил прогресс. Принимается только
+/// 206 + РОВНО (end-start+1) байт, иначе дыра в файле.
+#[allow(clippy::too_many_arguments)]
 fn download_range(
     agent: &ureq::Agent,
     url: &str,
@@ -1524,42 +1784,43 @@ fn download_range(
     downloaded: &Arc<AtomicU64>,
     abort: &Arc<AtomicBool>,
     done: &Arc<Mutex<File>>,
-) -> Result<(), String> {
+) -> Result<(), DlError> {
+    let stop = || abort.load(Ordering::Relaxed);
     let want = end - start + 1;
     let mut last = String::new();
-    for attempt in 0..RANGE_RETRIES {
-        if abort.load(Ordering::Relaxed) {
-            return Err("отменено".into());
+    for attempt in 0..RETRIES {
+        if stop() {
+            return Err(cancelled());
         }
         let mut got = 0u64;
-        let res = download_range_once(agent, url, file, start, end, downloaded, abort, &mut got);
+        let res = download_range_once(agent, url, file, start, end, downloaded, &stop, &mut got);
         match res {
             Ok(()) if got == want => {
-                // WRITE-AHEAD DURABILITY: сначала fsync ДАННЫХ чанка в .part, ТОЛЬКО потом отметка в манифесте.
-                // Иначе при жёстком килле/потере питания манифест мог бы опередить данные -> резюм пропустил бы
-                // чанк, у которого на диске ДЫРА (нули) -> битый файл, не пойманный (size сходится по set_len,
-                // GGUF-magic — только первый чанк). Порядок «данные на диск -> потом готово» гарантирует: если
-                // в манифесте есть offset, его данные durable. sync_data (fdatasync) дешевле sync_all.
+                // Сначала данные чанка на диск, потом отметка в манифесте: иначе при потере питания манифест
+                // опередил бы данные, и докачка пропустила бы дыру.
                 let _ = file.sync_data();
-                if let Ok(mut m) = done.lock() {
-                    use std::io::Write;
-                    let _ = m.write_all(&start.to_le_bytes());
-                    let _ = m.sync_data(); // и сам манифест durable (8 байт — запись атомарна)
-                }
+                let mut m = lock(done);
+                use std::io::Write;
+                m.write_all(&start.to_le_bytes())
+                    .and_then(|_| m.sync_data())
+                    .map_err(|e| DlError::new("io", format!("манифест чанков: {e}")))?;
                 return Ok(());
             }
             Ok(()) => last = format!("неполный range: {got}/{want} байт"),
-            Err(e) if e == "отменено" => return Err(e),
-            Err(e) => last = e,
+            Err(e) if e.code != "network" => {
+                downloaded.fetch_sub(got.min(downloaded.load(Ordering::Relaxed)), Ordering::Relaxed);
+                return Err(e);
+            }
+            Err(e) => last = e.detail,
         }
-        // откат прогресса этой попытки + бэкофф перед повтором (следующая попытка перезапишет диапазон)
         downloaded.fetch_sub(got.min(downloaded.load(Ordering::Relaxed)), Ordering::Relaxed);
-        std::thread::sleep(std::time::Duration::from_millis(400 * (attempt as u64 + 1)));
+        sleep_or_stop(Duration::from_millis(500 << attempt.min(7)), &stop)?;
     }
-    Err(format!("range {start}-{end} после {RANGE_RETRIES} попыток: {last}"))
+    Err(DlError::new("network", format!("range {start}-{end} после {RETRIES} попыток: {last}")))
 }
 
 /// Одна попытка скачать диапазон. Пишет got = сколько байт реально записано (для отката прогресса).
+#[allow(clippy::too_many_arguments)]
 fn download_range_once(
     agent: &ureq::Agent,
     url: &str,
@@ -1567,33 +1828,30 @@ fn download_range_once(
     start: u64,
     end: u64,
     downloaded: &Arc<AtomicU64>,
-    abort: &Arc<AtomicBool>,
+    stop: &dyn Fn() -> bool,
     got: &mut u64,
-) -> Result<(), String> {
-    let resp = agent
-        .get(url)
-        .header("Range", &format!("bytes={start}-{end}"))
-        .call()
-        .map_err(|e| format!("range {start}-{end}: {e}"))?;
-    if resp.status().as_u16() != 206 {
-        return Err(format!("range {start}-{end}: статус {} (ждали 206)", resp.status()));
+) -> Result<(), DlError> {
+    let (resp, _slot) = send(agent, url, Some((start, end)), stop)?;
+    let status = resp.status().as_u16();
+    if status != 206 {
+        return Err(DlError::new("http_status", format!("range {start}-{end}: статус {status} (ждали 206)")));
     }
     let mut reader = resp.into_body().into_reader();
-    let mut buf = [0u8; 262_144];
+    let mut buf = vec![0u8; 262_144];
     let mut offset = start;
     loop {
-        if abort.load(Ordering::Relaxed) {
-            return Err("отменено".into());
+        if stop() {
+            return Err(cancelled());
         }
-        let n = reader.read(&mut buf).map_err(|e| format!("чтение range: {e}"))?;
+        let n = reader.read(&mut buf).map_err(|e| DlError::new("network", format!("чтение range: {e}")))?;
         if n == 0 {
             break;
         }
         let mut w = 0;
         while w < n {
-            let k = write_at(file, &buf[w..n], offset + w as u64).map_err(|e| format!("запись: {e}"))?;
+            let k = write_at(file, &buf[w..n], offset + w as u64).map_err(|e| DlError::new("io", format!("запись: {e}")))?;
             if k == 0 {
-                return Err("short write".into());
+                return Err(DlError::new("io", "short write"));
             }
             w += k;
         }
@@ -1604,41 +1862,397 @@ fn download_range_once(
     Ok(())
 }
 
-/// Скачать файл ЦЕЛИКОМ в один поток (fallback: сервер без range), обновляя ОБЩИЙ счётчик пула. abort -> стоп.
+/// Скачать файл целиком одним потоком (сервер без Range): каждая попытка начинает файл заново.
 fn download_whole(
     agent: &ureq::Agent,
     url: &str,
     dest: &Path,
     downloaded: &Arc<AtomicU64>,
     abort: &Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> Result<(), DlError> {
     use std::io::Write;
-    let resp = agent.get(url).call().map_err(|e| format!("GET {url}: {e}"))?;
-    let mut reader = resp.into_body().into_reader();
-    let mut file = File::create(dest).map_err(|e| format!("создать {}: {e}", dest.display()))?;
-    let mut buf = [0u8; 262_144];
-    loop {
-        if abort.load(Ordering::Relaxed) {
-            return Err("отменено".into());
+    let stop = || abort.load(Ordering::Relaxed);
+    let mut last = String::new();
+    for attempt in 0..RETRIES {
+        let mut got = 0u64;
+        let res = (|| -> Result<(), DlError> {
+            let (resp, _slot) = send(agent, url, None, &stop)?;
+            let status = resp.status().as_u16();
+            if !(200..300).contains(&status) {
+                return Err(DlError::new("http_status", format!("{url}: статус {status}")));
+            }
+            let mut reader = resp.into_body().into_reader();
+            let mut file = File::create(dest).map_err(|e| DlError::new("io", format!("создать {}: {e}", dest.display())))?;
+            let mut buf = vec![0u8; 262_144];
+            loop {
+                if stop() {
+                    return Err(cancelled());
+                }
+                let n = reader.read(&mut buf).map_err(|e| DlError::new("network", format!("чтение: {e}")))?;
+                if n == 0 {
+                    break;
+                }
+                file.write_all(&buf[..n]).map_err(|e| DlError::new("io", format!("запись: {e}")))?;
+                got += n as u64;
+                downloaded.fetch_add(n as u64, Ordering::Relaxed);
+            }
+            file.flush().map_err(|e| DlError::new("io", format!("flush: {e}")))
+        })();
+        match res {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                downloaded.fetch_sub(got.min(downloaded.load(Ordering::Relaxed)), Ordering::Relaxed);
+                if e.code != "network" {
+                    return Err(e);
+                }
+                last = e.detail;
+            }
         }
-        let n = reader.read(&mut buf).map_err(|e| format!("чтение: {e}"))?;
+        sleep_or_stop(Duration::from_millis(500 << attempt.min(7)), &stop)?;
+    }
+    Err(DlError::new("network", format!("{url} после {RETRIES} попыток: {last}")))
+}
+
+/// Потоковый SHA-256 файла блоками по 1 МиБ. None — остановлено (stop): пауза не ждёт конца хэширования 12 ГБ.
+fn sha256_file(path: &Path, stop: &dyn Fn() -> bool) -> std::io::Result<Option<String>> {
+    use sha2::{Digest, Sha256};
+    let mut file = File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut blocks = 0u32;
+    loop {
+        let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        file.write_all(&buf[..n]).map_err(|e| format!("запись: {e}"))?;
-        downloaded.fetch_add(n as u64, Ordering::Relaxed);
+        digest.update(&buf[..n]);
+        blocks += 1;
+        if blocks.is_multiple_of(64) && stop() {
+            return Ok(None);
+        }
     }
-    file.flush().map_err(|e| format!("flush: {e}"))?;
+    Ok(Some(digest.finalize().iter().map(|b| format!("{b:02x}")).collect()))
+}
+
+fn discard_part(part: &Path) {
+    let _ = std::fs::remove_file(part);
+    let _ = std::fs::remove_file(done_manifest_path(part));
+}
+
+/// Проверить скачанный .part (размер и SHA-256 против закреплённых) и опубликовать: прямой файл — rename в
+/// финал, архив — распаковка + запись об установке. Несовпадение — .part удаляется, следующая попытка с нуля.
+fn publish(repo_root: &Path, f: &FileSpec, part: &Path, cancel: &dyn Fn() -> bool, progress: &ProgressCb) -> Result<(), DlError> {
+    let size = file_len(part);
+    if size != f.size {
+        discard_part(part);
+        return Err(DlError::new(
+            "size_mismatch",
+            format!("{}: скачано {size} байт, закреплено {} — файл удалён, следующая попытка начнёт заново", f.dest_rel, f.size),
+        ));
+    }
+    progress(json!({ "stage": "download", "phase": "verify", "file": f.dest_rel, "msg": format!("Проверяю SHA-256 {}…", f.dest_rel) }));
+    let hash = sha256_file(part, cancel).map_err(|e| DlError::new("io", format!("чтение {}: {e}", part.display())))?;
+    let Some(hash) = hash else { return Err(cancelled()) };
+    if hash != f.sha256 {
+        discard_part(part);
+        return Err(DlError::new(
+            "hash_mismatch",
+            format!("{}: SHA-256 {hash} не совпал с закреплённым {} — файл удалён, следующая попытка начнёт заново", f.dest_rel, f.sha256),
+        ));
+    }
+    let dest = repo_root.join(f.dest_rel);
+    let dir = dest.parent().unwrap_or(repo_root);
+    if f.extract != Extract::None {
+        progress(json!({ "stage": "download", "phase": "extract", "file": f.dest_rel, "msg": format!("Распаковываю {}…", f.dest_rel) }));
+    }
+    let written = match f.extract {
+        Extract::None => {
+            std::fs::rename(part, &dest).map_err(|e| DlError::new("io", format!("переименовать {}: {e}", dest.display())))?;
+            let _ = std::fs::remove_file(done_manifest_path(part));
+            return Ok(());
+        }
+        Extract::ZipFlat => extract_zip_flat(part, dir),
+        Extract::ZipPick => extract_zip_pick(part, dir),
+        Extract::ZipTree => extract_zip_tree(part, dir),
+        Extract::WheelDlls => extract_wheel_dlls(part, dir),
+    };
+    let written = written.map_err(|e| DlError::new("extract", e))?;
+    write_record(repo_root, f, &written)?;
+    discard_part(part);
     Ok(())
 }
 
-// ── Распаковка архивов ───────────────────────────────────────────────────────
+/// Итог закачки: статус каждого компонента; скачанный вариант модели становится активным (models/active.json),
+/// иначе резолв взял бы дефолт и альт-квант бы не применился.
+fn finish(repo_root: &Path, selected: &[&Component]) -> Value {
+    let mroot = crate::models_root(repo_root);
+    let mut results = Vec::new();
+    for c in selected {
+        let st = component_status(repo_root, c);
+        if st.installed {
+            for (engine, variant) in crate::models::component_selection(c.id) {
+                if let Err(e) = crate::models::set_selection(&mroot, engine, &variant) {
+                    tracing::warn!("active.json: не записан выбор {engine}={variant}: {e}");
+                }
+            }
+        }
+        results.push(json!({ "id": c.id, "installed": st.installed, "missing": st.missing }));
+    }
+    let overall = setup_status(repo_root);
+    json!({ "components": results, "ready": overall.ready })
+}
+
+/// Скачать набор компонентов по id (идемпотентно: целые файлы закреплённой версии пропускаются, уже лежащий
+/// файл перед пропуском сверяется по SHA-256). Тело синхронное: зовут фоновый поток менеджера или джоба.
+/// cancel — пауза: скачанное остаётся в .part с манифестом чанков и докачивается следующим запуском.
+pub fn download_components(
+    repo_root: &Path,
+    ids: &[String],
+    cancel: &dyn Fn() -> bool,
+    progress: &ProgressCb,
+) -> Result<Value, DlError> {
+    let all = manifest();
+    let selected: Vec<&Component> = all
+        .iter()
+        .filter(|c| ids.iter().any(|x| x == c.id) && c.delivery == Delivery::Download)
+        .collect();
+    if selected.is_empty() {
+        return Err(DlError::new("nothing_to_download", "нет скачиваемых компонентов среди выбранных id"));
+    }
+    let selected_ids: Vec<String> = selected.iter().map(|c| c.id.to_string()).collect();
+    let _claim = claim(&selected_ids, cancel, &|| {
+        progress(json!({ "stage": "download", "phase": "waiting", "msg": "Жду другую закачку этих же компонентов…" }))
+    })?;
+    let agent = dl_agent(repo_root)?;
+
+    // Что качать: прямые файлы не той версии/размера и архивы без записи об установке закреплённой версии.
+    struct Planned<'a> {
+        ci: usize,
+        f: &'a FileSpec,
+        part: PathBuf,
+    }
+    let mut planned: Vec<Planned> = Vec::new();
+    for (ci, c) in selected.iter().enumerate() {
+        for f in c.files {
+            if cancel() {
+                return Err(cancelled());
+            }
+            if f.extract == Extract::None {
+                let dest = repo_root.join(f.dest_rel);
+                if file_ok(&dest, f.size) {
+                    progress(json!({ "stage": "download", "phase": "verify", "file": f.dest_rel, "msg": format!("Проверяю SHA-256 {}…", f.dest_rel) }));
+                    let hash = sha256_file(&dest, cancel).map_err(|e| DlError::new("io", format!("чтение {}: {e}", dest.display())))?;
+                    match hash {
+                        None => return Err(cancelled()),
+                        Some(h) if h == f.sha256 => continue,
+                        Some(h) => {
+                            tracing::warn!("{}: SHA-256 {h} не совпал с закреплённым — перекачиваю", dest.display());
+                            std::fs::remove_file(&dest).map_err(|e| DlError::new("io", format!("удалить {}: {e}", dest.display())))?;
+                        }
+                    }
+                }
+            } else if archive_installed(repo_root, f) {
+                continue;
+            }
+            planned.push(Planned { ci, f, part: part_path(repo_root, f) });
+        }
+    }
+    if planned.is_empty() {
+        return Ok(finish(repo_root, &selected));
+    }
+    let need: u64 = planned.iter().map(|p| file_space_needed(repo_root, p.f)).sum();
+    ensure_space(repo_root, need)?;
+    std::fs::create_dir_all(download_dir(repo_root))
+        .map_err(|e| DlError::new("io", format!("создать {}: {e}", download_dir(repo_root).display())))?;
+
+    progress(json!({ "msg": "Скачиваю модели…", "stage": "download", "phase": "download" }));
+
+    // Чанки всех файлов в ОДНУ очередь; счётчик прогресса — на КАЖДЫЙ компонент (comp_done[ci]).
+    enum Task {
+        // done — манифест завершённых чанков (дозапись offset при успехе) для РЕЗЮМА при следующем запуске.
+        Range { file: Arc<File>, url: &'static str, start: u64, end: u64, ci: usize, done: Arc<Mutex<File>> },
+        Whole { url: &'static str, dest: PathBuf, ci: usize },
+    }
+    let ncomp = selected.len();
+    let comp_done: Vec<Arc<AtomicU64>> = (0..ncomp).map(|_| Arc::new(AtomicU64::new(0))).collect();
+    let mut comp_total = vec![0u64; ncomp];
+    let mut tasks: Vec<Task> = Vec::new();
+    let mut open_files: Vec<Arc<File>> = Vec::new(); // держим хендлы живыми до конца пула
+    for p in &planned {
+        if cancel() {
+            return Err(cancelled());
+        }
+        if let Some(parent) = p.part.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| DlError::new("io", format!("создать {}: {e}", parent.display())))?;
+        }
+        let (total, ranged) = probe(&agent, p.f.url, cancel)?;
+        if total != 0 && total != p.f.size {
+            return Err(DlError::new(
+                "size_mismatch",
+                format!("{}: сервер отдаёт {total} байт, закреплено {} — источник изменился", p.f.url, p.f.size),
+            ));
+        }
+        comp_total[p.ci] += p.f.size;
+        if !(ranged && total > 0) {
+            tasks.push(Task::Whole { url: p.f.url, dest: p.part.clone(), ci: p.ci });
+            continue;
+        }
+        // Докачка: .part нужного размера и манифест рядом -> дочитываем только недостающие чанки.
+        let done_path = done_manifest_path(&p.part);
+        let resuming = file_len(&p.part) == total && done_path.is_file();
+        let completed = if resuming {
+            completed_offsets(&p.part, total)
+        } else {
+            let _ = std::fs::remove_file(&done_path);
+            Default::default()
+        };
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(!resuming)
+            .open(&p.part)
+            .map_err(|e| DlError::new("io", format!("создать {}: {e}", p.part.display())))?;
+        if !resuming {
+            file.set_len(total).map_err(|e| DlError::new("io", format!("set_len {}: {e}", p.part.display())))?;
+        }
+        let file = Arc::new(file);
+        open_files.push(file.clone());
+        let done = Arc::new(Mutex::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&done_path)
+                .map_err(|e| DlError::new("io", format!("манифест {}: {e}", done_path.display())))?,
+        ));
+        let mut start = 0u64;
+        while start < total {
+            let end = (start + CHUNK - 1).min(total - 1);
+            if completed.contains(&start) {
+                comp_done[p.ci].fetch_add(end - start + 1, Ordering::Relaxed);
+            } else {
+                tasks.push(Task::Range { file: file.clone(), url: p.f.url, start, end, ci: p.ci, done: done.clone() });
+            }
+            start += CHUNK;
+        }
+    }
+    let grand_total: u64 = comp_total.iter().sum();
+
+    // Воркеры разбирают ОДНУ очередь чанков всех файлов; соединений не больше общего бюджета процесса.
+    let n = POOL_SLOTS.min(tasks.len()).max(1);
+    let queue = Arc::new(Mutex::new(std::collections::VecDeque::from(tasks)));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let abort = Arc::new(AtomicBool::new(false));
+    let error: Arc<Mutex<Option<DlError>>> = Arc::new(Mutex::new(None));
+
+    std::thread::scope(|sc| {
+        for _ in 0..n {
+            let (queue, comp_done, finished, abort, error, agent) =
+                (queue.clone(), comp_done.clone(), finished.clone(), abort.clone(), error.clone(), agent.clone());
+            sc.spawn(move || {
+                loop {
+                    if abort.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Some(task) = lock(&queue).pop_front() else { break };
+                    let res = match &task {
+                        Task::Range { file, url, start, end, ci, done } => {
+                            download_range(&agent, url, file, *start, *end, &comp_done[*ci], &abort, done)
+                        }
+                        Task::Whole { url, dest, ci } => download_whole(&agent, url, dest, &comp_done[*ci], &abort),
+                    };
+                    if let Err(e) = res {
+                        if e.code != CANCELLED {
+                            abort.store(true, Ordering::Relaxed);
+                            let mut slot = lock(&error);
+                            if slot.is_none() {
+                                *slot = Some(e);
+                            }
+                        }
+                        break;
+                    }
+                }
+                finished.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        // Главный поток: агрегатный + ПОКОМПОНЕНТНЫЙ прогресс + скорость по окну последних секунд + отмена.
+        let mut window: std::collections::VecDeque<(Instant, u64)> = std::collections::VecDeque::new();
+        loop {
+            if cancel() {
+                abort.store(true, Ordering::Relaxed);
+            }
+            let got: u64 = comp_done.iter().map(|a| a.load(Ordering::Relaxed)).sum();
+            let now = Instant::now();
+            window.push_back((now, got));
+            while window.len() > 2 && now.duration_since(window[0].0) > Duration::from_secs(4) {
+                window.pop_front();
+            }
+            let (t0, g0) = window[0];
+            let dt = now.duration_since(t0).as_secs_f64();
+            let bps = if dt > 0.5 { (got.saturating_sub(g0) as f64 / dt) as u64 } else { 0 };
+            let overall = if grand_total > 0 { (got as f64 / grand_total as f64) * 100.0 } else { 0.0 };
+            let parts: Vec<Value> = (0..ncomp)
+                .filter(|&i| comp_total[i] > 0)
+                .map(|i| {
+                    let d = comp_done[i].load(Ordering::Relaxed).min(comp_total[i]);
+                    let p = (d as f64 / comp_total[i] as f64 * 100.0).min(100.0);
+                    json!({ "component": selected[i].id, "pct": p, "done": d, "total": comp_total[i] })
+                })
+                .collect();
+            progress(json!({
+                "stage": "download",
+                "phase": "download",
+                "msg": "Скачиваю модели…",
+                "downloaded": got,
+                "total": grand_total,
+                "speed_bps": bps,
+                "speed_mbps": bps as f64 / 1_000_000.0,
+                "waiting_s": waiting_for_server(),
+                "pct": overall.min(100.0),
+                "parts": parts,
+            }));
+            if finished.load(Ordering::SeqCst) >= n {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    });
+
+    drop(open_files); // закрыть хендлы до проверки и распаковки
+
+    // Сбой и пауза: .part и манифесты чанков остаются — следующий запуск докачает недостающее.
+    if let Some(e) = lock(&error).take() {
+        return Err(e);
+    }
+    if cancel() {
+        return Err(cancelled());
+    }
+
+    // Проверка и публикация каждого файла; удачные публикуются, даже если соседний не сошёлся.
+    let mut first_err: Option<DlError> = None;
+    for p in &planned {
+        match publish(repo_root, p.f, &p.part, cancel, progress) {
+            Ok(()) => {}
+            Err(e) if e.code == CANCELLED => return Err(e),
+            Err(e) => {
+                tracing::warn!("закачка {}: {}", p.f.dest_rel, e.detail);
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    Ok(finish(repo_root, &selected))
+}
+
+// ── Распаковка архивов (возвращают список положенных файлов для записи об установке) ──
 
 /// zip: все файлы плоско (только имя) в dir. Для движков-сайдкаров (exe + DLL в одном уровне).
-fn extract_zip_flat(zip_path: &Path, dir: &Path) -> Result<(), String> {
+fn extract_zip_flat(zip_path: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
     let file = std::fs::File::open(zip_path).map_err(|e| format!("открыть {}: {e}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("не zip: {e}"))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("создать {}: {e}", dir.display()))?;
+    let mut written = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| format!("запись zip: {e}"))?;
         if entry.is_dir() {
@@ -1649,53 +2263,52 @@ fn extract_zip_flat(zip_path: &Path, dir: &Path) -> Result<(), String> {
         if leaf.is_empty() {
             continue;
         }
-        write_entry(&mut entry, &dir.join(&leaf))?;
+        let out = dir.join(&leaf);
+        write_entry(&mut entry, &out)?;
+        written.push(out);
     }
-    Ok(())
+    Ok(written)
 }
 
-/// zip: отобрать нужные файлы (onnxruntime.dll, ffmpeg.exe/ffprobe.exe) и положить плоско в dir.
-/// onnxruntime-win-x64-1.28.2/lib/onnxruntime.dll -> dir/onnxruntime.dll ; ffmpeg .../bin/*.exe -> dir/*.exe.
-fn extract_zip_pick(zip_path: &Path, dir: &Path) -> Result<(), String> {
+/// zip: отобрать нужные файлы (ffmpeg.exe/ffprobe.exe) и положить плоско в dir.
+fn extract_zip_pick(zip_path: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
     let file = std::fs::File::open(zip_path).map_err(|e| format!("открыть {}: {e}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("не zip: {e}"))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("создать {}: {e}", dir.display()))?;
-    // Целевые: onnxruntime.dll (+.pdb не нужен), ffmpeg.exe, ffprobe.exe. Берём по имени листа.
-    const WANT: &[&str] = &["onnxruntime.dll", "ffmpeg.exe", "ffprobe.exe"];
-    let mut got = 0;
+    const WANT: &[&str] = &["ffmpeg.exe", "ffprobe.exe"];
+    let mut written = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| format!("запись zip: {e}"))?;
         if entry.is_dir() {
             continue;
         }
         let name = entry.name().replace('\\', "/");
-        let leaf_raw = name.rsplit('/').next().unwrap_or(&name); // лист один раз (без повторного rsplit)
-        let leaf = leaf_raw.to_ascii_lowercase();
-        if WANT.iter().any(|w| *w == leaf) {
-            let out_name = leaf_raw.to_string(); // исходный регистр имени выходного файла сохраняем
-            write_entry(&mut entry, &dir.join(&out_name))?;
-            got += 1;
+        let leaf_raw = name.rsplit('/').next().unwrap_or(&name);
+        if WANT.iter().any(|w| *w == leaf_raw.to_ascii_lowercase()) {
+            let out = dir.join(leaf_raw);
+            write_entry(&mut entry, &out)?;
+            written.push(out);
         }
     }
-    if got == 0 {
+    if written.is_empty() {
         return Err(format!("в архиве {} не найдено нужных файлов", zip_path.display()));
     }
-    Ok(())
+    Ok(written)
 }
 
 /// zip: распаковать весь архив с сохранением поддерева в dir (onnxruntime-win-x64-*/lib/…). Защита от
 /// zip-slip: отбрасываем компоненты `..` и абсолютные пути.
-fn extract_zip_tree(zip_path: &Path, dir: &Path) -> Result<(), String> {
+fn extract_zip_tree(zip_path: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
     let file = std::fs::File::open(zip_path).map_err(|e| format!("открыть {}: {e}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("не zip: {e}"))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("создать {}: {e}", dir.display()))?;
+    let mut written = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| format!("запись zip: {e}"))?;
         if entry.is_dir() {
             continue;
         }
         let name = entry.name().replace('\\', "/");
-        // Санитизация пути: только нормальные компоненты, без `..`/корней.
         let mut rel = PathBuf::new();
         for comp in name.split('/') {
             if comp.is_empty() || comp == "." || comp == ".." {
@@ -1711,16 +2324,17 @@ fn extract_zip_tree(zip_path: &Path, dir: &Path) -> Result<(), String> {
             std::fs::create_dir_all(parent).map_err(|e| format!("создать {}: {e}", parent.display()))?;
         }
         write_entry(&mut entry, &out)?;
+        written.push(out);
     }
-    Ok(())
+    Ok(written)
 }
 
-/// wheel (zip): все *.dll плоско в dir (CUDA runtime — cudart/cublas/cublasLt).
-fn extract_wheel_dlls(wheel_path: &Path, dir: &Path) -> Result<(), String> {
+/// wheel/zip: все *.dll плоско в dir (CUDA runtime — cudart/cublas/cublasLt, cuDNN, cuFFT).
+fn extract_wheel_dlls(wheel_path: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
     let file = std::fs::File::open(wheel_path).map_err(|e| format!("открыть {}: {e}", wheel_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("wheel не zip: {e}"))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("создать {}: {e}", dir.display()))?;
-    let mut written = 0;
+    let mut written = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| format!("запись wheel: {e}"))?;
         if entry.is_dir() {
@@ -1731,21 +2345,19 @@ fn extract_wheel_dlls(wheel_path: &Path, dir: &Path) -> Result<(), String> {
         if !leaf.to_ascii_lowercase().ends_with(".dll") {
             continue;
         }
-        write_entry(&mut entry, &dir.join(&leaf))?;
-        written += 1;
+        let out = dir.join(&leaf);
+        write_entry(&mut entry, &out)?;
+        written.push(out);
     }
-    if written == 0 {
-        return Err(format!("в wheel {} нет DLL", wheel_path.display()));
+    if written.is_empty() {
+        return Err(format!("в архиве {} нет DLL", wheel_path.display()));
     }
-    Ok(())
+    Ok(written)
 }
 
 /// Записать элемент архива в файл через .part+rename (атомарно).
 fn write_entry(entry: &mut zip::read::ZipFile<impl std::io::Read>, out: &Path) -> Result<(), String> {
-    let tmp = out.with_extension(format!(
-        "{}part",
-        out.extension().and_then(|e| e.to_str()).map(|e| format!("{e}.")).unwrap_or_default()
-    ));
+    let tmp = with_suffix(out, ".part");
     {
         let mut fout = std::fs::File::create(&tmp).map_err(|e| format!("создать {}: {e}", tmp.display()))?;
         std::io::copy(entry, &mut fout).map_err(|e| format!("распаковка {}: {e}", out.display()))?;
@@ -1758,6 +2370,18 @@ fn write_entry(entry: &mut zip::read::ZipFile<impl std::io::Read>, out: &Path) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dub-setup-{tag}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Файл нужного размера без записи содержимого (для проверок по размеру, не по хэшу).
+    fn sized(path: &Path, size: u64) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        File::create(path).unwrap().set_len(size).unwrap();
+    }
 
     #[test]
     fn manifest_ids_unique_and_nonempty() {
@@ -1826,6 +2450,57 @@ mod tests {
         }
     }
 
+    /// Всё, что качает «Первый запуск», закреплено: HF — коммитом в URL, остальное — версией в пути; у каждого
+    /// файла точный размер и SHA-256. Движущаяся цель (resolve/main, releases/latest) ломает установку у
+    /// пользователей, как только апстрим перезальёт файл.
+    #[test]
+    fn every_downloaded_file_is_pinned() {
+        let mut problems = Vec::new();
+        for c in manifest() {
+            for f in c.files {
+                if f.size == 0 {
+                    problems.push(format!("{}: {} без размера", c.id, f.dest_rel));
+                }
+                if f.sha256.len() != 64 || !f.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                    problems.push(format!("{}: {} — sha256 не 64 hex в нижнем регистре", c.id, f.dest_rel));
+                }
+                if let Some(rest) = f.url.strip_prefix("https://huggingface.co/") {
+                    let rev = rest.split('/').nth(3).unwrap_or("");
+                    let pinned = rest.split('/').nth(2) == Some("resolve")
+                        && rev.len() == 40
+                        && rev.bytes().all(|b| b.is_ascii_hexdigit());
+                    if !pinned {
+                        problems.push(format!("{}: {} не закреплён коммитом", c.id, f.url));
+                    }
+                }
+                if f.url.contains("/latest/") || f.url.contains("/resolve/main/") {
+                    problems.push(format!("{}: {} — движущаяся цель", c.id, f.url));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "не закреплено: {problems:#?}");
+    }
+
+    #[test]
+    fn component_size_is_the_sum_of_its_files() {
+        for c in manifest().iter().filter(|c| c.delivery == Delivery::Download) {
+            let sum: u64 = c.files.iter().map(|f| f.size).sum();
+            assert_eq!(c.size, sum, "{}: size компонента не равен сумме files", c.id);
+        }
+    }
+
+    /// Маркер прямого файла и сам файл говорят об одном размере — иначе компонент не станет установленным никогда.
+    #[test]
+    fn markers_agree_with_files() {
+        for c in manifest() {
+            for m in c.markers {
+                if let Some(f) = c.files.iter().find(|f| f.extract == Extract::None && f.dest_rel == m.rel) {
+                    assert!(m.expect == 0 || m.expect == f.size, "{}: маркер {} {} != файл {}", c.id, m.rel, m.expect, f.size);
+                }
+            }
+        }
+    }
+
     fn index(files: &[(&str, u64)]) -> std::collections::HashMap<String, Vec<(PathBuf, u64)>> {
         let mut map: std::collections::HashMap<String, Vec<(PathBuf, u64)>> = Default::default();
         for (p, sz) in files {
@@ -1882,17 +2557,234 @@ mod tests {
         }
     }
 
+    /// Имена архивов в каталоге закачек не пересекаются (два _engine.zip разных движков).
+    #[test]
+    fn download_parts_do_not_collide() {
+        let root = Path::new("R");
+        let mut seen = std::collections::HashSet::new();
+        for c in manifest() {
+            for f in c.files {
+                assert!(seen.insert(part_path(root, f)), "{}: .part совпадает с другим файлом", f.dest_rel);
+            }
+        }
+    }
+
+    /// Архив установлен, только если его запись называет закреплённый sha256 и файлы на месте: у обновившихся
+    /// пользователей CUDA-DLL прошлой версии (того же имени и даже размера) дают «недостающий компонент».
+    #[test]
+    fn an_archive_counts_only_with_the_pinned_version_recorded() {
+        let root = temp_root("record");
+        let all = manifest();
+        let cuda = all.iter().find(|c| c.id == "cuda-runtime").unwrap();
+        let wheel = &cuda.files[0];
+        let dll = root.join("models/higgs-engine/cudart64_13.dll");
+        sized(&dll, 551_024);
+        assert!(!archive_installed(&root, wheel), "DLL без записи — старая установка");
+
+        write_record(&root, wheel, std::slice::from_ref(&dll)).unwrap();
+        assert!(archive_installed(&root, wheel));
+
+        let mut rec = read_record(&root, wheel).unwrap();
+        rec.sha256 = "0".repeat(64);
+        std::fs::write(record_path(&root, wheel), serde_json::to_vec(&rec).unwrap()).unwrap();
+        assert!(!archive_installed(&root, wheel), "запись о другой версии архива");
+
+        write_record(&root, wheel, std::slice::from_ref(&dll)).unwrap();
+        sized(&dll, 1);
+        assert!(!archive_installed(&root, wheel), "файл из записи изменился");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_vc_runtime_counts_where_the_loader_finds_it() {
+        let root = temp_root("vcrt");
+        let system = temp_root("vcrt-system");
+        let vc = manifest().into_iter().find(|c| c.id == "vcruntime").unwrap();
+        let name = |m: &Marker| Path::new(m.rel).file_name().unwrap().to_owned();
+
+        let st = status_with_system_dir(&root, &vc, Some(&system));
+        assert!(!st.installed);
+        assert_eq!(st.missing.len(), vc.markers.len());
+
+        let (engine, rest) = vc.markers.split_at(2);
+        for m in engine {
+            sized(&root.join(m.rel), 10);
+        }
+        for m in rest {
+            sized(&system.join(name(m)), 10);
+        }
+        let st = status_with_system_dir(&root, &vc, Some(&system));
+        assert!(st.installed, "{:?}", st.missing);
+        assert_eq!(st.detail.as_deref(), Some("system"));
+        assert!(!status_with_system_dir(&root, &vc, None).installed, "без системного каталога — только комплект");
+
+        std::fs::remove_file(system.join(name(&rest[0]))).unwrap();
+        let st = status_with_system_dir(&root, &vc, Some(&system));
+        assert!(!st.installed);
+        assert_eq!(st.missing, vec![rest[0].rel.to_string()]);
+
+        for m in rest {
+            sized(&root.join(m.rel), 10);
+        }
+        let st = status_with_system_dir(&root, &vc, Some(&system));
+        assert!(st.installed);
+        assert_eq!(st.detail, None, "весь комплект рядом с движком");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&system).ok();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn the_system_dir_is_the_one_windows_loads_from() {
+        let dir = system_dir().expect("GetSystemDirectoryW");
+        assert!(dir.join("kernel32.dll").is_file(), "{}", dir.display());
+        assert!(FOUND_IN_SYSTEM_DIR.iter().all(|id| manifest().iter().any(|c| c.id == *id && c.delivery == Delivery::Bundled)));
+    }
+
+    /// Комплект релиза: каждый файл Bundled-компонента лежит в staging установщика (или в распакованном
+    /// портативе) по тому же пути, что после установки. Шаг сборки — desktop/src-tauri/STAGING.md.
+    #[test]
+    #[ignore]
+    fn the_release_staging_carries_every_bundled_file() {
+        let stage = PathBuf::from(std::env::var("DUB_RELEASE_STAGING").expect("DUB_RELEASE_STAGING = каталог staging или портатива"));
+        let absent: Vec<String> = manifest()
+            .iter()
+            .filter(|c| c.delivery == Delivery::Bundled)
+            .flat_map(|c| c.markers.iter().map(move |m| (c.id, m)))
+            .filter(|(_, m)| !marker_ok(&stage, m))
+            .map(|(id, m)| format!("{id}: {}", m.rel))
+            .collect();
+        assert!(absent.is_empty(), "нет в {}: {absent:#?}", stage.display());
+    }
+
+    #[test]
+    fn an_empty_root_reports_every_download_missing_with_its_size() {
+        let root = temp_root("empty");
+        let st = setup_status(&root);
+        for c in st.components.iter().filter(|c| c.delivery == Delivery::Download && c.id != "ffmpeg") {
+            assert!(!c.installed, "{} установлен в пустом корне", c.id);
+            assert_eq!(c.bytes_on_disk, 0, "{}", c.id);
+            assert!(c.space_needed >= c.size, "{}: места меньше размера закачки", c.id);
+        }
+        assert!(!st.ready);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resumed_bytes_come_from_the_chunk_manifest() {
+        let root = temp_root("resume");
+        let part = root.join("x.part");
+        let total = CHUNK * 2 + 10;
+        sized(&part, total);
+        assert_eq!(resumed_bytes(&part, total), 0, "без манифеста ничего не готово");
+        let offs: Vec<u8> = [0u64, CHUNK * 2, CHUNK * 2].iter().flat_map(|o| o.to_le_bytes()).collect();
+        std::fs::write(done_manifest_path(&part), offs).unwrap();
+        assert_eq!(resumed_bytes(&part, total), CHUNK + 10, "повтор офсета не считается дважды, хвост — по размеру");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn removal_frees_the_files_and_the_partial_download() {
+        let root = temp_root("remove");
+        let all = manifest();
+        let tiny = all.iter().find(|c| c.id == "whisper-tiny").unwrap();
+        for f in tiny.files {
+            sized(&root.join(f.dest_rel), f.size);
+        }
+        let leftover = part_path(&root, &all.iter().find(|c| c.id == "whisper-base").unwrap().files[0]);
+        sized(&leftover, 1000);
+        assert!(component_status(&root, tiny).installed);
+
+        let r = remove_components(&root, &["whisper-tiny".to_string(), "whisper-base".to_string()]).unwrap();
+        assert_eq!(r.removed, vec!["whisper-tiny".to_string(), "whisper-base".to_string()]);
+        assert_eq!(r.freed_bytes, tiny.size + 1000);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(!component_status(&root, tiny).installed);
+        assert!(!root.join("models/whisper/faster-whisper-tiny").exists(), "пустой каталог модели снят");
+        assert!(root.join("models").is_dir(), "models/ остаётся");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn removal_refuses_what_the_app_does_not_install() {
+        let root = temp_root("refuse");
+        assert_eq!(remove_components(&root, &["vcruntime".to_string()]).unwrap_err().code, "not_removable");
+        assert_eq!(remove_components(&root, &["nvidia-driver".to_string()]).unwrap_err().code, "not_removable");
+        assert_eq!(remove_components(&root, &["nope".to_string()]).unwrap_err().code, "unknown_component");
+        let _busy = try_claim(&["whisper-small".to_string()]).unwrap();
+        assert_eq!(remove_components(&root, &["whisper-small".to_string()]).unwrap_err().code, "busy");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn import_takes_only_files_of_the_exact_size() {
+        let root = temp_root("import-dst");
+        let src = temp_root("import-src");
+        let all = manifest();
+        let tiny = all.iter().find(|c| c.id == "whisper-tiny").unwrap();
+        for f in tiny.files {
+            let name = Path::new(f.dest_rel).file_name().unwrap();
+            sized(&src.join("nested").join(name), f.size);
+        }
+        sized(&src.join(".hidden").join("model.bin"), 1);
+        sized(&src.join("other").join("config.json"), 7);
+        let r = import_from_dir(&root, &src, Some("whisper-tiny"));
+        assert_eq!(r.imported, vec!["whisper-tiny".to_string()]);
+        assert_eq!(r.files, tiny.files.len());
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(component_status(&root, tiny).installed);
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&src).ok();
+    }
+
+    #[test]
+    fn claims_keep_one_writer_per_component() {
+        let a = try_claim(&["roformer-q4".to_string()]).unwrap();
+        assert!(try_claim(&["roformer-q4".to_string(), "roformer-q5".to_string()]).is_none());
+        assert!(try_claim(&["roformer-q5".to_string()]).is_some(), "другой компонент качается параллельно");
+        drop(a);
+        assert!(try_claim(&["roformer-q4".to_string()]).is_some());
+    }
+
+    /// Заголовок в том виде, в каком его шлёт Hugging Face.
+    #[test]
+    fn the_rate_limit_header_is_read_the_way_the_hub_writes_it() {
+        assert_eq!(parse_rate_limit("\"resolvers\";r=2819;t=216"), Some((2819, 216)));
+        assert_eq!(parse_rate_limit("\"api\";r=0"), Some((0, 300)));
+        assert_eq!(parse_rate_limit("garbage"), None);
+    }
+
+    #[test]
+    fn a_busy_server_is_waited_for_as_long_as_it_asks() {
+        let mut h = ureq::http::HeaderMap::new();
+        assert_eq!(asked_to_wait(&h), 30, "без заголовков — полминуты");
+        h.insert("ratelimit", "\"resolvers\";r=0;t=143".parse().unwrap());
+        assert_eq!(asked_to_wait(&h), 143);
+        h.insert("retry-after", "7".parse().unwrap());
+        assert_eq!(asked_to_wait(&h), 7, "Retry-After важнее окна");
+        h.insert("retry-after", "100000".parse().unwrap());
+        assert_eq!(asked_to_wait(&h), 310, "не дольше пяти минут за раз");
+    }
+
+    #[test]
+    fn sha256_is_streamed_and_can_be_stopped() {
+        let root = temp_root("sha");
+        let p = root.join("f.bin");
+        std::fs::write(&p, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&p, &|| false).unwrap().unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn all_installed_on_this_machine() {
-        // Юнит из ТЗ (а): манифест против реального диска. На этой машине всё должно быть installed.
-        // repo_root резолвим из DUB_STUDIO_ROOT (задаётся в CI/приёмке), иначе — CARGO_MANIFEST_DIR/../..
+        // Манифест против реального диска. repo_root — из DUB_STUDIO_ROOT (задаётся в CI/приёмке), иначе
+        // CARGO_MANIFEST_DIR/../..; без models/ тест пропускается.
         let repo_root = std::env::var("DUB_STUDIO_ROOT")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("..")
-                    .join("..")
-            });
+            .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join(".."));
         if !repo_root.join("models").is_dir() {
             eprintln!("skip: нет {}/models (не приёмочная машина)", repo_root.display());
             return;
@@ -1900,14 +2792,8 @@ mod tests {
         let st = setup_status(&repo_root);
         let mut broken = Vec::new();
         for c in &st.components {
-            // Драйвер зависит от железа; на приёмочной машине RTX 4090 он есть, но в headless CI может не быть.
-            if c.delivery == Delivery::External {
-                continue;
-            }
-            // Опциональные компоненты (альт-кванты Gemma q5/q6/q8, Higgs q6/q4 — по 5-12ГБ каждый) —
-            // это ВЗАИМОЗАМЕНЯЕМЫЕ альтернативы дефолту, их не качают все сразу. Проверяем лишь дефолтный
-            // (Required) стек. Что альт-кванты реально скачиваются — проверено byte-range probe URL'ов.
-            if c.requirement == Requirement::Optional {
+            // Драйвер зависит от железа; опциональные кванты — взаимозаменяемые альтернативы дефолту.
+            if c.delivery == Delivery::External || c.requirement == Requirement::Optional {
                 continue;
             }
             if !c.installed {

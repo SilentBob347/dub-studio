@@ -13,8 +13,8 @@ import { motion } from "motion/react";
 import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, slot, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectListing, type LaunchDefaults, type Character } from "./lib/api";
-import i18n, { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
+import { api, slot, SetupError, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectListing, type LaunchDefaults, type Character, type DownloadJob } from "./lib/api";
+import { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
 import { playSfx } from "./lib/sfx";
@@ -30,6 +30,13 @@ import ProjectJobBar from "./components/ProjectJobBar";
 import { ContinueJobButton, JobStateLabel } from "./components/RecentJobBadge";
 import AgentPanel from "./components/AgentPanel";
 import WhatsNew from "./components/WhatsNew";
+import DownloadProgress from "./components/DownloadProgress";
+import ModelsFolder from "./components/ModelsFolder";
+import GpuNotice from "./components/GpuNotice";
+import RemoveComponent from "./components/RemoveComponent";
+import { useSetupStatus } from "./lib/useSetupStatus";
+import { useDownloadErrorText, useGpuReasonText } from "./lib/setupText";
+import { fmtBytes } from "./lib/format";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -106,8 +113,8 @@ const PARAKEET_LANGS = new Set([
 // part="cloud" — раздел «Облако» (ключ OpenRouter и потоки) на том же состоянии выбора.
 function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
   const { t } = useTranslation();
-  const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [prog, setProg] = useState<{ id: string; pct: number } | null>(null);
+  const errText = useDownloadErrorText();
+  const gpuReasonText = useGpuReasonText();
   // Выбор ASR-движка (parakeet|whisper) + квант Whisper (compute) — из capabilities.selection.
   const [cap, setCap] = useState<Capabilities | null>(null);
   const [asrEngine, setAsrEngine] = useState<string>("parakeet");
@@ -126,8 +133,15 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
     setAsrEngine(slot(c.selection, "asr_engine") ?? "parakeet");
     setWhisperCompute(slot(c.selection, "whisper_compute") ?? "int8");
   }).catch(() => {});
-  const refresh = () => { api.setupStatus().then(setStatus).catch(() => {}); loadCap(); };
-  useEffect(() => { refresh(); }, []);
+  // Статус компонентов + фоновая закачка (опрос, пока она идёт). Скачанный вариант становится активным на
+  // бэке — после закачки перечитываем выбор.
+  const { status, error: statusErr, refresh: refreshStatus, adopt, downloading } = useSetupStatus(() => { loadCap(); });
+  const prog = downloading ? status?.active ?? null : null;
+  const partPct = (id: string) => {
+    const p = prog?.parts.find((x) => x.id === id);
+    return p && p.total > 0 ? (p.done / p.total) * 100 : prog?.ids.includes(id) ? 0 : null;
+  };
+  useEffect(() => { loadCap(); }, []);
   const selv = (k: string) => slot(cap?.selection, k) ?? "";
   const hasOrKey = cap?.selection?.or_key_set === true;
   const setSel = (k: string, v: string) => api.setSelection(k, v).then(loadCap).catch(() => {});
@@ -143,17 +157,20 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
     if (!orTtsModel) { setOrVoices([]); setTtsRu(null); return; }
     api.openrouterVoices(orTtsModel).then((r) => { setOrVoices(r.voices); setTtsRu(r.supportsRussian); }).catch(() => {});
   }, [orTtsModel]);
-  const dl = async (id: string) => {
-    if (prog) return;
-    setProg({ id, pct: 0 }); setErr(null);
-    try {
-      const { job_id } = await api.setupDownload([id]);
-      await api.watchJob(job_id, (e) => { if (e.type === "progress" && (e.component === id || !e.component)) setProg({ id, pct: e.pct ?? 0 }); });
-    } catch (e) { setErr(`${id}: ${e instanceof Error ? e.message : String(e)}`); } finally { setProg(null); await refresh(); }
+  const setupErr = (e: unknown) => setErr(e instanceof SetupError ? `${errText(e.code)} · ${e.detail}` : e instanceof Error ? e.message : String(e));
+  const dl = async (ids: string[]) => {
+    if (downloading) return;
+    setErr(null);
+    try { await api.setupDownload(ids); await refreshStatus(); } catch (e) { setupErr(e); }
   };
+  const pause = () => { api.setupCancel().then(() => refreshStatus()).catch(setupErr); };
   const browseId = async (id: string) => {
     if (prog) return;
-    try { const r = await api.setupBrowse(id); if (r.picked) setStatus(r.status); } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+    try {
+      const r = await api.setupBrowse(id);
+      if (r.picked) adopt(r.status);
+      if (r.errors.length > 0) setErr(`${t("downloads.importErrors")} · ${r.errors.join("; ")}`);
+    } catch (e) { setupErr(e); }
   };
   const BrowseBtn = ({ id }: { id: string }) => (
     <button onClick={() => browseId(id)} disabled={!!prog} title={t("settings.browseFolder")}
@@ -182,13 +199,14 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
     </div>
   );
 
-  if (!status) return <div className="mono text-[11px] text-[var(--color-muted)]">…</div>;
+  if (!status) return <div className="mono text-[11px] text-[var(--color-muted)]">{statusErr ?? "…"}</div>;
   const byId = Object.fromEntries(status.components.map((c) => [c.id, c]));
   const get = (id: string) => byId[id] as SetupComponent | undefined;
 
   // строка одного компонента (кнопка скачать/докачать + прогресс)
   const Row = (c: SetupComponent) => {
-    const active = prog?.id === c.id;
+    const pct = partPct(c.id);
+    const active = pct != null;
     return (
       <div key={c.id} className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${c.installed ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />
@@ -198,13 +216,14 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
         </div>
         {active ? (
           <div className="w-24 shrink-0">
-            <div className="h-1.5 rounded-full bg-white/10 overflow-hidden"><div className="h-full bg-[var(--color-accent)] transition-[width]" style={{ width: `${prog?.pct ?? 0}%` }} /></div>
-            <div className="mono text-[10px] text-[var(--color-muted)] text-right mt-0.5">{Math.round(prog?.pct ?? 0)}%</div>
+            <div className="h-1.5 rounded-full bg-white/10 overflow-hidden"><div className="h-full bg-[var(--color-accent)] transition-[width]" style={{ width: `${pct ?? 0}%` }} /></div>
+            <div className="mono text-[10px] text-[var(--color-muted)] text-right mt-0.5">{Math.round(pct ?? 0)}%</div>
           </div>
         ) : (
           <div className="flex items-center gap-1.5 shrink-0">
+            <RemoveComponent c={c} disabled={!!prog} onDone={(s) => { adopt(s); loadCap(); }} onError={setErr} />
             <BrowseBtn id={c.id} />
-            <button onClick={() => dl(c.id)} disabled={!!prog}
+            <button onClick={() => dl([c.id])} disabled={!!prog}
               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[12px] border border-[var(--color-border)] text-[var(--color-accent-2)] hover:border-[var(--color-accent)] disabled:opacity-40">
               {c.installed ? <RefreshCw size={12} /> : <Download size={12} />}{c.installed ? t("settings.redownload") : t("setup.downloadOne")}
             </button>
@@ -226,7 +245,8 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
     if (!c) return null;
     const quant = (v: SetupComponent) => i18n?.[v.id] ? t(i18n[v.id].label) : (v.name.match(/\b(q\d[\w]*|int8|fp32|f16|large-v3-turbo|large-v3|tiny|base|small|medium)\b/i)?.[1] ?? v.name);
     const hint = i18n?.[c.id] ? t(i18n[c.id].hint) : "";
-    const active = prog?.id === c.id;
+    const pct = partPct(c.id);
+    const active = pct != null;
     return (
       <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
         <div className="flex items-center gap-2.5">
@@ -247,11 +267,12 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
             {variants.map((v) => <option key={v.id} value={v.id}>{quant(v)}{v.installed ? " ✓" : ""} · {fmtBytes(v.size)}{v.vram ? ` / ${fmtBytes(v.vram)} VRAM` : ""}</option>)}
           </select>
           {active ? (
-            <span className="mono text-[11px] text-[var(--color-accent)] w-10 text-right">{Math.round(prog?.pct ?? 0)}%</span>
+            <span className="mono text-[11px] text-[var(--color-accent)] w-10 text-right">{Math.round(pct ?? 0)}%</span>
           ) : (
             <>
+              <RemoveComponent c={c} disabled={!!prog} onDone={(s) => { adopt(s); loadCap(); }} onError={setErr} />
               <BrowseBtn id={c.id} />
-              <button onClick={() => dl(c.id)} disabled={!!prog} title={c.installed ? t("settings.redownload") : t("setup.downloadOne")}
+              <button onClick={() => dl([c.id])} disabled={!!prog} title={c.installed ? t("settings.redownload") : t("setup.downloadOne")}
                 className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[12px] border border-[var(--color-border)] text-[var(--color-accent-2)] hover:border-[var(--color-accent)] disabled:opacity-40">
                 {c.installed ? <RefreshCw size={12} /> : <Download size={12} />}
               </button>
@@ -284,11 +305,13 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
   // аналогии с провайдерами. Независимый ключ на стадию (sep_backend / diar_backend / asr_backend).
   const BackendTabs = ({ k }: { k: string }) => {
     const cur = selv(k) || "auto";
+    const gpuOff = !status.gpu.cuda13Ok;
     return (
       <div className="flex gap-1 mb-1.5">
         {([["auto", t("settings.auto")], ["gpu", "GPU (CUDA)"], ["cpu", "CPU"]] as const).map(([id, label]) => (
-          <button key={id} onClick={() => setSel(k, id)}
-            className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${cur === id ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>{label}</button>
+          <button key={id} onClick={() => setSel(k, id)} disabled={id === "gpu" && gpuOff && cur !== "gpu"}
+            title={id === "gpu" && gpuOff ? gpuReasonText(status.gpu) : undefined}
+            className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${cur === id ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`}>{label}</button>
         ))}
       </div>
     );
@@ -303,11 +326,23 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
 
   const browse = async () => {
     if (prog) return;
-    try { const r = await api.setupBrowse(); if (r.picked) setStatus(r.status); } catch { /* ignore */ }
+    try {
+      const r = await api.setupBrowse();
+      if (r.picked) adopt(r.status);
+      if (r.errors.length > 0) setErr(`${t("downloads.importErrors")} · ${r.errors.join("; ")}`);
+    } catch (e) { setupErr(e); }
   };
+  const driverUrl = get("nvidia-driver")?.externalUrl;
 
   return (
     <div>
+      <div className="mb-3 space-y-2">
+        <ModelsFolder status={status} />
+        <GpuNotice gpu={status.gpu} driverUrl={driverUrl} />
+        {status.active && status.active.status !== "completed" && (
+          <DownloadProgress job={status.active} onPause={pause} onResume={(ids) => { dl(ids); }} />
+        )}
+      </div>
       <button onClick={browse} disabled={!!prog}
         className="mb-3 w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-dashed border-[var(--color-border)] text-[12px] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] transition-colors disabled:opacity-40">
         <FolderDown size={14} />{t("settings.browseFolder")}
@@ -3725,13 +3760,6 @@ function FilesPanel() {
   );
 }
 
-function fmtBytes(n: number) {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} ${i18n.t("units.gb")}`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(0)} ${i18n.t("units.mb")}`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} ${i18n.t("units.kb")}`;
-  return `${n} ${i18n.t("units.b")}`;
-}
-
 // Семейства квантов: разные варианты ОДНОЙ модели (выбор одного, «ИЛИ»). Явная карта по id — надёжнее
 // префикса (higgs — квант TTS, higgs-engine — движок, это РАЗНЫЕ вещи). Остальные компоненты — одиночные.
 const QUANT_GROUP: Record<string, string> = {
@@ -3742,53 +3770,51 @@ const QUANT_GROUP: Record<string, string> = {
 };
 
 // ── «Первый запуск»: панель автозакачки компонентов (модели/движки/системные библиотеки) ──
+// По умолчанию отмечено всё недостающее скачиваемое, кроме опциональных квантов (их качают вручную).
+const preselect = (s: SetupStatus) =>
+  new Set(s.components.filter((c) => c.delivery === "download" && !c.installed && c.requirement !== "optional").map((c) => c.id));
+
 function FirstRun() {
   const { t } = useTranslation();
+  const errText = useDownloadErrorText();
   const setStage = useStore((s) => s.setStage);
-  const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [sel, setSel] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-  const [prog, setProg] = useState<{ pct: Record<string, number>; overall: number; msg: string } | null>(null); // pct[componentId] -> % (параллельные бары)
+  // Выбор пользователя; null — ещё не трогал, берём преселект из текущего статуса (опрос его не сбрасывает).
+  const [picked, setPicked] = useState<Set<string> | null>(null);
   const [err, setErr] = useState<string | null>(null);
-
-  const refresh = async () => {
-    const s = await api.setupStatus();
-    setStatus(s);
-    // preselect every missing downloadable component (кроме опциональных квантов — их качают вручную)
-    setSel(new Set(s.components.filter((c) => c.delivery === "download" && !c.installed && c.requirement !== "optional").map((c) => c.id)));
-    return s;
+  // Закачка идёт фоном на сервере: прогресс — опросом статуса, переживает перезагрузку окна и приложения.
+  const onSettled = (job: DownloadJob, s: SetupStatus) => {
+    if (job.status === "completed") useStore.getState().pushActivity(t(s.ready ? "setup.ready" : "setup.done"), "done");
+    if (job.status === "completed" && s.ready) { setStage("empty"); playSfx("success"); }   // всё скачано -> сразу на стартовый экран
+    else if (job.status === "failed") useStore.getState().pushActivity(`${errText(job.errorCode)} · ${job.error ?? ""}`, "error");
   };
-  useEffect(() => { refresh().catch((e) => setErr(String(e))); }, []);
+  const { status, error: statusErr, refresh, adopt, downloading: busy } = useSetupStatus(onSettled);
+  const sel = picked ?? (status ? preselect(status) : new Set<string>());
+  const setSel = (f: (prev: Set<string>) => Set<string>) => setPicked(f(sel));
+  const active = status?.active ?? null;
+  const partPct = (id: string): number | null => {
+    if (!busy || !active) return null;
+    const p = active.parts.find((x) => x.id === id);
+    return p && p.total > 0 ? (p.done / p.total) * 100 : active.ids.includes(id) ? 0 : null;
+  };
 
   async function download(ids: string[]) {
     if (ids.length === 0 || busy) return;
-    setBusy(true); setErr(null); setProg({ pct: {}, overall: 0, msg: "" });
+    setErr(null);
     try {
-      const { job_id } = await api.setupDownload(ids);
-      await api.watchJob(job_id, (e) => {
-        if (e.type === "progress") {
-          const m: Record<string, number> = {};
-          (e.parts || []).forEach((p) => { m[p.component] = p.pct; });   // бар на каждый компонент
-          setProg({ pct: m, overall: e.pct ?? 0, msg: e.msg || "" });
-          useStore.getState().pushActivity(e.msg || "", "work");         // в общий журнал шапки
-        }
-      });
-      const s = await refresh();
-      useStore.getState().pushActivity(t(s.ready ? "setup.ready" : "setup.done"), "done");
-      if (s.ready) { setStage("empty"); playSfx("success"); }   // всё скачано -> сразу на стартовый экран, без ручного «Продолжить»
+      await api.setupDownload(ids);
+      await refresh();
     } catch (e) {
-      // SSE-стрим мог оборваться на длинной (часы, десятки ГБ) скачке, хотя джоба ЗАВЕРШИЛАСЬ и всё встало
-      // на диск -> перепроверяем реальный статус: если готово, всё равно уходим на стартовый экран (иначе
-      // экран «Первого запуска» завис бы на 100%, хотя всё скачано — баг-репорт).
-      try { const s = await refresh(); if (s.ready) { useStore.getState().pushActivity(t("setup.ready"), "done"); setStage("empty"); playSfx("success"); return; } } catch { /* refresh тоже упал */ }
-      setErr(String(e)); useStore.getState().pushActivity(String(e), "error");
-    } finally {
-      setBusy(false); setProg(null);
+      const msg = e instanceof SetupError ? `${errText(e.code)} · ${e.detail}` : String(e);
+      setErr(msg); useStore.getState().pushActivity(msg, "error");
     }
   }
+  const pause = () => { api.setupCancel().then(() => refresh()).catch((e) => setErr(String(e))); };
 
-  const toggle = (id: string) => setSel((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const selectedBytes = status ? status.components.filter((c) => sel.has(c.id)).reduce((a, c) => a + Math.max(0, c.size - c.bytesOnDisk), 0) : 0;
+  const toggle = (id: string) => setSel((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const selectedComps = status ? status.components.filter((c) => sel.has(c.id)) : [];
+  const selectedBytes = selectedComps.reduce((a, c) => a + Math.max(0, c.size - c.bytesOnDisk), 0);
+  const selectedSpace = selectedComps.reduce((a, c) => a + c.spaceNeeded, 0);
+  const noSpace = status?.freeBytes != null && selectedSpace > status.freeBytes;
 
   const reqLabel = (r: string) => (r === "required" ? t("setup.required") : t("setup.recommended"));
   const deliveryNote = (c: SetupComponent) =>
@@ -3827,6 +3853,18 @@ function FirstRun() {
           </div>
         )}
 
+        {statusErr && !status && (
+          <div className="mt-4 rounded-lg border border-[var(--color-warn)]/40 px-3 py-2 mono text-[11px] text-[var(--color-warn)] break-words">{statusErr}</div>
+        )}
+
+        {status && (
+          <div className="mt-4 space-y-2">
+            <GpuNotice gpu={status.gpu} driverUrl={status.components.find((c) => c.delivery === "external")?.externalUrl} />
+            {active && active.status !== "completed" && <DownloadProgress job={active} onPause={pause} onResume={(ids) => { download(ids); }} />}
+            <ModelsFolder status={status} need={selectedSpace} />
+          </div>
+        )}
+
         <div className="mt-4 rounded-lg border border-[var(--color-accent)]/30 bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)] px-3.5 py-2.5 text-[12.5px] leading-snug text-[var(--color-text)]">
           <span className="font-semibold text-[var(--color-accent)]">{t("setup.pickNoteTitle")}</span> {t("setup.pickNote")}
         </div>
@@ -3834,8 +3872,8 @@ function FirstRun() {
         {/* Пресет под железо + ключ OpenRouter: выбрал «Облако» → облачные движки, локальные модели ниже
             становятся необязательными (не тянешь лишние гигабайты). Refresh обновляет чеклист под выбор. */}
         <div className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 py-3 space-y-2">
-          <PresetsSection onApplied={() => { refresh().catch(() => {}); }} />
-          <OpenRouterKey onSaved={() => { refresh().catch(() => {}); }} />
+          <PresetsSection onApplied={() => { setPicked(null); refresh().catch(() => {}); }} />
+          <OpenRouterKey onSaved={() => { setPicked(null); refresh().catch(() => {}); }} />
           <div className="text-[11px] text-[var(--color-muted)] leading-snug"><Trans i18nKey="setup.cloudHint" components={{ b: <span className="text-[var(--color-text)]" /> }} /></div>
         </div>
 
@@ -3853,7 +3891,7 @@ function FirstRun() {
                     {members.map((c) => {
                       const isDefault = c.requirement !== "optional";
                       const checked = sel.has(c.id);
-                      const active = !!prog && prog.pct[c.id] != null;
+                      const pct = partPct(c.id);
                       return (
                         <label key={c.id} className={`flex items-center gap-2.5 rounded-lg px-2 py-1.5 ${c.installed ? "" : "cursor-pointer hover:bg-[var(--color-surface-2)]"} ${checked && !c.installed ? "bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)]" : ""}`}>
                           {c.installed
@@ -3868,7 +3906,7 @@ function FirstRun() {
                               {c.installed && <span className="text-[10px] text-[var(--color-accent)] shrink-0">{t("setup.installed")}</span>}
                             </div>
                             {ASR_VARIANT_I18N[c.id] && <div className="text-[11px] leading-snug text-[var(--color-muted)]">{t(ASR_VARIANT_I18N[c.id].hint)}</div>}
-                            {active && <div className="mt-1 h-1 rounded-full bg-[var(--color-surface-2)] overflow-hidden"><div className="h-full bg-[var(--color-accent)]" style={{ width: `${prog!.pct[c.id] ?? 0}%` }} /></div>}
+                            {pct != null && <div className="mt-1 h-1 rounded-full bg-[var(--color-surface-2)] overflow-hidden"><div className="h-full bg-[var(--color-accent)]" style={{ width: `${pct}%` }} /></div>}
                           </div>
                           <span className="mono text-[11px] text-[var(--color-muted)] shrink-0">{fmtBytes(c.size)}{c.vram ? ` · ${fmtBytes(c.vram)} VRAM` : ""}</span>
                         </label>
@@ -3880,7 +3918,7 @@ function FirstRun() {
               );
             }
             const c = row.c;
-            const active = !!prog && prog.pct[c.id] != null;
+            const pct = partPct(c.id);
             const canPick = c.delivery === "download" && !c.installed;
             return (
               <div key={c.id} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 py-3">
@@ -3899,9 +3937,10 @@ function FirstRun() {
                       <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide ${c.requirement === "required" ? "bg-[color-mix(in_oklab,var(--color-accent)_16%,transparent)] text-[var(--color-accent)]" : "bg-[var(--color-surface-2)] text-[var(--color-muted)]"}`}>{reqLabel(c.requirement)}</span>
                     </div>
                     <div className="text-[12px] text-[var(--color-muted)] truncate">{c.purpose}</div>
-                    {active && (
+                    {c.delivery === "external" && c.detail && <div className="mono text-[10.5px] text-[var(--color-muted)] truncate">{c.detail}</div>}
+                    {pct != null && (
                       <div className="mt-1.5 h-1.5 rounded-full bg-[var(--color-surface-2)] overflow-hidden">
-                        <div className="h-full bg-[var(--color-accent)] transition-[width] duration-200" style={{ width: `${prog!.pct[c.id] ?? 0}%` }} />
+                        <div className="h-full bg-[var(--color-accent)] transition-[width] duration-200" style={{ width: `${pct}%` }} />
                       </div>
                     )}
                   </div>
@@ -3931,19 +3970,20 @@ function FirstRun() {
 
         <div className="mt-6 flex items-center gap-3">
           {status && !status.ready && (
-            <button onClick={() => download([...sel])} disabled={busy || sel.size === 0}
+            <button onClick={() => download(selectedComps.filter((c) => c.delivery === "download" && !c.installed).map((c) => c.id))} disabled={busy || sel.size === 0 || noSpace} title={noSpace ? t("downloads.noSpace", { need: fmtBytes(selectedSpace), free: fmtBytes(status.freeBytes ?? 0) }) : undefined}
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-sm font-semibold disabled:opacity-40 hover:brightness-105">
               {busy ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
               {t("setup.download")} {selectedBytes > 0 && <span className="opacity-80">· {fmtBytes(selectedBytes)}</span>}
             </button>
           )}
-          {busy && (
-            <button onClick={() => api.setupCancel().catch(() => {})}
-              className="inline-flex items-center gap-1.5 px-3 py-2.5 rounded-lg border border-[var(--color-border)] text-sm text-[var(--color-muted)] hover:text-[var(--color-text)]">
-              <Square size={14} />{t("setup.cancel")}</button>
-          )}
           {!busy && (
-            <button onClick={async () => { try { const r = await api.setupBrowse(); if (r.picked) { setStatus(r.status); setSel(new Set(r.status.components.filter((c) => c.delivery === "download" && !c.installed && c.requirement !== "optional").map((c) => c.id))); } } catch { /* ignore */ } }}
+            <button onClick={async () => {
+                try {
+                  const r = await api.setupBrowse();
+                  if (r.picked) { adopt(r.status); setPicked(null); }
+                  if (r.errors.length > 0) setErr(`${t("downloads.importErrors")} · ${r.errors.join("; ")}`);
+                } catch (e) { setErr(e instanceof SetupError ? `${errText(e.code)} · ${e.detail}` : String(e)); }
+              }}
               className="inline-flex items-center gap-1.5 px-3 py-2.5 rounded-lg border border-dashed border-[var(--color-border)] text-sm text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] transition-colors">
               <FolderDown size={14} />{t("settings.browseFolder")}</button>
           )}
@@ -3952,7 +3992,6 @@ function FirstRun() {
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-sm font-semibold hover:brightness-105">
               <Check size={16} />{t("setup.continue")}</button>
           )}
-          {busy && prog && <span className="mono text-[11px] text-[var(--color-muted)] truncate">{prog.msg} · {prog.overall.toFixed(0)}%</span>}
         </div>
       </motion.div>
     </div>

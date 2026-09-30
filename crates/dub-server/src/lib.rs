@@ -15,6 +15,9 @@ mod cloud_tts;
 mod cloud_voices;
 mod compose;
 mod credentials;
+#[cfg(test)]
+mod dll_imports;
+mod downloads;
 mod endpoints;
 mod guard;
 mod llm_provider;
@@ -168,8 +171,8 @@ pub struct AppState {
     pub models_root: PathBuf,
     /// Каталог голосов-паков + записей с микрофона. Env DUBENGINE_VOICES, иначе <repo>/voices.
     pub voices_dir: PathBuf,
-    /// Флаг отмены текущей setup-закачки (POST /setup/cancel взводит; download-loop его читает).
-    pub setup_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Фоновая закачка компонентов (мимо GPU-очереди джоб; состояние — в /setup/status).
+    pub downloads: downloads::Downloads,
 }
 
 /// Корень моделей: env DUBENGINE_MODELS_ROOT, иначе <repo_root>/models.
@@ -278,6 +281,7 @@ impl AppState {
         let voices_dir = std::env::var("DUBENGINE_VOICES")
             .map(PathBuf::from)
             .unwrap_or_else(|_| repo_root.join("voices"));
+        let downloads = downloads::Downloads::open(&repo_root);
         AppState {
             repo_root,
             workspace,
@@ -294,7 +298,7 @@ impl AppState {
             fonts_dir,
             models_root: mroot,
             voices_dir,
-            setup_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            downloads,
         }
     }
 
@@ -384,6 +388,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/setup/status", get(setup_status))
         .route("/setup/download", post(setup_download))
         .route("/setup/cancel", post(setup_cancel))
+        .route("/setup/remove", post(setup_remove))
+        .route("/setup/open-models", post(setup_open_models))
         .route("/setup/browse", post(setup_browse))
         .route("/pick-folder", post(pick_folder))
         .route("/setup/import", post(setup_import))
@@ -503,55 +509,118 @@ fn which_ffmpeg() -> bool {
         .unwrap_or(false)
 }
 
-// ─── /setup/status ; /setup/download ; /setup/cancel ────────────────────────
+// ─── /setup/status ; /setup/download ; /setup/cancel ; /setup/remove ; /setup/open-models ───────────
 
-/// GET /setup/status — статус каждого компонента (installed/missing/размер) + драйвер/готовность.
-/// Читает только диск (никаких моделей не грузит) — безопасно вызывать до любой закачки.
-async fn setup_status(State(st): State<AppState>) -> Json<Value> {
-    let root = st.repo_root.clone();
-    // ФС-обход в блокирующий пул (десятки stat-ов), чтобы не держать реактор.
-    let status = tokio::task::spawn_blocking(move || setup::setup_status(&root))
-        .await
-        .unwrap_or_else(|_| setup::setup_status(&st.repo_root));
-    Json(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
+/// Ответ на отказ закачки/удаления: HTTP-статус по коду + {code, detail}.
+fn dl_error_response(e: setup::DlError) -> Response {
+    let status = match e.code {
+        "busy" => StatusCode::CONFLICT,
+        "disk_space" => StatusCode::INSUFFICIENT_STORAGE,
+        "nothing_to_download" | "unknown_component" | "not_removable" | "no_ids" => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(json!({ "code": e.code, "detail": e.detail }))).into_response()
 }
 
-/// POST /setup/download {ids:[...]} — поставить джобу закачки выбранных компонентов; вернуть job_id.
-/// Прогресс — по SSE GET /jobs/{id}/events (та же машина, что analyze/render).
-async fn setup_download(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
-    let ids: Vec<String> = body
-        .get("ids")
+fn join_failure(e: tokio::task::JoinError) -> Response {
+    internal_error(e.to_string())
+}
+
+fn body_ids(body: &Value) -> Vec<String> {
+    body.get("ids")
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_default();
-    if ids.is_empty() {
-        return (StatusCode::BAD_REQUEST, "ids пуст").into_response();
-    }
-    let root = st.repo_root.clone();
-    let cancel_flag = st.setup_cancel.clone();
-    cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst); // свежий старт
+        .unwrap_or_default()
+}
 
-    let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
-        let cancel = {
-            let cf = cancel_flag.clone();
-            let ctl = jobs::current();
-            move || {
-                cf.load(std::sync::atomic::Ordering::SeqCst) || ctl.as_ref().is_some_and(|c| c.is_cancelled())
-            }
-        };
-        let cb = |ev: Value| progress(ev);
-        setup::download_components(&root, &ids, &cancel, &cb)
-    });
-    match st.jobs.enqueue(jobs::JobMeta::new(jobs::JobKind::Download, None), job).await {
-        Ok(job_id) => Json(json!({ "job_id": job_id })).into_response(),
-        Err(e) => enqueue_error(e),
+/// Полный статус «Первого запуска» с фоновой закачкой (ФС-обход и первая проба драйвера — в блокирующем пуле).
+/// Ошибка — текст для ответа 500 (internal_error).
+async fn full_setup_status(st: &AppState) -> Result<Value, String> {
+    let root = st.repo_root.clone();
+    let mut status = tokio::task::spawn_blocking(move || setup::setup_status(&root))
+        .await
+        .map_err(|e| e.to_string())?;
+    status.active = st.downloads.active();
+    serde_json::to_value(status).map_err(|e| e.to_string())
+}
+
+fn internal_error(detail: String) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "code": "internal", "detail": detail }))).into_response()
+}
+
+/// GET /setup/status — статус каждого компонента (installed/missing/размер/место), папка моделей и свободное
+/// место, видеокарта против CUDA 13 и фоновая закачка (active). Читает только диск — безопасно до закачки.
+async fn setup_status(State(st): State<AppState>) -> Response {
+    match full_setup_status(&st).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
-/// POST /setup/cancel — взвести флаг отмены текущей закачки (download-loop прервётся на следующем чанке).
+/// POST /setup/download {ids:[...]} — запустить фоновую закачку (мимо GPU-очереди): {download}. Идущая
+/// закачка — 409 busy, нехватка места — 507 disk_space. Прогресс — в GET /setup/status (active).
+async fn setup_download(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
+    let ids = body_ids(&body);
+    if ids.is_empty() {
+        return dl_error_response(setup::DlError::new("no_ids", "ids пуст"));
+    }
+    let dl = st.downloads.clone();
+    match tokio::task::spawn_blocking(move || dl.start(ids)).await {
+        Ok(Ok(job)) => Json(json!({ "download": job })).into_response(),
+        Ok(Err(e)) => dl_error_response(e),
+        Err(e) => join_failure(e),
+    }
+}
+
+/// POST /setup/cancel — пауза фоновой закачки: скачанное остаётся и докачивается следующим /setup/download.
 async fn setup_cancel(State(st): State<AppState>) -> Json<Value> {
-    st.setup_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-    Json(json!({ "cancelled": true }))
+    Json(json!({ "paused": st.downloads.pause() }))
+}
+
+/// POST /setup/remove {ids:[...]} — удалить скачанные компоненты: {removed, freedBytes, errors, status}.
+async fn setup_remove(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
+    let ids = body_ids(&body);
+    if ids.is_empty() {
+        return dl_error_response(setup::DlError::new("no_ids", "ids пуст"));
+    }
+    let root = st.repo_root.clone();
+    let dl = st.downloads.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let report = setup::remove_components(&root, &ids)?;
+        dl.forget_covering(&ids);
+        Ok::<_, setup::DlError>(report)
+    })
+    .await;
+    let report = match res {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return dl_error_response(e),
+        Err(e) => return join_failure(e),
+    };
+    let status = match full_setup_status(&st).await {
+        Ok(v) => v,
+        Err(e) => return internal_error(e),
+    };
+    Json(json!({ "removed": report.removed, "freedBytes": report.freed_bytes, "errors": report.errors, "status": status }))
+        .into_response()
+}
+
+/// Открыть каталог в проводнике (без выделения файла).
+fn open_folder(dir: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let cmd = "explorer.exe";
+    #[cfg(not(windows))]
+    let cmd = "xdg-open";
+    std::process::Command::new(cmd).arg(dir).spawn().map(|_| ())
+}
+
+/// POST /setup/open-models — открыть папку моделей в проводнике: {path}.
+async fn setup_open_models(State(st): State<AppState>) -> Response {
+    let dir = st.repo_root.join("models");
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| open_folder(&dir)) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "code": "open_failed", "detail": format!("{}: {e}", dir.display()) })))
+            .into_response();
+    }
+    Json(json!({ "path": dir.to_string_lossy() })).into_response()
 }
 
 /// ON-DEMAND: перед джобой догружаем компоненты, нужные ИМЕННО ДЛЯ ЭТОЙ функции/конфига, если их нет
@@ -610,13 +679,13 @@ fn ensure_job_components(
     let ctl = jobs::current();
     let cancel = move || ctl.as_ref().is_some_and(|c| c.is_cancelled());
     if !need.is_empty() {
-        setup::download_components(repo_root, &need, &cancel, progress)?;
+        setup::download_components(repo_root, &need, &cancel, progress).map_err(|e| e.detail)?;
     }
     if need_diar {
         if let Err(e) = setup::download_components(repo_root, &["sortformer".to_string()], &cancel, progress) {
             progress(json!({
                 "stage": "download",
-                "msg": format!("Модель диаризации не скачалась ({e}) — анализ пойдёт без разделения спикеров"),
+                "msg": format!("Модель диаризации не скачалась ({}) — анализ пойдёт без разделения спикеров", e.detail),
             }));
         }
     }
@@ -1237,34 +1306,51 @@ async fn voices_download_pack(State(st): State<AppState>) -> Response {
     }
 }
 
-/// POST /setup/browse — открыть нативный диалог выбора папки, импортировать оттуда готовые модели по
-/// маркерам (без докачки). {picked:bool, imported:[...], status}.
-async fn setup_browse(State(st): State<AppState>, Json(body): Json<Value>) -> Json<Value> {
+/// POST /setup/browse — открыть нативный диалог выбора папки и импортировать оттуда готовые веса (без
+/// докачки): {picked, imported, files, errors, status}.
+async fn setup_browse(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
     let root = st.repo_root.clone();
     let only = body.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
     let res = tokio::task::spawn_blocking(move || {
         let title = if only.is_some() { "Файл(ы) модели" } else { "Папка с готовыми моделями" };
-        let dir = rfd::FileDialog::new().set_title(title).pick_folder();
-        match dir {
-            Some(d) => (true, setup::import_from_dir(&root, &d, only.as_deref())),
-            None => (false, Vec::new()),
-        }
+        rfd::FileDialog::new()
+            .set_title(title)
+            .pick_folder()
+            .map(|d| setup::import_from_dir(&root, &d, only.as_deref()))
     })
-    .await
-    .unwrap_or((false, Vec::new()));
-    Json(json!({ "picked": res.0, "imported": res.1, "status": setup::setup_status(&st.repo_root) }))
+    .await;
+    let report = match res {
+        Ok(r) => r,
+        Err(e) => return join_failure(e),
+    };
+    let status = match full_setup_status(&st).await {
+        Ok(v) => v,
+        Err(e) => return internal_error(e),
+    };
+    let picked = report.is_some();
+    let report = report.unwrap_or_default();
+    Json(json!({ "picked": picked, "imported": report.imported, "files": report.files, "errors": report.errors, "status": status }))
+        .into_response()
 }
 
-/// POST /setup/import {path, id?} — импортировать готовые модели из заданной папки (без диалога).
-async fn setup_import(State(st): State<AppState>, Json(body): Json<Value>) -> Json<Value> {
-    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let only = body.get("id").and_then(|v| v.as_str());
-    let imported = if path.is_empty() {
-        Vec::new()
-    } else {
-        setup::import_from_dir(&st.repo_root, std::path::Path::new(path), only)
+/// POST /setup/import {path, id?} — импортировать готовые веса из заданной папки (без диалога):
+/// {imported, files, errors, status}.
+async fn setup_import(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if path.is_empty() || !Path::new(&path).is_dir() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "code": "bad_path", "detail": format!("нет папки {path}") }))).into_response();
+    }
+    let only = body.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let root = st.repo_root.clone();
+    let report = match tokio::task::spawn_blocking(move || setup::import_from_dir(&root, Path::new(&path), only.as_deref())).await {
+        Ok(r) => r,
+        Err(e) => return join_failure(e),
     };
-    Json(json!({ "imported": imported, "status": setup::setup_status(&st.repo_root) }))
+    let status = match full_setup_status(&st).await {
+        Ok(v) => v,
+        Err(e) => return internal_error(e),
+    };
+    Json(json!({ "imported": report.imported, "files": report.files, "errors": report.errors, "status": status })).into_response()
 }
 
 // ─── POST /projects (multipart video upload) ────────────────────────────────

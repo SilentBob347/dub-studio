@@ -400,10 +400,32 @@ async fn status_summary() -> Value {
         Err(problem) => summary["jobs_error"] = problem.into(),
     }
     match setup {
-        Ok(setup) => summary["models"] = compact_setup(&setup),
+        Ok(setup) => {
+            if let Some(download) = download_row(&setup) {
+                if let Some(jobs) = summary["jobs"].as_array_mut() {
+                    jobs.push(download);
+                }
+            }
+            summary["models"] = compact_setup(&setup);
+        }
         Err(problem) => summary["models_error"] = problem.into(),
     }
     summary
+}
+
+/// The models download runs beside the job queue: while it goes it is shown and waited for as work of
+/// kind download.
+fn download_row(setup: &Value) -> Option<Value> {
+    let active = setup.get("active")?;
+    if active["status"] != "downloading" {
+        return None;
+    }
+    let (done, total) = (active["downloaded"].as_f64().unwrap_or(0.0), active["total"].as_f64().unwrap_or(0.0));
+    Some(json!({
+        "id": active["id"], "kind": "download", "status": "running", "stage": active["phase"],
+        "pct": if total > 0.0 { Value::from((done / total * 100.0).round()) } else { Value::Null },
+        "components": active["ids"], "waiting_seconds": active["waitingS"],
+    }))
 }
 
 /// The kinds of work a status summary still has running or waiting.
@@ -430,7 +452,7 @@ async fn wait_for(args: &Value) -> Result<Value, String> {
             Some(job) => {
                 let state = fetch(&format!("/jobs/{}", segment(job)))
                     .await
-                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_resume, models_download or voices_download_pack returned. Wait for other work with until."))?;
+                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_resume or voices_download_pack returned (a models download is waited for with until download). Wait for other work with until."))?;
                 if state.get("status").and_then(Value::as_str).is_none() {
                     return Err(format!("The job {job} has no status: {state}"));
                 }
@@ -736,7 +758,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "studio_wait",
-                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_resume, models_download or voices_download_pack returned it), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, download, voices_pack - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
+                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_resume or voices_download_pack returned it), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, download, voices_pack - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
                 schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "download", "voices_pack"] }, "seconds": { "type": "integer" } }), &[]),
                 call: |_| composite("wait"),
             },
@@ -780,15 +802,21 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "models_download",
-                description: "Download components by id (from models_status): models, their quantisations, engines and runtimes. A job: studio_wait with its job_id. Resumes what is partly there.",
+                description: "Download components by id (from models_status): models, their quantisations, engines and runtimes. It runs in the background beside the jobs, not as a job: studio_wait until download waits for it, models_status shows it. Resumes what is partly there; every file is checked against its pinned SHA-256.",
                 schema: || object(json!({ "ids": ids("component ids from models_status") }), &["ids"]),
                 call: |args| post("/setup/download".into(), json!({ "ids": args.get("ids").cloned().unwrap_or_default() })),
             },
             Tool {
                 name: "models_cancel_download",
-                description: "Stop the running models download at its next chunk.",
+                description: "Pause the running models download: what came is kept, and models_download with the same ids continues from there.",
                 schema: nothing,
                 call: |_| post("/setup/cancel".into(), json!({})),
+            },
+            Tool {
+                name: "models_remove",
+                description: "Delete downloaded components by id (from models_status) with what is partly downloaded, to free disk space; a stage whose chosen variant is removed falls back to an installed one. Answers what was removed, the bytes freed, the errors and the models' status.",
+                schema: || object(json!({ "ids": ids("component ids from models_status") }), &["ids"]),
+                call: |args| post("/setup/remove".into(), json!({ "ids": args.get("ids").cloned().unwrap_or_default() })),
             },
             Tool {
                 name: "models_import",
@@ -2057,6 +2085,7 @@ mod tests {
         ("GET", "/health", "the service's identity for the desktop shell's second launch: initialize names the server and its version"),
         ("PATCH", "/engine/opts", "an echo kept for the old page: models_select and settings_set choose the models"),
         ("POST", "/setup/browse", "a folder dialog for the person: models_import takes the path"),
+        ("POST", "/setup/open-models", "opens Explorer for the person: studio_paths names the models folder"),
         ("POST", "/pick-folder", "a folder dialog for the person: the agent names the folder"),
         ("GET", "/record/devices", "the person's microphone"),
         ("GET", "/record/level", "the person's microphone"),

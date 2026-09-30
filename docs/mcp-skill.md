@@ -44,7 +44,7 @@ connected and the address to paste.
   the required models are there.
 - **Long work is a job**: `project_analyze`, `project_dub_audio`, `project_render`,
   `project_export_lang`, `project_retranslate`, `project_remix`, `project_resume`,
-  `models_download`, `voices_download_pack`. Each answers a `job_id`; then `studio_wait`
+  `voices_download_pack`. Each answers a `job_id`; then `studio_wait`
   with it (or `until: analyze | dub_audio | render | export_lang | retranslate | remix |
   download | voices_pack | idle`) instead of polling. It returns within a minute (30 s by
   default, 55 at most) with how far the work got; call it again. `job_get` and `jobs_list`
@@ -153,8 +153,10 @@ for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` s
 - **studio**: `studio_status`, `studio_wait`, `studio_system` (card, video memory, RAM),
   `studio_capabilities`.
 - **jobs**: `jobs_list`, `job_get`, `job_cancel`.
-- **models**: `models_status`, `models_download`, `models_cancel_download`,
-  `models_import` (files already on disk), `models_select` (a quantisation or a recogniser).
+- **models**: `models_status`, `models_download` (runs in the background beside the jobs: wait with
+  `studio_wait` `until: download`), `models_cancel_download` (a pause: the same ids continue it),
+  `models_remove` (frees disk space), `models_import` (files already on disk), `models_select`
+  (a quantisation or a recogniser).
 - **settings**: `settings_get`, `settings_set`, `engine_presets_get`,
   `engine_preset_apply`, `proxy_test`, `proxy_settings_get`, `proxy_settings_set`,
   `fonts_list`, `caption_presets_list`, `launch_defaults_get`, `launch_defaults_set` (what the start

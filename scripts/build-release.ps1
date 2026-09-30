@@ -66,7 +66,7 @@ $releaseDir = Join-Path $repoRoot "release\$Version"
 $targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $tauriRoot 'target' }
 $bundleRoot = Join-Path $targetRoot 'release\bundle'
 
-$bundledRuntime = 'MSVCP140.dll', 'VCOMP140.DLL', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll'
+$bundledRuntime = 'MSVCP140.dll', 'MSVCP140_1.dll', 'VCOMP140.DLL', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll'
 $bundledOcr = 'det.onnx', 'cls.onnx', 'rec_cyrillic.onnx', 'rec_cyrillic.dict.txt', 'rec_ch.onnx', 'rec_ch.dict.txt'
 
 if ([string]::IsNullOrWhiteSpace($ModelsSource)) { $ModelsSource = $repoRoot }
@@ -162,6 +162,13 @@ try {
     foreach ($file in $bundledOcr) { Copy-Required (Join-Path $modelsRoot "ocr\$file") $stagedOcr }
     Copy-Required (Join-Path $repoRoot 'tools\openrouter-helper\openrouter-helper.exe') $stagedHelper
     Write-Host "[OK] bundle staged in $stagingRoot"
+    $env:DUB_RELEASE_STAGING = $stagingRoot
+    try {
+        Invoke-Step 'bundle check against the manifest' { cargo test -p dub-server --lib setup::tests::the_release_staging_carries_every_bundled_file -- --ignored }
+    }
+    finally {
+        Remove-Item Env:DUB_RELEASE_STAGING
+    }
 
     if ($StopAfterStaging) {
         Write-Host '[OK] stopped after staging'
