@@ -79,6 +79,10 @@ pub fn store_local_server_key(address: &str, key: Option<&str>) -> Result<bool> 
 
 pub(crate) fn store_local_server_key_in(dir: &Path, address: &str, key: Option<&str>) -> Result<bool> {
     let Some(key) = key.map(str::trim).filter(|key| !key.is_empty()) else {
+        let stored = read_secret(dir, LOCAL_SERVER_FILE).and_then(|text| serde_json::from_str::<ServerKeyRecord>(&text).ok());
+        if stored.is_some_and(|record| record.address != dub_llm::server_base(address)) {
+            return Ok(false);
+        }
         return write_secret(dir, LOCAL_SERVER_FILE, None, "");
     };
     if key.contains(['\r', '\n']) {
@@ -302,6 +306,8 @@ mod tests {
         assert!(store_local_server_key_in(&dir, "http://127.0.0.1:11434", Some("other")).unwrap());
         assert_eq!(local_server_key_in(&dir, lan), None, "a key saved for another address replaces the old one");
         assert_eq!(local_server_key_in(&dir, "http://127.0.0.1:11434").as_deref(), Some("other"));
+        assert!(!store_local_server_key_in(&dir, lan, None).unwrap());
+        assert_eq!(local_server_key_in(&dir, "http://127.0.0.1:11434").as_deref(), Some("other"), "removing the key of another address keeps this one");
 
         fs::write(dir.join(LOCAL_SERVER_FILE), "bare-key").unwrap();
         assert_eq!(local_server_key_in(&dir, lan), None, "a key without its address goes nowhere");
