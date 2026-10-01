@@ -18,8 +18,10 @@ release notes on GitHub are taken from the release's section.
   the same file answers from the finished project. Subtitles are written as SRT, WebVTT, JSON with word
   timings or ASS styled as the render burns them.
 - **The agent works in the studio's window while you watch.** It opens a project in the editor, selects
-  and edits lines, cuts and joins them, moves them on the timeline, restyles the subtitles, plays the
-  dub and starts the export; every step is highlighted and signed «Agent: …». It sees the window as a
+  and edits lines, cuts and joins them, moves them on the timeline, restyles the subtitles and switches
+  their languages, shortens lines to fit, picks and pins takes, edits the glossary, plays the dub and
+  starts the export; every step is highlighted and signed «Agent: …». It can also record a voice from
+  your microphone, open the models folder and save text files into a project. It sees the window as a
   picture and as a list of controls; a key or a password field reads only as filled or empty. What an
   agent or another window saves appears at once, and undo never writes over it.
 - **Cut and join lines** in the editor: scissors at the playhead and join with the next line; the

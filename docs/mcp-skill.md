@@ -290,8 +290,18 @@ without it they answer that the window is not open, and everything else still wo
   line at a moment (the playhead by default), `editor_segments_merge` joins neighbouring
   lines, `editor_segment_move` moves a line along the timeline keeping its length. The look:
   `editor_mode`, `editor_style`, `editor_preset`, `editor_blur_add`, `editor_blur_update`,
-  `editor_title_add`, `editor_title_update`. Each is one step of the window's undo:
+  `editor_title_add`, `editor_title_update`, `editor_subtitles_content` (the subtitle languages,
+  both with the original's line styled). Each is one step of the window's undo:
   `editor_undo`, `editor_redo`.
+- **Fit and takes**: `editor_shorten` shortens one line or all that do not fit, as the line's
+  and the list's buttons do (it answers at once; `studio_wait until: shorten`); `editor_takes`
+  unfolds a line's takes under it, `editor_take_select` picks one (the window mixes again:
+  `studio_wait until: dub_audio`), `editor_take_pin` pins it.
+- **Glossary**: `editor_glossary` opens or closes its window, `editor_glossary_set` changes it
+  there as editing and Save do, `editor_glossary_extract` collects candidates there for the
+  user to confirm (`studio_wait until: glossary`; keep the chosen ones with
+  `editor_glossary_set` and `merge: true`). They refuse while the window holds the user's
+  unsaved edits.
 - **Export**: `editor_export` starts the render as the Export button does; the user watches
   it in the Files panel, and Explorer shows the file when it is done. `editor_state` shows
   its status; `studio_wait until: render` waits for it.
@@ -341,7 +351,7 @@ without it they answer that the window is not open, and everything else still wo
 - **models**: `models_status`, `models_download` (runs in the background beside the jobs: wait with
   `studio_wait` `until: download`), `models_cancel_download` (a pause: the same ids continue it),
   `models_remove` (frees disk space), `models_import` (files already on disk), `models_select`
-  (a quantisation or a recogniser).
+  (a quantisation or a recogniser), `models_folder_open` (the folder in Explorer, for the user).
 - **settings**: `settings_get`, `settings_set`, `engine_presets_get`,
   `engine_preset_apply`, `proxy_test`, `proxy_settings_get`, `proxy_settings_set`,
   `fonts_list`, `caption_presets_list`, `launch_defaults_get`, `launch_defaults_set` (what the start
@@ -365,7 +375,8 @@ without it they answer that the window is not open, and everything else still wo
 - **one call on a file**: `transcribe_file`, `translate_file`, `dub_file`, `separate_file`,
   `detect_text_file`, and `export_subtitles` for a project's subtitles.
 - **files**: `project_files`, `project_export_text` (SRT, VTT, ASS, TXT, JSON; bilingual),
-  `project_save_output`, `project_open_output`, `project_reveal`.
+  `project_save_output`, `project_open_output`, `project_reveal`, `project_save_text` (a text file
+  into the project's folder, e.g. the glossary as TSV).
 - **lines**: `segment_update`, `segment_add`, `segments_delete`, `segments_hide`,
   `segments_keep_original`, `segments_reorder`, `segment_regen`, `segments_regen_all`,
   `segment_split` (cut a line in two), `segments_merge` (join neighbours),
@@ -383,7 +394,9 @@ without it they answer that the window is not open, and everything else still wo
 - **glossary**: `glossary_get`, `glossary_set`, `glossary_extract`, `series_glossary_get`,
   `series_glossary_set`.
 - **voices**: `voices_list`, `voices_catalog`, `voice_download`, `voices_download_pack`,
-  `voice_rename`, `voice_delete`, `voice_from_speaker`, `voice_slots_assign`.
+  `voice_rename`, `voice_delete`, `voice_from_speaker`, `voice_slots_assign`; a voice from the
+  user's microphone: `voice_record_devices`, `voice_record_start`, `voice_record_level`,
+  `voice_record_stop`.
 - **the window**: `ui_screenshot`, `ui_read_page`, `ui_click`, `ui_type`, `ui_select`,
   `ui_press_key`, `ui_scroll`, `ui_navigate`, `ui_open_settings`, `ui_open_help`,
   `ui_notify`, `ui_console`.
@@ -392,4 +405,6 @@ without it they answer that the window is not open, and everything else still wo
   `editor_segment_update`, `editor_segment_add`, `editor_segments_delete`,
   `editor_segment_split`, `editor_segments_merge`, `editor_segment_move`, `editor_mode`,
   `editor_style`, `editor_preset`, `editor_blur_add`, `editor_blur_update`,
-  `editor_title_add`, `editor_title_update`, `editor_undo`, `editor_redo`, `editor_export`.
+  `editor_title_add`, `editor_title_update`, `editor_undo`, `editor_redo`, `editor_export`,
+  `editor_subtitles_content`, `editor_shorten`, `editor_takes`, `editor_take_select`,
+  `editor_take_pin`, `editor_glossary`, `editor_glossary_set`, `editor_glossary_extract`.

@@ -1,12 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { BookA, BookUp, Check, Download, Loader2, Plus, RotateCw, Search, Sparkles, Trash2, TriangleAlert, Upload, X } from "lucide-react";
-import { api, ApiError, JobCancelledError, type GlossaryEntry, type Project } from "../lib/api";
+import { api, ApiError, JobCancelledError, type GlossaryEntry, type GlossaryPut, type Project, type ProjectGlossary } from "../lib/api";
 import { watchLocal } from "../lib/jobs";
-import { editedEntry } from "../lib/glossaryEntry";
+import { editedEntry, servesLang } from "../lib/glossaryEntry";
+import { bridgeError, failed, takeArgs, useBridgeCommand } from "../lib/mcpBridge";
 import { useStore } from "../store";
 import ConfirmDialog from "./ConfirmDialog";
+import { EDITOR_FIELDS } from "./editorBridge";
+
+/** What the open glossary window lets the agent's commands do. */
+type GlossaryControl = {
+  dirty: boolean;
+  busy: boolean;
+  show: (g: ProjectGlossary) => Promise<void>;
+  extract: () => void;
+};
 
 type Row = { key: number; entry: GlossaryEntry; asr: string };
 
@@ -28,7 +38,9 @@ const CELL = "w-full min-w-0 bg-[var(--color-bg)]/60 border border-[var(--color-
 const BTN = "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] text-[12px] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-40 disabled:hover:border-[var(--color-border)] disabled:hover:text-inherit transition-colors";
 
 // Глоссарий проекта: термины для перевода, распознавания и озвучки; «Собрать из текста», TSV, профиль сериала.
-export default function GlossaryPanel({ pid, project, onClose }: { pid: string; project: Project; onClose: () => void }) {
+export default function GlossaryPanel({ pid, project, onClose, control }: {
+  pid: string; project: Project; onClose: () => void; control?: MutableRefObject<GlossaryControl | null>;
+}) {
   const { t } = useTranslation();
   const setProject = useStore((s) => s.setProject);
   const bump = useStore((s) => s.bump);
@@ -69,6 +81,7 @@ export default function GlossaryPanel({ pid, project, onClose }: { pid: string; 
     setSaved(JSON.stringify(g.entries));
     setStale(g.stale);
     setCastingRef(g.casting_ref);
+    setCandidates((cs) => cs.filter((c) => !g.entries.some((e) => norm(e.term) === norm(c.term))));
   };
   useEffect(() => {
     api.glossary(pid).then(load, (e) => setError(errText(e)));
@@ -158,6 +171,11 @@ export default function GlossaryPanel({ pid, project, onClose }: { pid: string; 
     setCandidates((cs) => cs.filter((c) => !list.includes(c)));
   };
   const close = () => (dirty ? setConfirmClose(true) : onClose());
+  useEffect(() => {
+    if (!control) return;
+    control.current = { dirty, busy: busy !== null, show: async (g) => { load(g); await refresh(); }, extract: () => { void doExtract(); } };
+  });
+  useEffect(() => () => { if (control) control.current = null; }, [control]);
 
   return (
     <div className="fixed inset-0 z-[60] grid place-items-center glass-scrim anim-fade" onClick={close}>
@@ -264,6 +282,10 @@ export default function GlossaryPanel({ pid, project, onClose }: { pid: string; 
                         {r.entry.source === "auto" && (
                           <span title={t("glossary.autoHint")} className="shrink-0 rounded px-1 py-px text-[9px] uppercase bg-[var(--color-accent)]/20 text-[var(--color-accent)]">{t("glossary.auto")}</span>
                         )}
+                        {!servesLang(r.entry.lang, lang) && (
+                          <span title={t("glossary.otherLang", { lang: r.entry.lang, target: lang })}
+                            className="shrink-0 rounded px-1 py-px text-[9px] uppercase bg-[var(--color-warn)]/20 text-[var(--color-warn)]">{r.entry.lang}</span>
+                        )}
                       </div>
                     </td>
                     <td className="px-1">
@@ -320,6 +342,40 @@ export default function GlossaryPanel({ pid, project, onClose }: { pid: string; 
 export function GlossaryButton({ pid, project, wide = false }: { pid: string; project: Project; wide?: boolean }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const control = useRef<GlossaryControl | null>(null);
+  // Окно глоссария для команды агента: открыть и дождаться, пока панель смонтируется.
+  const panel = async (command: string): Promise<GlossaryControl> => {
+    setOpen(true);
+    for (let i = 0; i < 50 && !control.current; i++) await new Promise((done) => window.setTimeout(done, 40));
+    if (!control.current) throw failed(command, "the glossary window did not open");
+    return control.current;
+  };
+  useBridgeCommand("editor_glossary", async (given) => {
+    takeArgs("editor_glossary", given, EDITOR_FIELDS.editor_glossary);
+    const want = given.open ?? true;
+    if (typeof want !== "boolean") throw bridgeError("bad_value", { command: "editor_glossary", field: "open", expected: "true or false" });
+    if (want) await panel("editor_glossary");
+    else if (control.current?.dirty) throw bridgeError("glossary_unsaved");
+    else setOpen(false);
+    return api.glossary(pid).catch((problem: unknown) => { throw failed("editor_glossary", problem); });
+  });
+  useBridgeCommand("editor_glossary_set", async (given) => {
+    takeArgs("editor_glossary_set", given, EDITOR_FIELDS.editor_glossary_set);
+    const ui = await panel("editor_glossary_set");
+    if (ui.dirty) throw bridgeError("glossary_unsaved");
+    if (ui.busy) throw bridgeError("glossary_busy");
+    const g = await api.saveGlossary(pid, given as GlossaryPut).catch((problem: unknown) => { throw failed("editor_glossary_set", problem); });
+    await ui.show(g);
+    return g;
+  });
+  useBridgeCommand("editor_glossary_extract", async (given) => {
+    takeArgs("editor_glossary_extract", given, EDITOR_FIELDS.editor_glossary_extract);
+    const ui = await panel("editor_glossary_extract");
+    if (ui.dirty) throw bridgeError("glossary_unsaved");
+    if (ui.busy) throw bridgeError("glossary_busy");
+    ui.extract();
+    return { started: true };
+  });
   return (
     <>
       <button onClick={() => setOpen(true)} title={t("glossary.openHint")}
@@ -328,7 +384,7 @@ export function GlossaryButton({ pid, project, wide = false }: { pid: string; pr
           : "inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-[var(--color-surface-2)] border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors shrink-0"}>
         <BookA size={wide ? 13 : 12} />{t("glossary.open")}
       </button>
-      {open && createPortal(<GlossaryPanel pid={pid} project={project} onClose={() => setOpen(false)} />, document.body)}
+      {open && createPortal(<GlossaryPanel pid={pid} project={project} onClose={() => setOpen(false)} control={control} />, document.body)}
     </>
   );
 }

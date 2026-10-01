@@ -16,6 +16,8 @@ const SHOWN = [
   "editor_segment_update", "editor_segment_add", "editor_segments_delete", "editor_segment_split", "editor_segments_merge",
   "editor_segment_move", "editor_mode", "editor_style", "editor_preset", "editor_blur_add", "editor_blur_update",
   "editor_title_add", "editor_title_update", "editor_undo", "editor_redo", "editor_export",
+  "editor_subtitles_content", "editor_takes", "editor_take_select", "editor_take_pin", "editor_shorten",
+  "editor_glossary", "editor_glossary_set", "editor_glossary_extract",
 ] as const;
 type Shown = (typeof SHOWN)[number];
 

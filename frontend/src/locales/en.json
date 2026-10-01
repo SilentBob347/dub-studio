@@ -1011,7 +1011,15 @@
       "editor_title_update": "changes a title",
       "editor_undo": "undoes an edit",
       "editor_redo": "redoes an edit",
-      "editor_export": "starts the export"
+      "editor_export": "starts the export",
+      "editor_subtitles_content": "changes the subtitle languages",
+      "editor_takes": "shows a line's takes",
+      "editor_take_select": "picks a take",
+      "editor_take_pin": "pins a take",
+      "editor_shorten": "shortens lines to fit",
+      "editor_glossary": "opens the glossary",
+      "editor_glossary_set": "edits the glossary",
+      "editor_glossary_extract": "collects glossary terms"
     }
   },
   "jobs": {
@@ -1100,6 +1108,7 @@
     "colNote": "Note",
     "auto": "auto",
     "autoHint": "Collected from the text: check it — editing makes it yours",
+    "otherLang": "This entry's translation and pronunciation are in {{lang}}, the project in {{target}}, so they are not used. Edit them to write them in {{target}}.",
     "remove": "Delete term",
     "count": "Terms: {{n}}",
     "unsaved": "not saved",

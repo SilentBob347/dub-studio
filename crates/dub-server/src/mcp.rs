@@ -993,6 +993,12 @@ fn tools() -> &'static [Tool] {
                 call: |args| post("/setup/remove".into(), json!({ "ids": args.get("ids").cloned().unwrap_or_default() })),
             },
             Tool {
+                name: "models_folder_open",
+                description: "Open the models folder in Explorer, for the user (to put model files there by hand or see what takes the disk); answers its path.",
+                schema: nothing,
+                call: |_| post("/setup/open-models".into(), json!({})),
+            },
+            Tool {
                 name: "models_import",
                 description: "Take model files already on this computer instead of downloading them: every component found in the folder is copied into the studio's models; id limits it to one component. Answers what was imported and the models' status.",
                 schema: || object(json!({ "path": { "type": "string", "description": "folder with the model files" }, "id": { "type": "string", "description": "one component id from models_status" } }), &["path"]),
@@ -1482,6 +1488,15 @@ fn tools() -> &'static [Tool] {
                 call: |args| post(project_path(args, "/open")?, json!({})),
             },
             Tool {
+                name: "project_save_text",
+                description: "Write a text file into the project's folder and show it selected in Explorer, for the user: name (letters, digits, dot, dash and underscore, e.g. glossary.tsv) and text - a glossary from glossary_get with format tsv, notes or a script. Answers the file's path.",
+                schema: || object(json!({ "pid": pid(), "name": { "type": "string" }, "text": { "type": "string" } }), &["pid", "name", "text"]),
+                call: |args| {
+                    let path = project_path(args, "/save-text")?;
+                    post(path, json!({ "name": text(args, "name")?, "text": args.get("text").and_then(Value::as_str).unwrap_or("") }))
+                },
+            },
+            Tool {
                 name: "project_reveal",
                 description: "Show one of the project's files (name, output.mp4 by default) selected in Explorer, for the user.",
                 schema: || object(json!({ "pid": pid(), "name": { "type": "string" } }), &["pid"]),
@@ -1927,6 +1942,36 @@ fn tools() -> &'static [Tool] {
                 description: "Download the voice pack into the library. A job: studio_wait with its job_id.",
                 schema: nothing,
                 call: |_| post("/voices/download-pack".into(), json!({})),
+            },
+            Tool {
+                name: "voice_record_devices",
+                description: "The microphones the studio can record a voice from.",
+                schema: nothing,
+                call: |_| get("/record/devices".into()),
+            },
+            Tool {
+                name: "voice_record_start",
+                description: "Start recording a new library voice from the user's microphone: name of the voice, device from voice_record_devices (omitted: the default microphone). Ask the user to read 10-20 seconds of clear speech, watch voice_record_level, then voice_record_stop keeps it. ok false names why it could not start.",
+                schema: || object(json!({ "name": { "type": "string" }, "device": { "type": "string" } }), &["name"]),
+                call: |args| {
+                    let mut body = json!({ "name": text(args, "name")? });
+                    if let Some(device) = args.get("device").and_then(Value::as_str) {
+                        body["device"] = json!(device);
+                    }
+                    post("/record/start".into(), body)
+                },
+            },
+            Tool {
+                name: "voice_record_level",
+                description: "How loud the microphone hears the user now, 0 to 1, while voice_record_start records.",
+                schema: nothing,
+                call: |_| get("/record/level".into()),
+            },
+            Tool {
+                name: "voice_record_stop",
+                description: "Stop the recording and keep it as the voice: answers its name (null when nothing was recorded) and the library's voices.",
+                schema: nothing,
+                call: |_| post("/record/stop".into(), json!({})),
             },
             Tool {
                 name: "voice_rename",

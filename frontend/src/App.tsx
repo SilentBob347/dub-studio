@@ -2704,20 +2704,34 @@ function Editor() {
     finally { setShortening(null); }
   }
   // Выбрать дубль из истории фразы: без переозвучки, только пересборка микса. Дубль другого текста возвращает текст (undo — снапшот).
+  // Отказ выбора получает вызвавший; пересборка микса идёт следом.
+  async function selectTake(segId: string, n: number): Promise<Project> {
+    pushHistory(p); setRegenId(segId); setRendered(false); pushActivity(t("takes.selecting"));
+    let fresh: Project;
+    try { fresh = await api.patch(pid, { op: "take_select", id: segId, take: n }); }
+    catch (e) { setRegenId(null); throw e; }
+    setProject(fresh); bump();
+    void (async () => {
+      try {
+        const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);
+        await watchDub(job_id);
+        setProject(await api.getProject(pid)); bumpDub(); playSfx("notify");
+      } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
+      finally { setRegenId(null); }
+    })();
+    return fresh;
+  }
   async function doTakeSelect(segId: string, n: number) {
     if (regenId) return;
-    pushHistory(p); setRegenId(segId); setRendered(false); pushActivity(t("takes.selecting"));
-    try {
-      setProject(await api.patch(pid, { op: "take_select", id: segId, take: n })); bump();
-      const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);
-      await watchDub(job_id);
-      setProject(await api.getProject(pid)); bumpDub(); playSfx("notify");
-    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
-    finally { setRegenId(null); }
+    try { await selectTake(segId, n); } catch (e) { await surfaceErr(e); }
+  }
+  async function pinTake(segId: string, pinned: boolean): Promise<Project> {
+    const fresh = await api.patch(pid, { op: "take_pin", id: segId, pinned });
+    setProject(fresh);
+    return fresh;
   }
   async function doTakePin(segId: string, pinned: boolean) {
-    try { setProject(await api.patch(pid, { op: "take_pin", id: segId, pinned })); }
-    catch (e) { await surfaceErr(e); }
+    try { await pinTake(segId, pinned); } catch (e) { await surfaceErr(e); }
   }
   // hide/del/keep одной строки: патч проекта (без авто-ре-озвучки; рендер — по кнопке)
   async function segOp(segId: string, op: string) {
@@ -2923,6 +2937,8 @@ function Editor() {
     setLane: (next) => { setLane(next); setCastView(false); setCompare(false); },
     selectLines: setSelSegs, selectBlur: setSelBlur, selectTitle: setSelTitle,
     edit: applyEdit, undo: doUndo, redo: doRedo, exportVideo: doExport,
+    openTakes: setTakesOpen, selectTake, pinTake, shortening: shortening !== null,
+    shorten: (target) => { void doShorten(target, "ids" in target && target.ids.length === 1 ? target.ids[0] : "__all__"); },
   });
   useProjectSync(pid, () => draftOf(burstRef.current));
   useChanged(VOICES_CHANGED, () => {

@@ -1023,7 +1023,15 @@
       "editor_title_update": "altera um título",
       "editor_undo": "desfaz uma edição",
       "editor_redo": "refaz uma edição",
-      "editor_export": "inicia a exportação"
+      "editor_export": "inicia a exportação",
+      "editor_subtitles_content": "muda os idiomas das legendas",
+      "editor_takes": "mostra as tomadas de uma fala",
+      "editor_take_select": "escolhe uma tomada",
+      "editor_take_pin": "fixa uma tomada",
+      "editor_shorten": "encurta falas para caber",
+      "editor_glossary": "abre o glossário",
+      "editor_glossary_set": "edita o glossário",
+      "editor_glossary_extract": "coleta termos do glossário"
     }
   },
   "jobs": {
@@ -1112,6 +1120,7 @@
     "colNote": "Nota",
     "auto": "auto",
     "autoHint": "Coletado do texto: confira — ao editar, passa a ser seu",
+    "otherLang": "A tradução e a pronúncia desta entrada estão em {{lang}} e o projeto em {{target}}, então não são usadas. Edite-as para gravá-las em {{target}}.",
     "remove": "Excluir termo",
     "count": "Termos: {{n}}",
     "unsaved": "não salvo",

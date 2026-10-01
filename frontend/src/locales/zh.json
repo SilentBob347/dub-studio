@@ -999,7 +999,15 @@
       "editor_title_update": "修改标题",
       "editor_undo": "撤销编辑",
       "editor_redo": "重做编辑",
-      "editor_export": "开始导出"
+      "editor_export": "开始导出",
+      "editor_subtitles_content": "更改字幕语言",
+      "editor_takes": "显示该句的录音版本",
+      "editor_take_select": "选择录音版本",
+      "editor_take_pin": "固定录音版本",
+      "editor_shorten": "缩短句子以适配时长",
+      "editor_glossary": "打开术语表",
+      "editor_glossary_set": "编辑术语表",
+      "editor_glossary_extract": "收集术语"
     }
   },
   "jobs": {
@@ -1088,6 +1096,7 @@
     "colNote": "备注",
     "auto": "自动",
     "autoHint": "从文本收集：请检查——编辑后即为你的条目",
+    "otherLang": "此条目的译文和读音为 {{lang}}，而项目语言为 {{target}}，因此不会使用。修改后即按 {{target}} 保存。",
     "remove": "删除术语",
     "count": "术语：{{n}}",
     "unsaved": "未保存",

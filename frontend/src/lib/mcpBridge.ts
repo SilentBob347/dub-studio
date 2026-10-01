@@ -55,6 +55,9 @@ const MESSAGES = {
   no_frame: () => "The editor shows no frame now: the project is audio only, the finished video or the characters are shown, or the frame has not loaded; editor_seek first, or use project_frame.",
   busy: () => "The editor is voicing a line now; call again when it is done (editor_state).",
   exporting: () => "The window is already rendering this project; editor_state shows how far it got.",
+  shortening: () => "The window is shortening lines now; studio_wait until shorten, then call again.",
+  glossary_unsaved: () => "The glossary window holds the user's unsaved edits; ask them to save or close it first.",
+  glossary_busy: () => "The glossary window is saving, collecting terms or translating again; call again when it is done.",
   nothing_to_undo: () => "There is nothing to undo in the window.",
   nothing_to_redo: () => "There is nothing to redo in the window.",
   failed: (a: BridgeArgs) => `${a.command} failed: ${a.reason}`,
@@ -398,11 +401,12 @@ const builtIn: Record<string, Handler> = {
   },
   async type(args) {
     takeArgs("ui_type", args, ["ref", "text", "value", "submit"]);
+    if (typeof args.value !== "string") throw bridgeError("missing", { command: "ui_type", field: "value" });
     const element = find(args);
     element.scrollIntoView({ block: "center" });
     flash(element);
     element.focus();
-    setValue(element, String(args.value ?? ""));
+    setValue(element, args.value);
     if (args.submit) element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     element.blur();
     await settle();
@@ -410,9 +414,10 @@ const builtIn: Record<string, Handler> = {
   },
   async select(args) {
     takeArgs("ui_select", args, ["ref", "text", "value"]);
+    if (typeof args.value !== "string") throw bridgeError("missing", { command: "ui_select", field: "value" });
     const element = find(args);
     if (!(element instanceof HTMLSelectElement)) throw bridgeError("not_list");
-    const value = String(args.value ?? "");
+    const value = args.value;
     const options = Array.from(element.options).map((option) => option.value);
     if (!options.includes(value)) throw bridgeError("no_option", { value, options: JSON.stringify(options) });
     element.scrollIntoView({ block: "center" });
@@ -424,8 +429,9 @@ const builtIn: Record<string, Handler> = {
   },
   async press_key(args) {
     takeArgs("ui_press_key", args, ["key"]);
+    if (typeof args.key !== "string" || !args.key.trim()) throw bridgeError("missing", { command: "ui_press_key", field: "key" });
     const target = (document.activeElement as HTMLElement | null) ?? document.body;
-    const combo = String(args.key ?? "");
+    const combo = args.key;
     // Ctrl+K, Shift+Tab: modifiers before the key, joined by +
     const parts = combo.split("+").map((part) => part.trim()).filter(Boolean);
     const key = parts.length > 1 ? parts[parts.length - 1] : combo;

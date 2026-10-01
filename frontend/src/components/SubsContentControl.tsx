@@ -37,7 +37,7 @@ export default function SubsContentControl({ subs, primaryColor, onPatch }: Prop
     `flex-1 px-2 py-1 rounded-md text-[11px] border transition-colors ${on ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_12%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`;
 
   return (
-    <div className="relative flex items-center gap-1.5">
+    <div className="relative flex items-center gap-1.5" data-subs-content>
       <select value={subs.mode} onChange={(e) => onPatch("subs_content", { value: e.target.value })} aria-label={t("comp.subsLabel")}
         className="bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[12px] text-[var(--color-text)] focus:border-[var(--color-accent)] focus:outline-none">
         <option value="none">{t("comp.subsNone")}</option>

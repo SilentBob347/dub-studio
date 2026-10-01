@@ -639,6 +639,54 @@ pub(super) fn tools() -> Vec<Tool> {
             schema: nothing,
             call: |args| window("editor_export", args, 20),
         },
+        Tool {
+            name: "editor_subtitles_content",
+            description: "Change what the subtitles say in the window, as its subtitle control does: the fields of subtitles_content_set - none, the original, the translation, or both with the original as a styled second line. The frame shows the new subtitles.",
+            schema: || like("subtitles_content_set", &[]),
+            call: |args| window("editor_subtitles_content", args, 15),
+        },
+        Tool {
+            name: "editor_takes",
+            description: "Unfold a line's takes in the window, as its takes button does, where the user can listen to each one; answers what takes_list answers.",
+            schema: || object(json!({ "id": { "type": "string", "description": "line id" } }), &["id"]),
+            call: |args| window("editor_takes", args, 15),
+        },
+        Tool {
+            name: "editor_take_select",
+            description: "Pick a take of a line in the window, as its takes list does: the mix plays it without voicing again, and a take of other text brings that text back. Answers once it is picked; the window then mixes again, which studio_wait until dub_audio waits for. Refused while another take of the line is pinned.",
+            schema: || like("take_select", &[]),
+            call: |args| window("editor_take_select", args, 20),
+        },
+        Tool {
+            name: "editor_take_pin",
+            description: "Pin the active take of a line in the window so no render replaces it (pinned true), or unpin it, as its pin button does.",
+            schema: || like("take_pin", &[]),
+            call: |args| window("editor_take_pin", args, 15),
+        },
+        Tool {
+            name: "editor_shorten",
+            description: "Shorten lines to fit their slots in the window, as Shorten to fit and Shorten all that do not fit do: ids or all_over as for segment_shorten. Answers at once; the user follows it in the activity log, studio_wait until shorten waits for it, and editor_undo brings the old text back.",
+            schema: || like("segment_shorten", &[]),
+            call: |args| window("editor_shorten", args, 15),
+        },
+        Tool {
+            name: "editor_glossary",
+            description: "Open the project's glossary window (open true, the default) or close it; answers what glossary_get answers.",
+            schema: || object(json!({ "open": { "type": "boolean" } }), &[]),
+            call: |args| window("editor_glossary", args, 15),
+        },
+        Tool {
+            name: "editor_glossary_set",
+            description: "Change the glossary in its window, as editing and Save do there: the fields of glossary_set; the window opens and shows the result. Refused while the window holds the user's unsaved edits.",
+            schema: || like("glossary_set", &[]),
+            call: |args| window("editor_glossary_set", args, 20),
+        },
+        Tool {
+            name: "editor_glossary_extract",
+            description: "Collect glossary candidates in the glossary window, as its Collect from text button does: they appear there for the user to confirm. Answers at once; studio_wait until glossary waits for the list, and editor_glossary_set with merge true adds the ones to keep.",
+            schema: nothing,
+            call: |args| window("editor_glossary_extract", args, 15),
+        },
     ]
 }
 

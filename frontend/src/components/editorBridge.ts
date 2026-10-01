@@ -38,6 +38,14 @@ export const EDITOR_FIELDS = {
   editor_undo: [],
   editor_redo: [],
   editor_export: [],
+  editor_subtitles_content: ["value", "order", "secondary"],
+  editor_takes: ["id"],
+  editor_take_select: ["id", "take"],
+  editor_take_pin: ["id", "pinned"],
+  editor_shorten: ["ids", "all_over"],
+  editor_glossary: ["open"],
+  editor_glossary_set: ["entries", "tsv", "merge", "lang"],
+  editor_glossary_extract: [],
 } as const satisfies Record<string, readonly string[]>;
 
 type Command = keyof typeof EDITOR_FIELDS;
@@ -69,6 +77,12 @@ export type EditorContext = {
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   exportVideo: () => Promise<void>;
+  openTakes: (id: string) => void;
+  /** Picks the take; the window mixes again after it answers. */
+  selectTake: (id: string, take: number) => Promise<Project>;
+  pinTake: (id: string, pinned: boolean) => Promise<Project>;
+  shortening: boolean;
+  shorten: (target: { ids: string[] } | { all_over: true }) => void;
 };
 
 /** What the transcript view offers an agent. */
@@ -444,6 +458,62 @@ export function useEditorBridge(ctx: EditorContext): void {
     if (useStore.getState().rendering) throw bridgeError("exporting");
     void ctx.exportVideo();
     return { started: true, pid: ctx.pid };
+  });
+
+  useBridgeCommand("editor_subtitles_content", async (given) => {
+    args("editor_subtitles_content", given);
+    const fields = Object.fromEntries(Object.entries(given).filter(([, value]) => value !== undefined));
+    if (Object.keys(fields).length === 0) throw bridgeError("missing", { command: "editor_subtitles_content", field: "value, order or secondary" });
+    showElement("[data-subs-content]");
+    const fresh = await edit("editor_subtitles_content", "subs_content", fields);
+    return { subs: fresh.subs.mode, bilingual: fresh.subs.bilingual ?? null };
+  });
+
+  useBridgeCommand("editor_takes", async (given) => {
+    args("editor_takes", given);
+    const id = requiredText("editor_takes", given, "id");
+    lineOf(current(), id);
+    ctx.openTakes(id);
+    showElement(rowOf(id));
+    return api.takes(ctx.pid, id).catch((problem: unknown) => { throw failed("editor_takes", problem); });
+  });
+
+  useBridgeCommand("editor_take_select", async (given) => {
+    args("editor_take_select", given);
+    const id = requiredText("editor_take_select", given, "id");
+    const take = numberArg("editor_take_select", given, "take");
+    if (take === undefined || !Number.isInteger(take)) throw bridgeError("bad_value", { command: "editor_take_select", field: "take", expected: "n of takes_list" });
+    lineOf(current(), id);
+    if (ctx.busy) throw bridgeError("busy");
+    ctx.openTakes(id);
+    showElement(rowOf(id));
+    const fresh = await ctx.selectTake(id, take).catch((problem: unknown) => { throw failed("editor_take_select", problem); });
+    const picked = lineOf(fresh, id);
+    return { line: line(picked), takes: picked.takes ?? null, mixing: true };
+  });
+
+  useBridgeCommand("editor_take_pin", async (given) => {
+    args("editor_take_pin", given);
+    const id = requiredText("editor_take_pin", given, "id");
+    if (typeof given.pinned !== "boolean") throw bridgeError("bad_value", { command: "editor_take_pin", field: "pinned", expected: "true or false" });
+    lineOf(current(), id);
+    ctx.openTakes(id);
+    showElement(rowOf(id));
+    const fresh = await ctx.pinTake(id, given.pinned).catch((problem: unknown) => { throw failed("editor_take_pin", problem); });
+    return { id, takes: lineOf(fresh, id).takes ?? null };
+  });
+
+  useBridgeCommand("editor_shorten", (given) => {
+    args("editor_shorten", given);
+    if (given.all_over !== undefined && typeof given.all_over !== "boolean") throw bridgeError("bad_value", { command: "editor_shorten", field: "all_over", expected: "true or false" });
+    const allOver = given.all_over === true;
+    const ids = allOver || given.ids === undefined ? undefined : requiredIds("editor_shorten", { ids: given.ids }, current());
+    if (!allOver && !ids) throw bridgeError("missing", { command: "editor_shorten", field: "ids or all_over" });
+    if (ctx.shortening) throw bridgeError("shortening");
+    if (ctx.busy) throw bridgeError("busy");
+    if (ids?.length === 1) showElement(rowOf(ids[0]));
+    ctx.shorten(ids ? { ids } : { all_over: true });
+    return ids ? { started: true, ids } : { started: true, all_over: true };
   });
 }
 
