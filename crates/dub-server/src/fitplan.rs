@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use crate::dub_timing::DubTiming;
 
 /// Поля реплики, которые сервер вычисляет для ответа и не хранит в project.json.
-pub const COMPUTED: [&str; 2] = ["fit", "takes"];
+pub const COMPUTED: [&str; 4] = ["fit", "takes", "tts_text", "tts_skip"];
 /// Поля ответа проекта, которые говорят, что прогноз или истории дублей не прочитались.
 const COMPUTED_ERRORS: [&str; 2] = ["fit_error", "takes_error"];
 

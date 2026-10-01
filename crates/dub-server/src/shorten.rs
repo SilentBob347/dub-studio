@@ -188,7 +188,7 @@ fn latin_share(text: &str) -> Option<f64> {
 /// текущему переводу) латиница — не больше половины букв, у латинского — не меньше половины.
 fn script_ok(text: &str, cur: &str, lang: &str) -> bool {
     let Some(latin) = latin_share(text) else { return true };
-    let non_latin = crate::translate::tgt_expects_non_latin(lang) || latin_share(cur).is_some_and(|l| l < 0.5);
+    let non_latin = dub_translate::tgt_expects_non_latin(lang) || latin_share(cur).is_some_and(|l| l < 0.5);
     if non_latin {
         latin <= 0.5
     } else {

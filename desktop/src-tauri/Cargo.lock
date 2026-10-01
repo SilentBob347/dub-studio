@@ -1476,6 +1476,7 @@ dependencies = [
  "image",
  "mime_guess",
  "nvml-wrapper",
+ "regex",
  "reqwest",
  "rfd 0.17.2",
  "serde",
@@ -1516,6 +1517,7 @@ name = "dub-translate"
 version = "2.0.0"
 dependencies = [
  "base64 0.23.1",
+ "dub-core",
  "dub-llm",
  "hound",
  "regex",

@@ -431,7 +431,7 @@ fn has_speech_text(text: &str) -> bool {
 
 const DIAR_VER: &str = "nemotron3-diar-v3 · offline · merge_gap=0.8 · min_spk=10%[1.5..2.5] · out-v2";
 const ASR_VER: &str = "asr-v4-abbrev-speaker-split";
-const TRANSLATE_VER: &str = "gemma-ctx-v3";
+const TRANSLATE_VER: &str = "gemma-ctx-v4-json-glossary";
 const OCR_VER: &str = "ppocr-onnx-v2";
 const CAST_VER: &str = "casting-v1";
 
@@ -1135,6 +1135,31 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         &format!("{} сегментов, {} спикер(ов)", segments.len(), n_spk),
     );
 
+    // Глоссарий проекта (из прежнего project.json) и профиля сериала: ошибки распознавания терминов (asr_fix)
+    // исправляются до перевода — импортированные субтитры (текст пользователя) не трогаем.
+    let prev_proj: Option<Project> = match std::fs::read_to_string(paths.work_dir.join("project.json")) {
+        Ok(text) => Some(Project::from_json(&text).map_err(|e| {
+            format!("project.json не разбирается ({e}): в нём глоссарий проекта — анализ остановлен, чтобы его не потерять")
+        })?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("чтение project.json: {e}")),
+    };
+    let glossary = crate::glossary_api::for_analyze(&paths.repo_root, prev_proj.as_ref(), &args.casting_ref, progress)?;
+    if paths.import_subs.is_none() && !glossary.is_empty() {
+        let mut fixed = 0usize;
+        for s in &mut segments {
+            let (text, n) = dub_core::glossary::apply_asr_fix(&s.src_text, &glossary);
+            if n > 0 {
+                s.src_text = text;
+                fixed += n;
+            }
+        }
+        if fixed > 0 {
+            emit(progress, "asr", &format!("глоссарий: исправлено ошибок распознавания терминов — {fixed}"));
+        }
+    }
+    let glossary_fp = crate::glossary_api::fingerprint(&glossary, &args.tgt_lang);
+
     // Отпечаток транскрипта (вход перевода): хэш всех src-текстов+спикеров по порядку. Правка src
     // инвалидирует translate; правка tgt (ручная в редакторе) — нет (её ключ в render, не здесь).
     let transcript_fp = {
@@ -1210,6 +1235,11 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     proj.meta.extra.insert("src_lang".into(), Value::String(args.src_lang.clone()));
     proj.subs.mode = subs_mode;
     proj.subs.burn = args.burn; // композируемость: вжигать субтитры/титры или нет
+    proj.glossary = glossary;
+    proj.casting_ref = match args.casting_ref.trim() {
+        "" => prev_proj.as_ref().map(|p| p.casting_ref.clone()).unwrap_or_default(),
+        slug => slug.to_string(),
+    };
     let before = segments.len();
     proj.segments = segments.into_iter().filter(|s| has_speech_text(&s.src_text)).collect();
     if proj.segments.len() < before {
@@ -1250,6 +1280,7 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         &proj.audio.translate_style,
         if args.casting && args.content_type == "auto" { "ct-auto" } else { "" },
         &llm_tag,
+        &glossary_fp,
     ]);
     if let Some(t) =
         stage_load::<TranslatedOut>(&cache, &paths.work_dir, "translate", &translate_key, TRANSLATED_FILE, progress)
@@ -1261,6 +1292,7 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         let out = TranslatedOut::of(&proj);
         stage_store(&mut cache, &paths.work_dir, "translate", &translate_key, TRANSLATED_FILE, &out, progress);
     }
+    proj.glossary_fp = glossary_fp;
 
     // 7) OCR-стадия (раунд 4): детекция вшитого текста -> блюр-боксы субтитр-полосы + уточнение sub_y.
     //    Порт pipeline.run ocr_detect + compose.analyze_layout. Fail-safe: сбой OCR не валит analyze

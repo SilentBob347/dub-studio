@@ -44,11 +44,11 @@ connected and the address to paste.
   the required models are there.
 - **Long work is a job**: `project_analyze`, `project_dub_audio`, `project_render`,
   `project_export_lang`, `project_retranslate`, `project_remix`, `segment_shorten`,
-  `project_resume`, `voices_download_pack`, and a download by link
+  `project_resume`, `voices_download_pack`, `glossary_extract`, and a download by link
   (`project_create_from_url`, whose `fetch.id` is waited for the same way). Each answers a
   `job_id`; then `studio_wait` with it (or `until: analyze | dub_audio | render |
   export_lang | retranslate | remix | align | shorten | download | voices_pack | separate |
-  detect_text | idle`) instead of polling. It returns within a minute (30 s by default, 55
+  detect_text | glossary | idle`) instead of polling. It returns within a minute (30 s by default, 55
   at most) with how far the work got; call it again. `job_get` and `jobs_list`
   read jobs (`jobs_list` with a `pid` also shows the project's last stored job),
   `job_cancel` stops one, `project_resume` starts a project's interrupted or failed job
@@ -238,6 +238,21 @@ choose or correct. They combine: `transcribe_file`, then `project_get` with its
 4. `casting_library_save` keeps the cast; the next episode's `project_analyze` with
    `casting: true` and `casting_ref` (a slug of `casting_library_list`) applies it.
 
+**Names and terms the same in every line and episode**
+
+1. `glossary_get`: the project's glossary (`stale: true` - the translation was made with other term translations or keep marks; pronunciation, `asr_fix` and note do not count).
+2. `glossary_extract` collects candidates from the text (a job: `studio_wait`, the entries are in its
+   result); `glossary_set` with `merge: true` adds the ones to keep. An entry has `term` and either
+   `translation` or `keep: true` (left as written); `pronunciation` changes only what the voice says,
+   `asr_fix` lists how speech recognition misspells the term (analysis corrects it).
+3. `project_retranslate` with the project's `tgt_lang` and `mode` translates again with the glossary.
+4. `series_glossary_set` with `merge: true` and the entries keeps them in a saved casting; the next
+   episode's `project_analyze` with that `casting_ref` adds them to its glossary. `series_glossary_get` reads it.
+
+A line whose `tts_skip` is set in `project_get` is not voiced: nothing is left to say once sound tags
+([music], (laughs), ♪…♪), speaker labels and markup are taken out; `tts_text` shows what the voice says
+when it differs from the translation.
+
 **A batch into one folder**
 
 For each file: `project_create`, `project_analyze`, `studio_wait`, `project_render`,
@@ -365,6 +380,8 @@ without it they answer that the window is not open, and everything else still wo
   `blur_enable`.
 - **casting**: `casting_get`, `casting_update`, `casting_avatar`, `casting_library_list`,
   `casting_library_save`, `casting_library_delete`, `casting_library_avatar`.
+- **glossary**: `glossary_get`, `glossary_set`, `glossary_extract`, `series_glossary_get`,
+  `series_glossary_set`.
 - **voices**: `voices_list`, `voices_catalog`, `voice_download`, `voices_download_pack`,
   `voice_rename`, `voice_delete`, `voice_from_speaker`, `voice_slots_assign`.
 - **the window**: `ui_screenshot`, `ui_read_page`, `ui_click`, `ui_type`, `ui_select`,

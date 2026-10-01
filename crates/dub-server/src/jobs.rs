@@ -72,10 +72,12 @@ pub enum JobKind {
     Separate,
     DetectText,
     Shorten,
+    /// «Собрать глоссарий из текста» (кандидаты в итоге джобы).
+    Glossary,
 }
 
 impl JobKind {
-    const ALL: [JobKind; 13] = [
+    const ALL: [JobKind; 14] = [
         JobKind::Analyze,
         JobKind::Retranslate,
         JobKind::Remix,
@@ -89,6 +91,7 @@ impl JobKind {
         JobKind::Separate,
         JobKind::DetectText,
         JobKind::Shorten,
+        JobKind::Glossary,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -106,6 +109,7 @@ impl JobKind {
             JobKind::Separate => "separate",
             JobKind::DetectText => "detect_text",
             JobKind::Shorten => "shorten",
+            JobKind::Glossary => "glossary",
         }
     }
 
@@ -118,7 +122,7 @@ impl JobKind {
     /// чтение вшитого текста проект не меняют и дублируют только сами себя.
     fn class(self) -> Option<&'static str> {
         match self {
-            JobKind::Analyze | JobKind::Retranslate | JobKind::Remix | JobKind::Align | JobKind::Shorten => Some("text"),
+            JobKind::Analyze | JobKind::Retranslate | JobKind::Remix | JobKind::Align | JobKind::Shorten | JobKind::Glossary => Some("text"),
             JobKind::DubAudio | JobKind::Render | JobKind::ExportLang => Some("audio"),
             JobKind::Separate => Some("separate"),
             JobKind::DetectText => Some("detect_text"),

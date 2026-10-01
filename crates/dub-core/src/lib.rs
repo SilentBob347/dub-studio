@@ -2,10 +2,12 @@
 
 pub mod atomic;
 pub mod fit;
+pub mod glossary;
 mod opts;
 pub mod proc;
 mod project;
 
+pub use glossary::{GlossaryEntry, GlossarySource};
 pub use opts::EngineOpts;
 pub use project::{
     Audio, Bilingual, Brand, BlurBox, CaptionOverride, Captions, Meta, Preset, Project, Render,

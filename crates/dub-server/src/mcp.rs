@@ -201,6 +201,11 @@ fn compact_segment(segment: &Value) -> Value {
             row[flag] = true.into();
         }
     }
+    for said in ["tts_skip", "tts_text"] {
+        if segment[said].is_string() {
+            row[said] = segment[said].clone();
+        }
+    }
     if !segment["voice"].is_null() {
         row["voice"] = segment["voice"].clone();
     }
@@ -593,7 +598,7 @@ async fn wait_for(args: &Value) -> Result<Value, String> {
             Some(job) => {
                 let state = fetch(&format!("/jobs/{}", segment(job)))
                     .await
-                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack, segment_shorten or a one-call tool answering done false returned, or the fetch.id of project_create_from_url (a models download is waited for with until download). Wait for other work with until."))?;
+                    .map_err(|why| format!("No job {job} ({why}): job_id is what project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack, segment_shorten, glossary_extract or a one-call tool answering done false returned, or the fetch.id of project_create_from_url (a models download is waited for with until download). Wait for other work with until."))?;
                 if state.get("status").and_then(Value::as_str).is_none() {
                     return Err(format!("The job {job} has no status: {state}"));
                 }
@@ -647,7 +652,7 @@ fn annotations(name: &str) -> Value {
         "project_put", "project_analyze", "project_retranslate", "project_remix", "project_align", "segment_update", "segments_reorder", "segments_regen_all",
         "project_mode_set", "translation_target_set", "translation_style_set", "rewrite_set", "voice_set", "caption_style_set", "casting_update",
         "voice_slots_assign", "openrouter_set_key", "segments_merge", "editor_segment_update", "editor_segments_merge", "editor_mode", "editor_style",
-        "segment_shorten", "take_select",
+        "segment_shorten", "take_select", "glossary_set", "series_glossary_set",
     ];
     let changes = CHANGES.iter().any(|verb| name.split('_').any(|word| word == *verb));
     let read_only = READ_NAMES.contains(&name) || !changes && READS.iter().any(|part| name.ends_with(part) || name.contains(&format!("{part}_")));
@@ -797,6 +802,22 @@ fn detail() -> Value {
     json!({ "type": "string", "enum": ["concise", "detailed"], "description": "detailed: the whole project instead of what changed" })
 }
 
+/// Records of a glossary, as glossary_get answers them.
+fn glossary_entries() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "term": { "type": "string" }, "translation": { "type": "string" }, "keep": { "type": "boolean" },
+                "pronunciation": { "type": "string" }, "asr_fix": { "type": "array", "items": { "type": "string" } },
+                "note": { "type": "string" }, "source": { "type": "string", "enum": ["manual", "auto", "series"] }, "lang": { "type": "string" },
+            },
+            "required": ["term"],
+        },
+    })
+}
+
 fn ids(what: &str) -> Value {
     json!({ "type": "array", "items": { "type": "string" }, "description": what })
 }
@@ -911,8 +932,8 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "studio_wait",
-                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack, segment_shorten or a one-call tool still at work returned it, or the fetch.id of project_create_from_url), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, shorten, download (models and downloads by link), voices_pack, separate, detect_text - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
-                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "shorten", "download", "voices_pack", "separate", "detect_text"] }, "seconds": { "type": "integer" } }), &[]),
+                description: "Wait for work to finish instead of polling: a job (job_id, as project_analyze, project_dub_audio, project_render, project_export_lang, project_retranslate, project_remix, project_align, project_resume, voices_download_pack, segment_shorten, glossary_extract or a one-call tool still at work returned it, or the fetch.id of project_create_from_url), or until one kind of work is over - analyze, dub_audio, render, export_lang, retranslate, remix, align, shorten, download (models and downloads by link), voices_pack, separate, detect_text, glossary - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
+                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "analyze", "dub_audio", "render", "export_lang", "retranslate", "remix", "align", "shorten", "download", "voices_pack", "separate", "detect_text", "glossary"] }, "seconds": { "type": "integer" } }), &[]),
                 call: |_| composite("wait"),
             },
             Tool {
@@ -1264,7 +1285,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_get",
-                description: "A project: mode, target language, subtitles, audio and voices, subtitle style, titles and blur boxes (with the idx their tools take), how many lines there are and how many are changed (dirty, voiced again at the next project_dub_audio or project_render), and its lines - id, start, end, speaker, the recognised text (src_text), the translation (tgt_text), dirty, hidden, keep_original. A dubbed or voiced-over project's voiced lines also carry fit - whether the translation fits its time slot: est (seconds at the voice's pace), slot, ratio, verdict (fits; tight: the render speeds it up within eff_cap, up to 4x with speech_rate_on, else the natural cap; impossible), calibrated (the pace measured from this voice's clips, else the language's), over, and rendered (needed, cap, eff_cap, raw, dur; over when needed > eff_cap) when the last render voiced this very text - takes (count, active, pinned) and shortened (from, to). from and to (seconds) or ids narrow the lines. response_format detailed returns the whole project as stored, word timings included, with fit and takes computed: take it from there for project_put, which drops them.",
+                description: "A project: mode, target language, subtitles, audio and voices, subtitle style, titles and blur boxes (with the idx their tools take), how many lines there are and how many are changed (dirty, voiced again at the next project_dub_audio or project_render), and its lines - id, start, end, speaker, the recognised text (src_text), the translation (tgt_text), dirty, hidden, keep_original, tts_text (what the voice says when it differs from tgt_text: sound tags, speaker labels and markup taken out, the glossary's pronunciation) and tts_skip (the line is not voiced, nothing is left to say: sound_only or no_words). A dubbed or voiced-over project's voiced lines also carry fit - whether the translation fits its time slot: est (seconds at the voice's pace), slot, ratio, verdict (fits; tight: the render speeds it up within eff_cap, up to 4x with speech_rate_on, else the natural cap; impossible), calibrated (the pace measured from this voice's clips, else the language's), over, and rendered (needed, cap, eff_cap, raw, dur; over when needed > eff_cap) when the last render voiced this very text - takes (count, active, pinned, selected) and shortened (from, to). from and to (seconds) or ids narrow the lines. response_format detailed returns the whole project as stored, word timings and the glossary included, with fit, takes, tts_text and tts_skip worked out on reading: take it from there for project_put, which drops them.",
                 schema: || object(json!({ "pid": pid(), "response_format": { "type": "string", "enum": ["concise", "detailed"] }, "from": { "type": "number" }, "to": { "type": "number" }, "ids": ids("line ids") }), &["pid"]),
                 call: |args| get(project_path(args, "")?),
             },
@@ -1372,7 +1393,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_put",
-                description: "Replace the whole project with project: the object project_get with response_format detailed returns, changed. Whatever it leaves out is lost - word timings, hidden lines, per-line subtitle overrides - and a long project does not fit into one answer, so change lines with segment_update and the other edits instead.",
+                description: "Replace the whole project with project: the object project_get with response_format detailed returns, changed (its glossary stays as it is - glossary_set changes it). Whatever it leaves out is lost - word timings, hidden lines, per-line subtitle overrides - and a long project does not fit into one answer, so change lines with segment_update and the other edits instead.",
                 schema: || object(json!({ "pid": pid(), "project": { "type": "object" }, "response_format": detail() }), &["pid", "project"]),
                 call: |args| send(Method::PUT, project_path(args, "")?, args.get("project").cloned().unwrap_or_default()),
             },
@@ -1828,6 +1849,59 @@ fn tools() -> &'static [Tool] {
                 description: "The face of a saved casting's character, as a picture.",
                 schema: || object(json!({ "slug": { "type": "string" }, "character_id": { "type": "string" } }), &["slug", "character_id"]),
                 call: |args| get(format!("/casting/library/{}/avatar{}", segment(&text(args, "slug")?), query(&[("id", Some(text(args, "character_id")?))]))),
+            },
+            // ---------------------------------------------------------------- glossary
+            Tool {
+                name: "glossary_get",
+                description: "The project's glossary: terms with their translation, keep (left untranslated), pronunciation (how the voice says it; the screen keeps the translation), asr_fix (how speech recognition misspells the term; analysis corrects it), note, source (manual; auto from glossary_extract; series from the saved casting at analysis - a new analysis takes those from the profile again, so change one by setting it as manual) and lang (the language of translation and pronunciation). stale: the translation was made with other term translations or keep marks (pronunciation, asr_fix and note do not count) - project_retranslate makes it again. format tsv answers term, translation, keep, pronunciation as tab-separated text.",
+                schema: || object(json!({ "pid": pid(), "format": { "type": "string", "enum": ["json", "tsv"] } }), &["pid"]),
+                call: |args| get(format!("{}{}", project_path(args, "/glossary")?, query(&[("format", given(args, "format").filter(|f| f != "json"))]))),
+            },
+            Tool {
+                name: "glossary_set",
+                description: "Set the project's glossary: entries (the whole list, as glossary_get gives it) or tsv (term, translation, keep 1/0, pronunciation per line; a header line is optional). merge: true adds them to the glossary instead, a term already there taking the new entry (from tsv only its columns: asr_fix, note, source and lang stay). An entry without lang takes lang (omitted: the project's target language), and so do the tsv entries. The translation is not redone: the answer says stale when project_retranslate should run.",
+                schema: || {
+                    object(
+                        json!({
+                            "pid": pid(),
+                            "entries": glossary_entries(),
+                            "tsv": { "type": "string" },
+                            "merge": { "type": "boolean" },
+                            "lang": { "type": "string" },
+                        }),
+                        &["pid"],
+                    )
+                },
+                call: |args| send(Method::PUT, project_path(args, "/glossary")?, body_without(args, &["pid"])),
+            },
+            Tool {
+                name: "glossary_extract",
+                description: "Collect glossary candidates from the project's text: names, recurring terms and brands with their translation (a pass of the translation model and the repeated names). A job: studio_wait with its job_id; its result lists entries with source auto and the terms already in the glossary left out. Nothing is saved - glossary_set with merge: true adds the ones to keep.",
+                schema: project_only,
+                call: |args| post(project_path(args, "/glossary/extract")?, json!({})),
+            },
+            Tool {
+                name: "series_glossary_get",
+                description: "The glossary of a saved casting (a series' profile in casting_library_list), kept across its episodes: project_analyze with casting_ref adds it to the project's glossary, the project's own entries winning. format tsv as for glossary_get.",
+                schema: || object(json!({ "slug": { "type": "string", "description": "slug from casting_library_list" }, "format": { "type": "string", "enum": ["json", "tsv"] } }), &["slug"]),
+                call: |args| get(format!("/casting/library/{}/glossary{}", segment(&text(args, "slug")?), query(&[("format", given(args, "format").filter(|f| f != "json"))]))),
+            },
+            Tool {
+                name: "series_glossary_set",
+                description: "Set the glossary of a saved casting: entries or tsv as for glossary_set, merge: true to add to it - glossary_get's entries with merge: true keep a project's glossary for the next episodes. lang is the language of tsv entries (omitted: any language).",
+                schema: || {
+                    object(
+                        json!({
+                            "slug": { "type": "string", "description": "slug from casting_library_list" },
+                            "entries": glossary_entries(),
+                            "tsv": { "type": "string" },
+                            "merge": { "type": "boolean" },
+                            "lang": { "type": "string" },
+                        }),
+                        &["slug"],
+                    )
+                },
+                call: |args| send(Method::PUT, format!("/casting/library/{}/glossary", segment(&text(args, "slug")?)), body_without(args, &["slug"])),
             },
             // ---------------------------------------------------------------- voices
             Tool {
@@ -2623,6 +2697,30 @@ mod tests {
         for (alias, same) in PATCH_ALIASES {
             assert!(PATCH_OPS.iter().any(|(op, _)| op == same), "{alias} names {same}, which no tool makes");
         }
+    }
+
+    #[test]
+    fn the_glossary_tools_turn_their_arguments_into_their_routes() {
+        let find = |name: &str| tools().iter().find(|tool| tool.name == name).expect("the tool");
+        let body = |call: Call| match call.payload {
+            Payload::Json(body) => body,
+            _ => panic!("a JSON body"),
+        };
+        let call = (find("glossary_get").call)(&json!({ "pid": "p1" })).unwrap();
+        assert_eq!((call.method.clone(), call.path.as_str()), (Method::GET, "/projects/p1/glossary"));
+        let call = (find("glossary_get").call)(&json!({ "pid": "p1", "format": "tsv" })).unwrap();
+        assert_eq!(call.path, "/projects/p1/glossary?format=tsv");
+        let call = (find("glossary_set").call)(&json!({ "pid": "p1", "entries": [{ "term": "Harry", "translation": "Гарри" }], "merge": true })).unwrap();
+        assert_eq!((call.method.clone(), call.path.as_str()), (Method::PUT, "/projects/p1/glossary"));
+        assert_eq!(body(call), json!({ "entries": [{ "term": "Harry", "translation": "Гарри" }], "merge": true }));
+        let call = (find("glossary_extract").call)(&json!({ "pid": "p1" })).unwrap();
+        assert_eq!((call.method.clone(), call.path.as_str()), (Method::POST, "/projects/p1/glossary/extract"));
+        let call = (find("series_glossary_get").call)(&json!({ "slug": "my show", "format": "json" })).unwrap();
+        assert_eq!(call.path, "/casting/library/my%20show/glossary");
+        let call = (find("series_glossary_set").call)(&json!({ "slug": "show", "tsv": "Harry\tГарри", "lang": "ru" })).unwrap();
+        assert_eq!((call.method.clone(), call.path.as_str()), (Method::PUT, "/casting/library/show/glossary"));
+        assert_eq!(body(call), json!({ "tsv": "Harry\tГарри", "lang": "ru" }));
+        assert!((find("series_glossary_get").call)(&json!({})).is_err(), "a slug is required");
     }
 
     #[test]

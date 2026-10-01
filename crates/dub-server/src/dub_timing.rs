@@ -15,7 +15,7 @@ const WORDS_CACHE: &str = "dub_words.json";
 /// Одна озвученная реплика в финальной дорожке.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SegTiming {
-    /// tgt-текст, который был озвучен (свежесть записи).
+    /// Показанный tgt-текст фразы на момент сборки (свежесть записи), не текст для синтеза.
     pub text: String,
     /// Тайминг реплики в проекте на момент сборки (свежесть записи).
     pub seg_start: f64,
@@ -106,8 +106,8 @@ fn file_key(p: &Path) -> Result<String, String> {
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
-/// Озвученная фраза, как она легла: id сегмента, озвученный текст, уложенный файл, спан в дорожке до
-/// tempo-fit всей дорожки.
+/// Озвученная фраза, как она легла: сегмент проекта с показанным текстом, уложенный файл, спан в дорожке
+/// до tempo-fit всей дорожки.
 pub struct Laid<'a> {
     pub seg: &'a dub_core::Segment,
     pub file: &'a Path,

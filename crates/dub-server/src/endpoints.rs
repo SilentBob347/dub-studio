@@ -321,6 +321,10 @@ pub async fn put_project(
         Err(e) => return (StatusCode::BAD_REQUEST, format!("bad project: {e}")).into_response(),
     };
     crate::fitplan::strip_computed(&mut proj);
+    // Глоссарий меняет только его ручка: откат правок окна (undo) присылает снимок со старым глоссарием.
+    if let Ok(stored) = st.load_project(&pid) {
+        proj.glossary = stored.glossary;
+    }
     if let Err(e) = save_project_atomic(&dir, &proj) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }

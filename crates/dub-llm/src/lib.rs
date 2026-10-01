@@ -15,7 +15,7 @@ mod server;
 pub mod test_http;
 
 pub use answer::without_thinking;
-pub use client::{server_base, ChatClient, Endpoint, Message, Part, Sampling};
+pub use client::{server_base, ChatClient, Completion, Endpoint, Message, Part, Sampling, StructuredOutput};
 pub use server::{resolve_llama_bin, LlamaServer, ServerOpts};
 
 use thiserror::Error;
@@ -28,6 +28,9 @@ pub enum LlmError {
     Http(String),
     #[error("api: {0}")]
     Api(String),
+    /// Сервер отверг запрос (4xx, кроме 429): повторять тот же запрос бесполезно.
+    #[error("api: {status}: {body}")]
+    Rejected { code: u16, status: String, body: String },
     #[error("ответ обрезан: {0}")]
     CutShort(String),
     #[error("сервер обрезал запрос: {0}")]

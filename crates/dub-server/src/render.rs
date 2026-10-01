@@ -715,6 +715,9 @@ fn build_dub_pass(
     engine: &mut Option<Arc<AudiocppEngine>>,
     progress: &Progress,
 ) -> Result<DubPass, String> {
+    let shown = proj;
+    let tts_view = crate::tts_text::synthesis_view(proj, progress);
+    let proj = &tts_view;
     let wd = &paths.work_dir;
     // Сегменты с непустым tgt (как в питоне: только строки с текстом синтезируются). Несём индекс в
     // ПОЛНОМ списке proj.segments — слот next.start считается по индексу i+1 полного списка (порт
@@ -1138,7 +1141,8 @@ fn build_dub_pass(
             }
             // Закреплённый дубль этого текста или дубль с этим ключом — цикл ниже возьмёт его без синтеза.
             let sid = sid_of(segs[idx].0, s);
-            if crate::takes::History::load(wd, &sid).is_ok_and(|h| h.covers(&keys[idx], tgt, s.extra.get(REGEN_NONCE))) {
+            let shown_tgt = shown.segments.get(segs[idx].0).map_or(tgt, |o| o.tgt_text.trim());
+            if crate::takes::History::load(wd, &sid).is_ok_and(|h| h.covers(&keys[idx], shown_tgt, s.extra.get(REGEN_NONCE))) {
                 continue;
             }
             let raw = wd.join(format!("seg_{}.wav", sid_of(segs[idx].0, s)));
@@ -1195,6 +1199,9 @@ fn build_dub_pass(
             continue;
         }
         let tgt = s.tgt_text.trim();
+        // История дублей хранит показанный текст реплики (его сверяют выбор и закрепление дубля в правках
+        // проекта), синтез идёт текстом для синтеза `tgt`.
+        let shown_tgt = shown.segments.get(fi).map_or(tgt, |o| o.tgt_text.trim());
         // Синтез ТОЛЬКО если нет файла или ключ синтеза (текст/спикер/голос/реф/движок/нонс regen) не
         // совпал с записанным. dirty — флаг UI; для проектов без записанных ключей решает он.
         let key = keys[idx].as_str();
@@ -1213,7 +1220,7 @@ fn build_dub_pass(
         };
         // Закреплённый дубль рендер не заменяет, пока текст реплики тот, что в нём озвучен.
         let mut pinned_key: Option<String> = None;
-        if let Some(p) = hist.pinned_for(tgt).cloned() {
+        if let Some(p) = hist.pinned_for(shown_tgt).cloned() {
             hist.restore(wd, &sid, p.n, &raw)?;
             if need_synth {
                 emit(progress, "tts", &format!("фраза {fi}: звучит закреплённый дубль — новая озвучка его не заменяет"));
@@ -1228,7 +1235,7 @@ fn build_dub_pass(
         // Выбранный из истории дубль звучит, пока текст и нонс те, что в нём, даже если ключ синтеза с тех пор
         // сменился (голос, референс, опции): выбор пользователя не откатывается молча.
         if pinned_key.is_none() {
-            if let Some(sel) = hist.selected_for(tgt, s.extra.get(REGEN_NONCE)).cloned() {
+            if let Some(sel) = hist.selected_for(shown_tgt, s.extra.get(REGEN_NONCE)).cloned() {
                 if sel.key != key {
                     hist.restore(wd, &sid, sel.n, &raw)?;
                     emit(progress, "tts", &format!("фраза {fi}: звучит выбранный дубль {} — новая озвучка его не заменяет", sel.n));
@@ -1438,7 +1445,7 @@ fn build_dub_pass(
         if synthesized {
             let source = if crate::shorten::already_shortened(s) { "shorten" } else { "synth" };
             let meta = crate::takes::NewTake {
-                text: tgt.to_string(),
+                text: shown_tgt.to_string(),
                 key: key.to_string(),
                 nonce: s.extra.get(REGEN_NONCE).cloned(),
                 voice: voice_of(s),
@@ -1496,7 +1503,7 @@ fn build_dub_pass(
                             dub_core::atomic::write(&take_path, &wav)?;
                             let td = media::duration(&take_path)?;
                             let meta = crate::takes::NewTake {
-                                text: tgt.to_string(),
+                                text: shown_tgt.to_string(),
                                 key: key.to_string(),
                                 nonce: s.extra.get(REGEN_NONCE).cloned(),
                                 voice: voice_of(s),
@@ -1705,7 +1712,7 @@ fn build_dub_pass(
                             let raw_dur = media::duration(raw)?;
                             let sid = sid_of(*fi, s);
                             let meta = crate::takes::NewTake {
-                                text: tgtq.clone(),
+                                text: shown.segments.get(*fi).map_or(tgtq.as_str(), |o| o.tgt_text.trim()).to_string(),
                                 key: keys[segs.iter().position(|(f, _)| f == fi).expect("QC-фраза из segs")].clone(),
                                 nonce: s.extra.get(REGEN_NONCE).cloned(),
                                 voice: voice_of(s),
@@ -1805,7 +1812,7 @@ fn build_dub_pass(
         }
     }
 
-    record_dub_timing(proj, paths, &segs, &placed, &fit_recs, &laid_spans, track_sf, progress)?;
+    record_dub_timing(shown, paths, &segs, &placed, &fit_recs, &laid_spans, track_sf, progress)?;
 
     // 6) свести дорожку.
     let mixed = if voiceover {
@@ -1902,9 +1909,12 @@ fn build_dub_pass(
 /// dub/voiceover берут отсюда тайминги событий, а пословные пресеты — слова, услышанные в самом дубле.
 /// Цикл укладки кладёт в `placed` ровно одну запись на каждый элемент `segs` в том же порядке, а
 /// timeline возвращает спаны в порядке `placed` (onset'ы неубывают, сортировка стабильная).
+/// `segs` — фразы вида для синтеза с индексом в полном списке сегментов; `shown` — проект с показанным
+/// текстом тех же сегментов в том же порядке. В запись идёт показанный текст: build_ass сверяет свежесть
+/// с tgt_text проекта, а не с текстом для синтеза.
 #[allow(clippy::too_many_arguments)]
 fn record_dub_timing(
-    proj: &Project,
+    shown: &Project,
     paths: &RenderPaths,
     segs: &[(usize, &dub_core::Segment)],
     placed: &[(f64, PathBuf, f64)],
@@ -1923,25 +1933,27 @@ fn record_dub_timing(
         return Ok(());
     }
     let seg_keep = |s: &dub_core::Segment| s.extra.get("keep_original").and_then(|v| v.as_bool()).unwrap_or(false);
-    let laid: Vec<crate::dub_timing::Laid> = segs
-        .iter()
-        .zip(placed)
-        .zip(laid_spans)
-        .zip(fit_recs)
-        .filter(|((((_, s), _), _), _)| !seg_keep(s) && !s.tgt_text.trim().is_empty())
-        .map(|((((_, s), p), span), fit)| crate::dub_timing::Laid { seg: s, file: &p.1, span: *span, fit: fit.clone() })
-        .collect();
-    let preset = &proj.captions.preset;
+    let mut laid: Vec<crate::dub_timing::Laid> = Vec::with_capacity(segs.len());
+    for ((((i, s), p), span), fit) in segs.iter().zip(placed).zip(laid_spans).zip(fit_recs) {
+        if seg_keep(s) || s.tgt_text.trim().is_empty() {
+            continue;
+        }
+        let seg = shown.segments.get(*i).filter(|o| o.id == s.id).ok_or_else(|| {
+            format!("тайминги дубляжа: фраза {} вида для синтеза не совпала с сегментом проекта №{i}", s.id)
+        })?;
+        laid.push(crate::dub_timing::Laid { seg, file: &p.1, span: *span, fit: fit.clone() });
+    }
+    let preset = &shown.captions.preset;
     let caption_style = preset.name.as_deref().filter(|n| *n != "match");
     // Слова дубля нужны только строке перевода: в режиме «оригинал» субтитр — не то, что звучит.
-    let need_words = proj.subs.burn
-        && matches!(proj.subs.mode.as_str(), "translate" | "bilingual")
+    let need_words = shown.subs.burn
+        && matches!(shown.subs.mode.as_str(), "translate" | "bilingual")
         && dub_captions::word_timed_reveal(caption_style, preset.plate.as_deref(), preset.reveal.as_deref(), preset.font.as_deref());
     if need_words {
         emit(progress, "mix", &format!("пословные тайминги субтитров: распознавание {} фраз дубляжа", laid.len()));
     }
     let warn = |m: String| emit(progress, "mix", &m);
-    let asr = need_words.then_some((&paths.asr, proj.tgt_lang.as_str()));
+    let asr = need_words.then_some((&paths.asr, shown.tgt_lang.as_str()));
     crate::dub_timing::record(wd, &laid, track_sf, asr, &warn)?;
     Ok(())
 }
@@ -3171,6 +3183,64 @@ mod tests {
         proj.segments[0].tgt_text = "Пока мир".into();
         let ev = events(&proj);
         assert!(ev[0].starts_with("Dialogue: 1,0:00:01.00,0:00:02.00,"), "{}", ev[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_phrase_cleaned_for_synthesis_keeps_its_dub_timing_in_the_subtitles() {
+        let dir = std::env::temp_dir().join(format!("render_dubtiming_shown_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut shown = Project { mode: "dub".into(), tgt_lang: "ru".into(), ..Default::default() };
+        shown.subs.mode = "translate".into();
+        shown.subs.burn = false;
+        shown.segments = vec![
+            seg("s0", 1.0, 2.0, "«Привет»,  (смеётся) мир"),
+            seg("s1", 2.5, 3.0, "[музыка]"),
+            seg("s2", 4.0, 5.0, "Всё"),
+        ];
+        let view = crate::tts_text::synthesis_view(&shown, &|_| {});
+        assert_ne!(view.segments[0].tgt_text, shown.segments[0].tgt_text, "текст для синтеза очищен");
+        let segs: Vec<(usize, &Segment)> =
+            view.segments.iter().enumerate().filter(|(_, s)| !s.tgt_text.trim().is_empty()).collect();
+        let wav = dir.join("seg_fit.wav");
+        std::fs::write(&wav, b"x").unwrap();
+        let placed = vec![(3.0, wav.clone(), 1.5), (6.0, wav.clone(), 0.5)];
+        let spans = vec![(3.0, 4.5), (6.0, 6.5)];
+        let paths = RenderPaths {
+            input: dir.join("in.mp4"),
+            work_dir: dir.clone(),
+            output: dir.join("out.mp4"),
+            bsroformer_cli: PathBuf::new(),
+            bsroformer_model: PathBuf::new(),
+            higgs_dll: PathBuf::new(),
+            higgs_model_root: PathBuf::new(),
+            higgs_quant: String::new(),
+            fonts_dir: PathBuf::new(),
+            higgs_backend: "cpu".into(),
+            higgs_device: 0,
+            higgs_threads: 1,
+            max_stretch: 1.0,
+            voices_dir: PathBuf::new(),
+            asr: crate::models::AsrChoice::Parakeet(PathBuf::new()),
+            bench: false,
+            ref_secs: 12.0,
+            models_root: PathBuf::new(),
+            llama_bin: PathBuf::new(),
+            mt_model: PathBuf::new(),
+        };
+        record_dub_timing(&shown, &paths, &segs, &placed, &[None, None], &spans, 1.0, &|_| {}).unwrap();
+        let ass_path = dir.join("caps.ass");
+        build_ass(&shown, &ass_path, Some(&dir), 1080, 1920, 10.0).unwrap();
+        let ass = std::fs::read_to_string(&ass_path).unwrap();
+        let starts: Vec<&str> = ass
+            .lines()
+            .filter(|l| l.starts_with("Dialogue: 1,"))
+            .map(|l| l.split(',').take(3).collect::<Vec<_>>()[1])
+            .collect();
+        assert!(starts.contains(&"0:00:03.00"), "фраза с кавычками и (смеётся) — на месте дубля: {ass}");
+        assert!(starts.contains(&"0:00:06.00"), "{ass}");
+        assert!(!starts.contains(&"0:00:01.00"), "не на тайминге оригинала: {ass}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

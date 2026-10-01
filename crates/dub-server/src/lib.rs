@@ -28,6 +28,7 @@ mod llm_provider;
 mod openrouter;
 mod f0;
 mod frame;
+mod glossary_api;
 mod hw;
 mod presets;
 mod job_store;
@@ -53,6 +54,7 @@ mod subs_text;
 mod subtracks;
 mod takes;
 mod translate;
+mod tts_text;
 mod tts_trim;
 mod url_import;
 mod voice_slots;
@@ -461,6 +463,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{pid}/casting/library", post(casting_library_save))
         .route("/casting/library/{slug}", delete(casting_library_delete))
         .route("/casting/library/{slug}/avatar", get(casting_library_avatar))
+        .route("/casting/library/{slug}/glossary", get(glossary_api::series_get).put(glossary_api::series_put))
         .route("/settings/launch", get(studio_settings::launch_get).patch(studio_settings::launch_patch))
         .route("/app/paths", get(studio_settings::app_paths))
         .route("/fonts", get(endpoints::fonts))
@@ -488,6 +491,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{pid}/render", post(render_project))
         .route("/projects/{pid}/export-lang", post(export_lang))   // клон+ре-перевод+рендер на другом языке (экспорт-уровень мультиязыка)
         .route("/projects/{pid}/retranslate", post(retranslate_project))   // #122: смена режима из транскрипта — перевод готовых сегментов БЕЗ ASR
+        .route("/projects/{pid}/glossary", get(glossary_api::project_get).put(glossary_api::project_put))
+        .route("/projects/{pid}/glossary/extract", post(glossary_api::extract))
         .route("/projects/{pid}/waveform", get(endpoints::waveform))
         .route("/projects/{pid}/preview", get(endpoints::preview))
         .route("/projects/{pid}/output", get(output))
@@ -1671,10 +1676,13 @@ async fn get_project(State(st): State<AppState>, AxPath(pid): AxPath<String>) ->
     }
 }
 
-/// Проект в ответе ручки: с вычисленными у реплик прогнозом укладки (`fit`) и сводкой дублей (`takes`).
+/// Проект в ответе ручки: с вычисленными у реплик прогнозом укладки (`fit`), сводкой дублей (`takes`) и
+/// текстом для синтеза (`tts_text`, `tts_skip`), где он не тот, что показан.
 pub(crate) fn project_response(st: &AppState, dir: &Path, proj: &Project) -> Response {
     let rules = fitplan::rules(&st.models_root, st.opts.max_stretch as f64);
-    match fitplan::decorate(dir, proj, &rules) {
+    let mut shown = proj.clone();
+    tts_text::annotate(&mut shown);
+    match fitplan::decorate(dir, &shown, &rules) {
         Ok(v) => Json(v).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -1822,6 +1830,7 @@ async fn analyze_enqueue(st: &AppState, pid: &str, args_json: Value) -> Result<S
             }
         }
         let post_result = post.apply(&mut proj, &dir_for_save, &list_voice_names(&voices_dir))?;
+        proj.glossary = glossary_api::after_analyze(&dir_for_save, &proj.glossary)?;
         save_project_atomic(&dir_for_save, &proj)?;
         Ok(json!({
             "project_id": pid_for_result,
@@ -2157,7 +2166,7 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
     let new_pid_res = pid.to_string();
     let out_res = paths.output.clone();
     let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
-        use dub_translate::{flat_run, Seg};
+        use dub_translate::{flat_run_with, FlatOpts, Seg};
         clean_partials(&dst_for_job);
         let pj = dst_for_job.join("project.json");
         let text = std::fs::read_to_string(&pj).map_err(|e| e.to_string())?;
@@ -2191,7 +2200,11 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
                     Seg::new(src, spk)
                 })
                 .collect();
-            flat_run(client, &mut segs, "auto", &lang_c, spoken, &p.audio.translate_style).map_err(|e| format!("translate: {e}"))?;
+            let contract = dub_translate::Contract::for_client(client);
+            let opts = FlatOpts { src: "auto", tgt: &lang_c, spoken, style: &p.audio.translate_style, glossary: &p.glossary, contract: &contract };
+            flat_run_with(client, &mut segs, &opts, &mut |m: &str| progress(json!({ "type": "progress", "stage": "translate", "msg": m.trim() })))
+                .map_err(|e| format!("translate: {e}"))?;
+            p.glossary_fp = glossary_api::fingerprint(&p.glossary, &lang_c);
             for (s, sg) in p.segments.iter_mut().zip(segs) {
                 if !sg.tgt.trim().is_empty() {
                     s.tgt_text = sg.tgt;
@@ -2202,12 +2215,16 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
             // очищаем tgt -> рендер покажет исходный text (лучше, чем титр на старом языке рядом с новыми сегментами).
             if !p.captions.titles.is_empty() {
                 let mut tsegs: Vec<Seg> = p.captions.titles.iter().map(|ti| Seg::new(ti.text.clone(), 0)).collect();
-                let ok = flat_run(client, &mut tsegs, "auto", &lang_c, false, &p.audio.translate_style).is_ok();
+                let topts = FlatOpts { src: "auto", tgt: &lang_c, spoken: false, style: &p.audio.translate_style, glossary: &[], contract: &contract };
+                let ok = flat_run_with(client, &mut tsegs, &topts, &mut |m: &str| eprintln!("[translate] {}", m.trim())).is_ok();
                 for (ti, sg) in p.captions.titles.iter_mut().zip(tsegs) {
                     ti.tgt = if ok && !sg.tgt.trim().is_empty() { sg.tgt } else { String::new() };
                 }
             }
             drop(prov); // освободить VRAM перед TTS/рендером (облако — no-op)
+            if let Some(now) = glossary_api::on_disk(&dst_for_job)? {
+                p.glossary = now;
+            }
             save_project_atomic(&dst_for_job, &p)?;
             jobs::update_record(|r| r.args["translated"] = json!(true))?;
         }
@@ -2271,7 +2288,7 @@ async fn retranslate_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
     let pid_res = pid.to_string();
     let lang_c = lang.clone();
     let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
-        use dub_translate::{flat_run, Seg};
+        use dub_translate::{flat_run_with, FlatOpts, Seg};
         let pj = dir_for_job.join("project.json");
         let text = std::fs::read_to_string(&pj).map_err(|e| e.to_string())?;
         let mut p = Project::from_json(&text).map_err(|e| e.to_string())?;
@@ -2320,8 +2337,11 @@ async fn retranslate_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
                 Seg::new(src, spk)
             })
             .collect();
-        flat_run(client, &mut segs, "auto", &lang_c, spoken, &p.audio.translate_style)
+        let contract = dub_translate::Contract::for_client(client);
+        let opts = FlatOpts { src: "auto", tgt: &lang_c, spoken, style: &p.audio.translate_style, glossary: &p.glossary, contract: &contract };
+        flat_run_with(client, &mut segs, &opts, &mut |m: &str| progress(json!({ "type": "progress", "stage": "translate", "msg": m.trim() })))
             .map_err(|e| format!("translate: {e}"))?;
+        p.glossary_fp = glossary_api::fingerprint(&p.glossary, &lang_c);
         for (s, sg) in p.segments.iter_mut().zip(segs) {
             if !sg.tgt.trim().is_empty() {
                 s.tgt_text = sg.tgt;
@@ -2331,12 +2351,16 @@ async fn retranslate_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
         // Титры: text -> Lx (позиции/стиль остаются). Сбой перевода -> чистим tgt (рендер покажет исходный).
         if !p.captions.titles.is_empty() {
             let mut tsegs: Vec<Seg> = p.captions.titles.iter().map(|ti| Seg::new(ti.text.clone(), 0)).collect();
-            let ok = flat_run(client, &mut tsegs, "auto", &lang_c, false, &p.audio.translate_style).is_ok();
+            let topts = FlatOpts { src: "auto", tgt: &lang_c, spoken: false, style: &p.audio.translate_style, glossary: &[], contract: &contract };
+            let ok = flat_run_with(client, &mut tsegs, &topts, &mut |m: &str| eprintln!("[translate] {}", m.trim())).is_ok();
             for (ti, sg) in p.captions.titles.iter_mut().zip(tsegs) {
                 ti.tgt = if ok && !sg.tgt.trim().is_empty() { sg.tgt } else { String::new() };
             }
         }
         drop(prov);
+        if let Some(now) = glossary_api::on_disk(&dir_for_job)? {
+            p.glossary = now;
+        }
         save_project_atomic(&dir_for_job, &p)?;
         Ok(json!({ "project_id": pid_res, "ok": true }))
     });

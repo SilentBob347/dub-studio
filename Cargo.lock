@@ -801,6 +801,7 @@ dependencies = [
  "image",
  "mime_guess",
  "nvml-wrapper",
+ "regex",
  "reqwest",
  "rfd",
  "serde",

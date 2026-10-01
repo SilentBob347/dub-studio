@@ -56,6 +56,30 @@ release notes on GitHub are taken from the release's section.
   checked by SHA-256); a newer yt-dlp is checked for once a day and used only after it
   passes its checks, and the version with an Update button is shown there. The same through
   MCP: `url_probe`, `project_create_from_url` and the `url_*` tools.
+- **Subtitles in two languages.** The subtitle language is chosen apart from the dub: none, the
+  original, the translation or both. With both, the translation is the main line, lit word by word
+  with the dub, and the original is a second line above or below it, smaller, in its own color and
+  opacity — in the preview, the burned video, SRT and WebVTT (two lines in one subtitle) and as
+  separate MKV tracks with their language. In a dub, «original» now shows the original words, not
+  the dubbed translation. Lines follow Netflix's rules: at most 42 characters, and a subtitle longer
+  than 7 seconds is split at a word. The same through MCP: `subtitles_content_set`.
+- **Will the line fit?** Every line of the editor and the transcript shows whether its translation
+  fits its slot, is tight or does not fit, judged by the voice's own pace; a counter and a filter
+  find the lines that do not fit. **Shorten to fit** rewrites one line or all of them with the
+  translation model by the real length of the voiced phrase, and the render can do it by itself
+  (Settings: shorten the translation when a phrase does not fit). The same through MCP:
+  `segment_shorten`.
+- **A line's takes.** The last five voicings of every line are kept: listen to them, pick another one
+  without voicing again, go back to an earlier one with its text, or pin one so that a new render
+  keeps it. The same through MCP: `takes_list`, `take_select`, `take_pin`.
+- **A glossary for the project and the series.** Names, terms and brands with their translation or
+  «do not translate», how the voice says them, and how speech recognition misspells them (the
+  analysis corrects it). **Collect from text** proposes candidates for you to confirm; the glossary
+  goes to and from TSV, is saved to a series' casting profile and comes into the next episode's
+  analysis. When the glossary changes after the translation, the window says the translation is out
+  of date and makes it again. Replacing a word of a recognised line in the editor offers to add the
+  term. The same through MCP: `glossary_get`, `glossary_set`, `glossary_extract` and
+  `series_glossary_*`.
 
 ### Changed
 
@@ -85,6 +109,17 @@ release notes on GitHub are taken from the release's section.
   the same way; when the line cannot be separated from the music, making the voice fails instead of
   saving it with the music, and the status line says why: that the vocal separation engine is not
   installed and where to install it, or what the engine answered.
+- **Translation is checked line by line.** Where the server holds it — the studio's Gemma, OpenRouter
+  models with structured outputs, a local server that accepts it — the model answers in a strict JSON
+  format, and every line is checked: its language, a copy of the source, its length against the
+  slot, loops, a cut-off answer and the glossary's terms. A line that fails is asked again in a
+  smaller batch; a failure a smaller batch cannot cure (the network, a refused key, an empty answer)
+  stops the translation with its reason.
+- **The voice says only what is meant to be heard.** Sound tags ([music], (laughs), \*sigh\*), speaker
+  labels, markup and repeated loops are taken out of the text before it is voiced, and the glossary's
+  pronunciations are applied; a line left without words stays silent, and the editor says why.
+- A dot after an abbreviation, an initial or in a decimal number no longer ends a transcript line, and
+  a line where the speaker changes is cut at that word.
 
 ### Fixed
 

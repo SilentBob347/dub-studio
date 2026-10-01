@@ -66,12 +66,23 @@ export type Segment = {
   id: string; start: number; end: number; speaker?: string | null;
   src_text: string; tgt_text: string; voice?: string | null; dirty: boolean; hidden?: boolean; keep_original?: boolean;
   fit?: Fit | null; takes?: TakesSummary | null; shortened?: { from: string; to: string } | null;
+  // что услышит озвучка, если отличается от tgt_text (без тегов звуков, с произношением глоссария); почему фраза не озвучивается
+  tts_text?: string; tts_skip?: TtsSkip;
 };
 // Двуязычные субтитры (subs.mode = bilingual): порядок строк и вид второй строки (null — как у основной).
 export type Bilingual = {
   order: "translation_top" | "original_top";
   secondary: { size_pct: number; color: string | null; opacity: number | null };
 };
+export type TtsSkip = "sound_only" | "no_words";
+// Запись глоссария: перевод или keep (не переводить), произношение для озвучки, как ASR ошибается в термине.
+export type GlossaryEntry = {
+  term: string; translation: string; keep: boolean; pronunciation: string; asr_fix: string[]; note: string;
+  source: "manual" | "auto" | "series"; lang: string;
+};
+export type ProjectGlossary = { entries: GlossaryEntry[]; tgt_lang: string; casting_ref: string; stale: boolean };
+// Тело PUT глоссария: весь список или TSV; merge — влить в имеющиеся (присланное главнее).
+export type GlossaryPut = { entries: GlossaryEntry[]; merge?: boolean } | { tsv: string; merge?: boolean; lang?: string };
 export type BlurBox = { x: number; y: number; w: number; h: number; t0: number; t1: number; hidden?: boolean; fill?: string | null };
 export type Title = {
   text: string; tgt: string; bbox?: number[] | null; color?: string | null; bg?: string | null;
@@ -266,18 +277,23 @@ async function setupPost<T>(path: string, body: unknown): Promise<T> {
 export class ApiError extends Error {
   code: string;
   detail: string;
-  constructor(code: string, detail: string) {
+  args: Record<string, unknown>;
+  constructor(code: string, detail: string, args: Record<string, unknown> = {}) {
     super(detail ? `${code}: ${detail}` : code);
     this.code = code;
     this.detail = detail;
+    this.args = args;
   }
 }
 async function coded<T>(r: Response): Promise<T> {
   if (r.ok) return r.json() as Promise<T>;
   const text = await r.text();
-  let body: { error?: unknown; detail?: unknown } | null;
-  try { body = JSON.parse(text) as { error?: unknown; detail?: unknown }; } catch { body = null; }
-  if (body && typeof body.error === "string") throw new ApiError(body.error, typeof body.detail === "string" ? body.detail : "");
+  let body: { error?: unknown; detail?: unknown; args?: unknown } | null;
+  try { body = JSON.parse(text) as { error?: unknown; detail?: unknown; args?: unknown }; } catch { body = null; }
+  if (body && typeof body.error === "string") {
+    const args = body.args && typeof body.args === "object" && !Array.isArray(body.args) ? (body.args as Record<string, unknown>) : {};
+    throw new ApiError(body.error, typeof body.detail === "string" ? body.detail : "", args);
+  }
   throw new ApiError(`http_${r.status}`, text);
 }
 const sendCoded = <T>(method: "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<T> =>
@@ -428,6 +444,14 @@ export const api = {
   saveCastingToLibrary: (pid: string, name: string) => postJson<{ slug: string }>(`/projects/${pid}/casting/library`, { name }),
   deleteCastingLibrary: (slug: string) => fetch(`${BASE}/casting/library/${encodeURIComponent(slug)}`, { method: "DELETE" }).then(j<{ ok: boolean }>),
   castingLibraryAvatarUrl: (slug: string, id: string) => `${BASE}/casting/library/${encodeURIComponent(slug)}/avatar?id=${encodeURIComponent(id)}`,
+  // Глоссарий проекта и профиля сериала (библиотека кастингов); «Собрать из текста» — джоба с кандидатами в итоге.
+  glossary: (pid: string) => getJson<ProjectGlossary>(`/projects/${pid}/glossary`),
+  glossaryTsv: (pid: string) => fetch(`${BASE}/projects/${pid}/glossary?format=tsv`).then(async (r) => { if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); return r.text(); }),
+  saveGlossary: (pid: string, body: GlossaryPut) => sendCoded<ProjectGlossary>("PUT", `/projects/${pid}/glossary`, body),
+  extractGlossary: (pid: string) => postJson<{ job_id: string }>(`/projects/${pid}/glossary/extract`, {}),
+  seriesGlossary: (slug: string) => getJson<{ slug: string; entries: GlossaryEntry[] }>(`/casting/library/${encodeURIComponent(slug)}/glossary`),
+  saveSeriesGlossary: (slug: string, body: GlossaryPut) =>
+    sendCoded<{ slug: string; entries: GlossaryEntry[] }>("PUT", `/casting/library/${encodeURIComponent(slug)}/glossary`, body),
   listProjects: () => getJson<{ projects: ProjectListing[] }>("/projects"),   // недавние/сохранённые проекты для экрана «Открыть»
   getProject: (pid: string) => getJson<Project>(`/projects/${pid}`),
   deleteProject: (pid: string) => fetch(`${BASE}/projects/${pid}`, { method: "DELETE" }).then(j<{ ok: boolean }>),   // удалить проект (стирает workspace/<pid>) — кнопка в «Недавних»
