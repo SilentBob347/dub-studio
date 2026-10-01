@@ -27,6 +27,8 @@ jobs:
             desktop/src-tauri -> target
       - name: Build workspace
         run: cargo build --workspace
+      - name: Install ffmpeg
+        run: choco install ffmpeg -y --no-progress
       - name: Test workspace
         shell: bash
         run: |
