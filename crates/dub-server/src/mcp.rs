@@ -1526,7 +1526,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "segment_add",
-                description: "Add a line of your own at start seconds (end: 2 s later by default) for a speaker (the first line's when left out): it is voiced with that speaker's voice and shown as a subtitle. tgt_text is what it says; id is made up when left out.",
+                description: "Add a line of your own at start seconds (end: 2 s later by default) for a speaker (the first line's when left out): it is voiced with that speaker's voice and shown as a subtitle. tgt_text is what it says; id is made up when left out, and one whose letters, digits and underscores are another line's is taken (409): they name the line's files.",
                 schema: || object(json!({ "pid": pid(), "start": { "type": "number" }, "end": { "type": "number" }, "speaker": { "type": "string" }, "tgt_text": { "type": "string" }, "id": { "type": "string" }, "response_format": detail() }), &["pid", "start"]),
                 call: |args| edit(args, "add_segment"),
             },
@@ -1571,7 +1571,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "segment_split",
-                description: "Cut a line in two at a moment (at, seconds, inside the line): the recognised words and the text are divided there, tgt_text and tgt_text_2 give the two halves' translations (the translation is divided in the same share when left out). The second half gets new_id or <id>.2. A subtitle text of the line's own (caption_style_set with seg_id and text) is divided in the same share, and both halves keep its place and style. Both halves are dirty; the answer shows both.",
+                description: "Cut a line in two at a moment (at, seconds, inside the line): the recognised words and the text are divided there, tgt_text and tgt_text_2 give the two halves' translations (the translation is divided in the same share when left out). The second half gets new_id or <id>_2 (an id whose letters, digits and underscores are another line's is taken: they name the line's files). A subtitle text of the line's own (caption_style_set with seg_id and text) is divided in the same share, and both halves keep its place and style. Both halves are dirty; the answer shows both.",
                 schema: || object(json!({ "pid": pid(), "id": { "type": "string" }, "at": { "type": "number", "description": "seconds" }, "tgt_text": { "type": "string" }, "tgt_text_2": { "type": "string" }, "new_id": { "type": "string" }, "response_format": detail() }), &["pid", "id", "at"]),
                 call: |args| {
                     text(args, "id")?;
@@ -2588,18 +2588,12 @@ mod tests {
         ("GET", "/health", "the service's identity for the desktop shell's second launch: initialize names the server and its version"),
         ("PATCH", "/engine/opts", "an echo kept for the old page: models_select and settings_set choose the models"),
         ("POST", "/setup/browse", "a folder dialog for the person: models_import takes the path"),
-        ("POST", "/setup/open-models", "opens Explorer for the person: studio_paths names the models folder"),
         ("POST", "/pick-folder", "a folder dialog for the person: the agent names the folder"),
-        ("GET", "/record/devices", "the person's microphone"),
-        ("GET", "/record/level", "the person's microphone"),
-        ("POST", "/record/start", "the person's microphone"),
-        ("POST", "/record/stop", "the person's microphone"),
         ("GET", "/voices/sample", "audio for the page's player"),
         ("GET", "/projects/{pid}/casting/voice", "audio for the page's player"),
         ("GET", "/projects/{pid}/output", "the video for the page's player: project_files names the file"),
         ("GET", "/projects/{pid}/dub", "the audio for the page's player: project_files names the file"),
         ("GET", "/projects/{pid}/segments/{id}/takes/{n}/audio", "a take for the page's player: takes_list names its file"),
-        ("POST", "/projects/{pid}/save-text", "opens Explorer: project_export_text writes the same file without it"),
         ("GET", "/jobs/{job_id}/events", "the page's progress stream: job_get and studio_wait"),
         ("POST", "/url/probe", "the page's probe with cookies.txt as its content (a browser does not know file paths): url_probe passes the path"),
         ("POST", "/mcp", "the MCP server itself"),
@@ -2713,10 +2707,16 @@ mod tests {
                 }
             }
         }
+        let by_tool = covered.clone();
+        let mut stale = Vec::new();
         for (method, path) in NOT_TOOLS.iter().map(|(method, path, _)| (method, path)) {
             let at = routes.iter().position(|(m, p)| m == method && p == path).unwrap_or_else(|| panic!("{method} {path} of NOT_TOOLS is not a route of build_router"));
+            if by_tool[at] {
+                stale.push(format!("{method} {path}"));
+            }
             covered[at] = true;
         }
+        assert!(stale.is_empty(), "these routes of NOT_TOOLS are reached by a tool: drop them from NOT_TOOLS: {stale:?}");
         let missing: Vec<String> = routes.iter().zip(&covered).filter(|(_, done)| !**done).map(|((method, path), _)| format!("{method} {path}")).collect();
         assert!(missing.is_empty(), "these routes have no tool: give each one, or put it into NOT_TOOLS with why: {missing:?}");
         let landed: Vec<String> = PENDING.iter().filter(|(method, pattern)| routes.iter().any(|(m, p)| m == method && route_of(p, &filled(pattern)))).map(|(method, pattern)| format!("{method} {pattern}")).collect();

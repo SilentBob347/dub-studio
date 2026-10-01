@@ -211,6 +211,7 @@ pub fn migrate_legacy_selection(models_root: &Path) -> Result<Migrated> {
 }
 
 pub(crate) fn migrate_legacy_selection_into(models_root: &Path, dir: &Path) -> Result<Migrated> {
+    let _held = crate::models::selection_writes();
     let mut selection = crate::models::load_selection(models_root);
     let slots = selection.as_object_mut().expect("load_selection returns object");
     let mut migrated = Migrated::default();

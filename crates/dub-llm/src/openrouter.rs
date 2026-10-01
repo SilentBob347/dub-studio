@@ -374,13 +374,15 @@ impl OpenRouter {
                 bail!("OpenRouter models answered {status}: {}", snippet(&body));
             }
             let page: ModelsResponse = serde_json::from_str(&body).context("invalid OpenRouter models response")?;
-            next = page.links.and_then(|links| links.next).filter(|next| !next.trim().is_empty()).map(|next| {
-                if next.starts_with('/') && !next.starts_with("/models") {
-                    format!("{}{next}", self.base.trim_end_matches("/api/v1"))
-                } else {
-                    next
+            let origin = self.base.trim_end_matches("/api/v1");
+            next = match page.links.and_then(|links| links.next).filter(|next| !next.trim().is_empty()) {
+                // get() шлёт с запросом ключ: странице на другом хосте его не отдаём.
+                Some(next) if next.contains("://") && !next.starts_with(&format!("{origin}/")) => {
+                    bail!("OpenRouter models listing names its next page on another host: {next}")
                 }
-            });
+                Some(next) if next.starts_with('/') && !next.starts_with("/models") => Some(format!("{origin}{next}")),
+                other => other,
+            };
             catalog.merge(page.data);
         }
         Ok(catalog)

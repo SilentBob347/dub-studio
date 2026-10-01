@@ -867,8 +867,13 @@ function DropZone() {
       .then((c) => {
         if (srcReq.current !== lang) return; // юзер уже выбрал другой язык — ответ устарел
         if ((c.selection?.asr_engine ?? "parakeet") === "parakeet") {
-          api.setSelection("asr_engine", "whisper").catch(() => {});
-          setAsrNote(DUB_LANGS.find((l) => l.code === lang)?.name ?? lang);
+          api.setSelection("asr_engine", "whisper").then(
+            () => { if (srcReq.current === lang) setAsrNote(DUB_LANGS.find((l) => l.code === lang)?.name ?? lang); },
+            (e: unknown) => {
+              if (srcReq.current === lang) setAsrNote(null);
+              useStore.getState().pushActivity(t("prefs.saveFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
+            },
+          );
         } else {
           setAsrNote(null);
         }

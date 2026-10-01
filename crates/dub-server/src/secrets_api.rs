@@ -208,6 +208,7 @@ pub(crate) fn apply_proxy_form(models_root: &Path, secrets: &Path, form: &Value)
         Some(_) => return Err(FormError::bad("invalid_proxy_mode", "mode must be off, system or custom")),
     };
 
+    let _held = crate::models::selection_writes();
     let mut selection = crate::models::load_selection(models_root);
     // Режим, который действует сейчас (в т.ч. выведенный из прежнего proxy_on), — если форма его не меняет.
     let mode = mode.unwrap_or_else(|| crate::models::proxy_mode(&selection));

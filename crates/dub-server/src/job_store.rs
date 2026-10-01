@@ -85,6 +85,7 @@ fn write(dir: &Path, rec: &JobRecord) -> Result<(), String> {
 /// Новая запись перед постановкой в очередь. Счётчик продолжений переносится с прошлой записи того
 /// же вида, если она была незавершённой.
 pub fn write_queued(dir: &Path, kind: &str, args: &Value, job_id: &str) -> Result<(), String> {
+    let _held = record_writes();
     let now = now_secs();
     let resumes = match read(dir) {
         Ok(Some(prev)) if prev.kind == kind && prev.resumable() => prev.resumes + 1,
@@ -106,8 +107,16 @@ pub fn write_queued(dir: &Path, kind: &str, args: &Value, job_id: &str) -> Resul
     )
 }
 
+/// Держится от чтения job.json до записи обратно: постановка следующей джобы проекта не вклинивается
+/// между проверкой хозяина записи и её обновлением.
+fn record_writes() -> std::sync::MutexGuard<'static, ()> {
+    static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Read-modify-write записи. Нет записи — ошибка (обновлять нечего).
 pub fn update(dir: &Path, f: impl FnOnce(&mut JobRecord)) -> Result<(), String> {
+    let _held = record_writes();
     let mut rec = read(dir)?.ok_or_else(|| format!("{} нет в {}", FILE, dir.display()))?;
     f(&mut rec);
     rec.updated_at = now_secs();
@@ -117,8 +126,13 @@ pub fn update(dir: &Path, f: impl FnOnce(&mut JobRecord)) -> Result<(), String> 
 /// Обновить запись джобы `job_id`. Если job.json уже принадлежит более новой джобе проекта (другой
 /// класс поставлен следом), запись не трогаем: job.json — всегда последняя джоба проекта.
 pub fn update_owned(dir: &Path, job_id: &str, f: impl FnOnce(&mut JobRecord)) -> Result<(), String> {
+    let _held = record_writes();
     match read(dir)? {
-        Some(rec) if rec.job_id == job_id => update(dir, f),
+        Some(mut rec) if rec.job_id == job_id => {
+            f(&mut rec);
+            rec.updated_at = now_secs();
+            write(dir, &rec)
+        }
         Some(_) => Ok(()),
         None => Err(format!("{} нет в {}", FILE, dir.display())),
     }

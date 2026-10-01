@@ -266,6 +266,7 @@ pub fn already_shortened(seg: &dub_core::Segment) -> bool {
 /// Возвращает применённые сокращения и id реплик, с которых снято закрепление.
 pub fn persist(dir: &Path, changes: &[Change]) -> Result<(Vec<Change>, Vec<String>), String> {
     let path = dir.join("project.json");
+    let held = crate::project_writes();
     let text = std::fs::read_to_string(&path).map_err(|e| format!("чтение {}: {e}", path.display()))?;
     let mut proj = Project::from_json(&text).map_err(|e| format!("разбор {}: {e}", path.display()))?;
     let mut applied = Vec::new();
@@ -278,7 +279,8 @@ pub fn persist(dir: &Path, changes: &[Change]) -> Result<(Vec<Change>, Vec<Strin
     if applied.is_empty() {
         return Ok((applied, Vec::new()));
     }
-    crate::save_project_atomic(dir, &proj)?;
+    crate::write_project(dir, &proj)?;
+    drop(held);
     let mut unpinned = Vec::new();
     for c in &applied {
         if let Some(sid) = crate::render::seg_file_id(&c.id) {

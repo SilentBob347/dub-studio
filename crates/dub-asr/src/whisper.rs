@@ -423,7 +423,7 @@ impl WhisperAsr {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000);
         }
-        let out = cmd.output().map_err(|e| AsrError::Parakeet(format!("whisper spawn: {e}")))?;
+        let out = dub_core::proc::output(&mut cmd).map_err(|e| AsrError::Parakeet(format!("whisper spawn: {e}")))?;
         if !out.status.success() {
             let _ = std::fs::remove_dir_all(&out_dir);
             let stderr = String::from_utf8_lossy(&out.stderr);

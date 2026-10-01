@@ -23,6 +23,7 @@ pub fn load_selection(mroot: &Path) -> Value {
 
 /// Записать/обновить один слот выбора (engine -> variant) атомарно.
 pub fn set_selection(mroot: &Path, engine: &str, variant: &str) -> std::io::Result<()> {
+    let _held = selection_writes();
     let mut v = load_selection(mroot);
     v.as_object_mut()
         .expect("load_selection returns object")
@@ -30,7 +31,14 @@ pub fn set_selection(mroot: &Path, engine: &str, variant: &str) -> std::io::Resu
     write_selection(mroot, &v)
 }
 
-/// Записать весь выбор атомарно (tmp + rename).
+/// Держится от чтения active.json до записи обратно (ручки настроек, агент и джобы пишут его
+/// одновременно) и делит между писателями один active.json.tmp. Не реентерабелен.
+pub(crate) fn selection_writes() -> std::sync::MutexGuard<'static, ()> {
+    static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Записать весь выбор атомарно (tmp + rename) под уже взятым selection_writes.
 pub fn write_selection(mroot: &Path, selection: &Value) -> std::io::Result<()> {
     let _ = std::fs::create_dir_all(mroot);
     let tmp = mroot.join("active.json.tmp");
@@ -71,15 +79,14 @@ pub(crate) fn redact_selection(selection: &Value, or_key_set: bool, proxy_passwo
 
 /// Снять слот выбора, если он указывает на этот вариант (вариант удалён — резолв возьмёт установленный).
 pub fn clear_selection_if(mroot: &Path, engine: &str, variant: &str) -> std::io::Result<()> {
+    let _held = selection_writes();
     let mut v = load_selection(mroot);
     let obj = v.as_object_mut().expect("load_selection returns object");
     if obj.get(engine).and_then(Value::as_str) != Some(variant) {
         return Ok(());
     }
     obj.remove(engine);
-    let tmp = mroot.join("active.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap_or_default())?;
-    std::fs::rename(&tmp, mroot.join("active.json"))
+    write_selection(mroot, &v)
 }
 
 fn pick<'a>(sel: &'a Value, engine: &str) -> Option<&'a str> {

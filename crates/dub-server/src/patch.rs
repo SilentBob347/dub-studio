@@ -60,6 +60,23 @@ fn seg_by_id<'a>(p: &'a mut Project, edit: &Value) -> Result<&'a mut dub_core::S
         .ok_or((404, format!("segment {sid:?} not found")))
 }
 
+/// Id новой фразы: файлы фразы (seg-wav, ключ синтеза, дубли) зовутся по render::seg_file_id, а он
+/// отбрасывает всё, кроме [A-Za-z0-9_], поэтому `s1.2` и `s12` — один файл. Занят id, чьё имя файла
+/// уже у другой фразы; id без имени файла не годится.
+fn free_id(p: &Project, wanted: Option<String>, fallback: impl Fn(usize) -> String) -> Result<String, (u16, String)> {
+    let file_of = crate::render::seg_file_id;
+    let taken = |id: &str| {
+        let file = file_of(id);
+        p.segments.iter().any(|x| x.id == id || (file.is_some() && file_of(&x.id) == file))
+    };
+    match wanted.filter(|x| !x.is_empty()) {
+        Some(id) if file_of(&id).is_none() => Err((400, format!("segment id {id:?} has no letters or digits"))),
+        Some(id) if taken(&id) => Err((409, format!("segment id {id:?} is taken"))),
+        Some(id) => Ok(id),
+        None => Ok((1..).map(fallback).find(|id| !taken(id)).unwrap_or_default()),
+    }
+}
+
 /// Удалить элементы вектора по индексам edit["idxs"] (high->low, вне диапазона пропускаются).
 fn del_by_idxs<T>(v: &mut Vec<T>, edit: &Value) {
     for idx in idxs_desc(edit) {
@@ -392,9 +409,7 @@ fn op_add_segment(p: &mut Project, edit: &Value) -> PatchResult {
     let end = f(edit, "end").unwrap_or(start + 2.0).max(start + 0.2);
     // speaker: явный из запроса, иначе первый существующий (чтобы клон-голос был знакомым).
     let speaker = s(edit, "speaker").or_else(|| p.segments.first().and_then(|x| x.speaker.clone()));
-    let id = s(edit, "id")
-        .filter(|x| !x.is_empty())
-        .unwrap_or_else(|| format!("u{}", p.segments.len() + 1));
+    let id = free_id(p, s(edit, "id"), |n| format!("u{}", p.segments.len() + n))?;
     // Строим Segment через JSON — #[serde(flatten)] extra заполняется пустым объектом сам.
     let seg: dub_core::Segment = serde_json::from_value(serde_json::json!({
         "id": id, "start": start, "end": end, "speaker": speaker,
@@ -825,7 +840,7 @@ fn split_text(text: &str, fraction: f64) -> (String, String) {
 /// split_segment — разрезать фразу id в момент at (сек) на две, как ножницы монтажа. Пословные тайминги
 /// ASR делятся по времени; исходный текст — по ним, когда их столько же, сколько слов текста, иначе в той же
 /// доле, что время. Перевод берётся из tgt_text/tgt_text_2, если их прислали, иначе делится в доле исходного
-/// текста. Вторая часть получает new_id или свободный id вида `<id>.2`. Обе части dirty. Оверрайд субтитра
+/// текста. Вторая часть получает new_id или свободный id вида `<id>_2`. Обе части dirty. Оверрайд субтитра
 /// фразы (captions.overrides) переходит к обеим частям: место и стиль те же, свой текст делится в доле
 /// исходного текста.
 fn op_split_segment(p: &mut Project, edit: &Value) -> PatchResult {
@@ -836,12 +851,7 @@ fn op_split_segment(p: &mut Project, edit: &Value) -> PatchResult {
     if at < start + MIN_PART || at > end - MIN_PART {
         return Err((400, format!("split time {at} is not inside segment {sid:?} ({start:.2}..{end:.2}) by {MIN_PART} s")));
     }
-    let taken = |id: &str| p.segments.iter().any(|x| x.id == id);
-    let new_id = match s(edit, "new_id").filter(|x| !x.is_empty()) {
-        Some(id) if taken(&id) => return Err((409, format!("segment id {id:?} is taken"))),
-        Some(id) => id,
-        None => (2..).map(|n| format!("{sid}.{n}")).find(|id| !taken(id)).unwrap_or_default(),
-    };
+    let new_id = free_id(p, s(edit, "new_id"), |n| format!("{sid}_{}", n + 1))?;
     let first = &p.segments[idx];
     let words = first.extra.get("words").and_then(Value::as_array).cloned();
     let (words_1, words_2): (Option<Vec<Value>>, Option<Vec<Value>>) = match &words {
@@ -1380,7 +1390,7 @@ mod tests {
         p.segments.push(line("s2", 6.0, 7.0, "five", "пять"));
         apply(&mut p, &json!({"op":"split_segment","id":"s1","at":3.0})).unwrap();
         let ids: Vec<&str> = p.segments.iter().map(|x| x.id.as_str()).collect();
-        assert_eq!(ids, ["s1", "s1.2", "s2"]);
+        assert_eq!(ids, ["s1", "s1_2", "s2"]);
         let (a, b) = (&p.segments[0], &p.segments[1]);
         assert_eq!((a.start, a.end, b.start, b.end), (1.0, 3.0, 3.0, 5.0));
         assert_eq!((a.src_text.as_str(), b.src_text.as_str()), ("one two", "three four"));
@@ -1404,6 +1414,19 @@ mod tests {
         assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"s1","at":0.5,"new_id":"x"})).unwrap_err().0, 409, "an id in use");
         assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"nope","at":0.5})).unwrap_err().0, 404);
         assert_eq!(split_text("你好世界", 0.5), ("你好".to_string(), "世界".to_string()), "text without spaces is cut by characters");
+    }
+
+    #[test]
+    fn a_new_line_never_shares_another_line_s_files() {
+        let mut p = Project::default();
+        p.segments.extend([line("s1", 0.0, 4.0, "a b", "раз два"), line("s12", 5.0, 6.0, "c", "три"), line("s1_2", 7.0, 8.0, "d", "четыре")]);
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
+        assert_eq!(p.segments[1].id, "s1_3", "s1_2 is taken");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"s1","at":1.0,"new_id":"s1.2"})).unwrap_err().0, 409, "s1.2 is the file of s12");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"s1","at":1.0,"new_id":"--"})).unwrap_err().0, 400, "no file name");
+        assert_eq!(apply(&mut p, &json!({"op":"add_segment","start":9.0,"id":"s-12"})).unwrap_err().0, 409);
+        let files: std::collections::HashSet<_> = p.segments.iter().map(|x| crate::render::seg_file_id(&x.id)).collect();
+        assert_eq!(files.len(), p.segments.len());
     }
 
     #[test]
@@ -1437,23 +1460,23 @@ mod tests {
         let mut p = Project::default();
         p.segments.push(line("s1", 0.0, 4.0, "a b c d", "один два три четыре"));
         apply(&mut p, &json!({"op":"caption","seg_id":"s1","text":"свой текст этой фразы","y":120,"color":"#00FF00"})).unwrap();
-        p.captions.overrides.push(CaptionOverride { seg_id: "s1.2".into(), text: Some("от удалённой фразы".into()), ..Default::default() });
+        p.captions.overrides.push(CaptionOverride { seg_id: "s1_2".into(), text: Some("от удалённой фразы".into()), ..Default::default() });
         apply(&mut p, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
-        let (first, second) = (caption_of(&p, "s1"), caption_of(&p, "s1.2"));
+        let (first, second) = (caption_of(&p, "s1"), caption_of(&p, "s1_2"));
         assert_eq!((first.len(), second.len()), (1, 1), "one override each, the stale one of a deleted line gone");
         assert_eq!((first[0].text.as_deref(), second[0].text.as_deref()), (Some("свой текст"), Some("этой фразы")));
         assert_eq!((second[0].y, second[0].style.as_ref().map(|st| st.color.as_str())), (Some(120), Some("#00FF00")));
 
         apply(&mut p, &json!({"op":"caption","seg_id":"s1","y":40})).unwrap();
         apply(&mut p, &json!({"op":"split_segment","id":"s1","at":1.0})).unwrap();
-        let third = caption_of(&p, "s1.3");
+        let third = caption_of(&p, "s1_3");
         assert_eq!((third[0].y, third[0].text.as_deref(), caption_of(&p, "s1")[0].text.as_deref()), (Some(40), Some("текст"), Some("свой")));
 
         let mut styled = Project::default();
         styled.segments.push(line("s1", 0.0, 4.0, "a b", "раз два"));
         apply(&mut styled, &json!({"op":"caption","seg_id":"s1","x":30})).unwrap();
         apply(&mut styled, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
-        let copy = caption_of(&styled, "s1.2");
+        let copy = caption_of(&styled, "s1_2");
         assert_eq!((copy[0].x, copy[0].text.as_deref()), (Some(30), None), "a style-only override is copied without a text");
 
         let mut plain = Project::default();

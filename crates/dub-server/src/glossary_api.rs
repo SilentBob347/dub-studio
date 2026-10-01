@@ -12,7 +12,7 @@ use dub_core::glossary::{for_translation, from_tsv, merge_tsv, merge_under, to_t
 use dub_core::{GlossaryEntry, GlossarySource, Project};
 use serde_json::{json, Value};
 
-use crate::{casting_library, jobs, save_project_atomic, AppState};
+use crate::{casting_library, jobs, AppState};
 
 /// Отпечаток того, что перевод на `tgt` берёт из глоссария (for_translation: термин, перевод, keep в порядке
 /// промпта); пусто — таких записей нет (старый проект без глоссария не «устаревает»).
@@ -135,6 +135,7 @@ pub async fn project_put(State(st): State<AppState>, AxPath(pid): AxPath<String>
         Ok(d) => d,
         Err(r) => return r,
     };
+    let _held = crate::project_writes();
     let mut p = match st.load_project(&pid) {
         Ok(p) => p,
         Err(r) => return r,
@@ -143,7 +144,7 @@ pub async fn project_put(State(st): State<AppState>, AxPath(pid): AxPath<String>
         Ok(entries) => p.glossary = entries,
         Err(e) => return refused(e),
     }
-    if let Err(e) = save_project_atomic(&dir, &p) {
+    if let Err(e) = crate::write_project(&dir, &p) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
     Json(project_json(&p)).into_response()
@@ -348,7 +349,7 @@ mod tests {
         let analyzed = vec![entry("Harry", "Гарри"), ron.clone()];
         assert_eq!(after_analyze(&dir, &analyzed).unwrap(), analyzed, "no project.json yet");
         let now = Project { glossary: vec![entry("Harry", "Гарри"), entry("Hermione", "Гермиона"), ron.clone()], ..Project::default() };
-        save_project_atomic(&dir, &now).unwrap();
+        crate::save_project_atomic(&dir, &now).unwrap();
         let kept = after_analyze(&dir, &analyzed).unwrap();
         assert_eq!(kept.iter().map(|e| e.term.as_str()).collect::<Vec<_>>(), vec!["Harry", "Hermione", "Ron"]);
         assert_eq!(on_disk(&dir).unwrap().unwrap().len(), 3);

@@ -372,6 +372,19 @@ impl AppState {
 
 /// Атомарная запись project.json (tmp+rename): частичного файла при падении не будет.
 fn save_project_atomic(dir: &Path, proj: &Project) -> Result<(), String> {
+    let _held = project_writes();
+    write_project(dir, proj)
+}
+
+/// Держится от чтения project.json до записи обратно: правка одного писателя не теряется между
+/// чтением и записью другого. Не реентерабелен: под ним пишут через write_project, не save_project_atomic.
+pub(crate) fn project_writes() -> std::sync::MutexGuard<'static, ()> {
+    static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Запись project.json под уже взятым project_writes.
+pub(crate) fn write_project(dir: &Path, proj: &Project) -> Result<(), String> {
     let json = proj
         .to_json_pretty()
         .map_err(|e| format!("сериализация project.json: {e}"))?;
@@ -1230,6 +1243,7 @@ async fn casting_save(
         Ok(d) => d,
         Err(r) => return r,
     };
+    let _held = project_writes();
     let mut proj = match st.load_project(&pid) {
         Ok(p) => p,
         Err(r) => return r,
@@ -1316,7 +1330,7 @@ async fn casting_save(
     if let Err(e) = dub_faces::save_casting(&path, &casting) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
-    if let Err(e) = save_project_atomic(&dir, &proj) {
+    if let Err(e) = write_project(&dir, &proj) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
     // Возвращаем ПОЛНЫЙ список персонажей в шейпе фронта (тот же, что casting_get) — фронт кладёт его
@@ -1855,6 +1869,7 @@ async fn patch_project(
         Ok(d) => d,
         Err(resp) => return resp,
     };
+    let _held = project_writes();
     let mut proj = match st.load_project(&pid) {
         Ok(p) => p,
         Err(resp) => return resp,
@@ -1873,7 +1888,7 @@ async fn patch_project(
     if let Err(r) = patch::apply(&mut proj, &edit) {
         return refused(r);
     }
-    if let Err(e) = save_project_atomic(&dir, &proj) {
+    if let Err(e) = write_project(&dir, &proj) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
     if take_op {
@@ -1913,6 +1928,7 @@ fn bake_render_state(
     let after = shortened.map(texts);
     let baked = after.as_ref().unwrap_or(&before);
     let ckpts = render::SegCkpts::load(dir_for_job)?;
+    let _held = project_writes();
     let t2 = std::fs::read_to_string(proj_path).map_err(|e| format!("чтение {}: {e}", proj_path.display()))?;
     let mut cur = Project::from_json(&t2).map_err(|e| format!("разбор {}: {e}", proj_path.display()))?;
     for s in &mut cur.segments {
@@ -1929,7 +1945,7 @@ fn bake_render_state(
             }
         }
     }
-    save_project_atomic(dir_for_job, &cur)
+    write_project(dir_for_job, &cur)
 }
 
 #[cfg(test)]
@@ -2837,7 +2853,7 @@ async fn align_enqueue(st: &AppState, pid: &str) -> Result<String, Box<Response>
     let dir_for_job = dir.clone();
     let pid_res = pid.to_string();
     let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
-        let mut proj = Project::from_json(&std::fs::read_to_string(dir_for_job.join("project.json")).map_err(|e| e.to_string())?)
+        let proj = Project::from_json(&std::fs::read_to_string(dir_for_job.join("project.json")).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         if proj.segments.iter().all(|s| s.src_text.trim().is_empty()) {
             return Err("выравнивание по речи: у реплик нет текста на языке оригинала (субтитры импортированы на языке перевода)".into());
@@ -2865,8 +2881,17 @@ async fn align_enqueue(st: &AppState, pid: &str) -> Result<String, Box<Response>
                 a.share * 100.0
             ));
         }
-        let changed = apply_alignment(&mut proj, &a);
-        save_project_atomic(&dir_for_job, &proj)?;
+        // Распознавание шло минутами: правки, сделанные за это время, остаются, а выравнивание ложится,
+        // только пока реплики те же, что сопоставлялись со словами.
+        let _held = project_writes();
+        let mut fresh = Project::from_json(&std::fs::read_to_string(dir_for_job.join("project.json")).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        let same = |p: &Project| p.segments.iter().map(|s| (s.id.clone(), s.start, s.end, s.src_text.clone())).collect::<Vec<_>>();
+        if same(&fresh) != same(&proj) {
+            return Err("выравнивание по речи: реплики изменились, пока шло распознавание — тайминги не менялись, запустите выравнивание ещё раз".into());
+        }
+        let changed = apply_alignment(&mut fresh, &a);
+        write_project(&dir_for_job, &fresh)?;
         progress(json!({ "stage": "asr", "msg": format!(
             "выровнено по речи: {:.0}% реплик по словам, изменён тайминг у {changed}; сдвиг {:+.2} с",
             a.share * 100.0, a.offset
