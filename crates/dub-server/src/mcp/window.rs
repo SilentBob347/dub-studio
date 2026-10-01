@@ -334,7 +334,7 @@ pub(crate) async fn track(request: Request<Body>, next: Next) -> Response {
     let depth = path.trim_matches('/').split('/').count();
     // the answers that are the project itself: read, edited, replaced
     let whole_project = pid.is_some() && depth == 2;
-    let expected = match (&method, whole_project && depth == 2) {
+    let expected = match (&method, whole_project) {
         (&Method::PUT, true) => request.headers().get(REV_HEADER).and_then(|value| value.to_str().ok()).and_then(|value| value.trim().parse::<u64>().ok()),
         _ => None,
     };

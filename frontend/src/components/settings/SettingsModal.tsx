@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Boxes, Cloud, Gauge, Globe, Info, Languages, Plug, X, type LucideIcon } from "lucide-react";
 import { parseSettingsTarget, type SettingsSection } from "../../lib/settingsNav";
+import { useEscapeLayer } from "../../lib/escape";
 import QualitySection from "./QualitySection";
 import InterfaceSection from "./InterfaceSection";
 import AboutSection from "./AboutSection";
@@ -50,15 +51,7 @@ export default function SettingsModal({ target, request, panes, onClose }: { tar
     if (next) { setSection(next.section); setFocus(next.part ? { part: next.part } : null); }
   }
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.defaultPrevented) return;
-      e.stopPropagation();
-      onClose();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  useEscapeLayer(onClose);
 
   // Раздел может дорисоваться позже (ждёт ответа сервера): ждём появления блока, а не один кадр.
   useEffect(() => {

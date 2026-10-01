@@ -229,7 +229,7 @@ fn hide_console_window() {
 
 pub fn run() {
     // Что бы ни завершило процесс — окно, диспетчер задач, taskkill, падение, — llama-server,
-    // bs_roformer-cli, whisper, ffmpeg и openrouter-helper уходят вместе с ним.
+    // bs_roformer-cli, whisper и ffmpeg уходят вместе с ним.
     if !dub_server::process_group::bind_children_to_this_process() {
         eprintln!("[ERROR] процесс не встал в свой job object: сайдкары гасятся только своими деструкторами");
     }

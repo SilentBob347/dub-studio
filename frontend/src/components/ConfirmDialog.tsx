@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2, TriangleAlert } from "lucide-react";
+import { useEscapeLayer } from "../lib/escape";
 
 // Подтверждение необратимого действия вместо window.confirm: своё окно в стиле студии, Escape и клик по
 // подложке отменяют, Enter подтверждает. onConfirm может быть асинхронным: пока он идёт, окно ждёт, а его
@@ -33,13 +34,7 @@ export default function ConfirmDialog({ title, message, confirmLabel, danger = f
   };
 
   useEffect(() => { confirmRef.current?.focus(); }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); if (!busy) onCancel(); }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [busy, onCancel]);
+  useEscapeLayer(() => { if (!busy) onCancel(); });
 
   return (
     <div className="fixed inset-0 z-[70] grid place-items-center glass-scrim anim-fade" onClick={() => { if (!busy) onCancel(); }}>

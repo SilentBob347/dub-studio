@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowUpDown, Check } from "lucide-react";
 import type { ProjectOrder } from "../lib/projectList";
+import { useEscapeLayer } from "../lib/escape";
 
 const LABELS = {
   newest: "projects.sort.newest",
@@ -22,14 +23,10 @@ export default function SortMenu({ order, orders, onChange }: { order: ProjectOr
   useEffect(() => {
     if (!open) return;
     const outside = (e: MouseEvent) => { if (menu.current && !menu.current.contains(e.target as Node)) setOpen(false); };
-    const escape = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); setOpen(false); } };
     document.addEventListener("mousedown", outside);
-    window.addEventListener("keydown", escape, true);
-    return () => {
-      document.removeEventListener("mousedown", outside);
-      window.removeEventListener("keydown", escape, true);
-    };
+    return () => document.removeEventListener("mousedown", outside);
   }, [open]);
+  useEscapeLayer(() => setOpen(false), open);
 
   const current = t(LABELS[order]);
   return (

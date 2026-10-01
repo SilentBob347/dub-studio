@@ -69,8 +69,11 @@ export default function LlmProviders({ selection, hasOrKey, onChanged }: {
   const [serverErr, setServerErr] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const sel = (k: string) => slot(selection, k) ?? "";
-  const set = (k: string, v: string) =>
-    api.setSelection(k, v).then(onChanged, (e: unknown) => setErr(t("providers.saveFailed", { detail: errorText(e) })));
+  const set = (k: string, v: string): Promise<boolean> =>
+    api.setSelection(k, v).then(
+      () => { setErr(null); onChanged(); return true; },
+      (e: unknown) => { setErr(t("providers.saveFailed", { detail: errorText(e) })); return false; },
+    );
   const savedUrl = sel("srv_url") || DEFAULT_SERVER_URL;
   const usesServer = llmProviderOf(selection, "llm") === "server" || llmProviderOf(selection, "vision") === "server";
 
@@ -88,7 +91,7 @@ export default function LlmProviders({ selection, hasOrKey, onChanged }: {
     if (urlDraft === null) return;
     const next = urlDraft.trim();
     if (!next || next === savedUrl) { setUrlDraft(null); return; }
-    set("srv_url", next).then(() => setUrlDraft(null));
+    void set("srv_url", next).then((saved) => { if (saved) setUrlDraft(null); });
   };
 
   const stageBlock = (stage: Stage) => {

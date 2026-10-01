@@ -167,6 +167,9 @@ pub async fn series_get(State(st): State<AppState>, AxPath(slug): AxPath<String>
 /// PUT /casting/library/{slug}/glossary {entries | tsv, merge?, lang?} -> {slug, entries}. «Сохранить в
 /// профиль сериала» — записи проекта с merge: true.
 pub async fn series_put(State(st): State<AppState>, AxPath(slug): AxPath<String>, Json(body): Json<Put>) -> Response {
+    // Держится от чтения глоссария профиля до записи: слияние одного писателя не теряется под записью другого.
+    static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let current = if body.merge {
         match casting_library::read_glossary(&st.repo_root, &slug) {
             None => return (StatusCode::NOT_FOUND, "profile not found").into_response(),

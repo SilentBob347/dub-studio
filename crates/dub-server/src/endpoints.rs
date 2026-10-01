@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::{jobs, save_project_atomic, AppState};
+use crate::{jobs, AppState};
 
 // ─── GET /fonts ─────────────────────────────────────────────────────────────
 pub async fn fonts() -> Json<Value> {
@@ -321,12 +321,16 @@ pub async fn put_project(
         Err(e) => return (StatusCode::BAD_REQUEST, format!("bad project: {e}")).into_response(),
     };
     crate::fitplan::strip_computed(&mut proj);
-    // Глоссарий меняет только его ручка: откат правок окна (undo) присылает снимок со старым глоссарием.
-    if let Ok(stored) = st.load_project(&pid) {
-        proj.glossary = stored.glossary;
-    }
-    if let Err(e) = save_project_atomic(&dir, &proj) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    {
+        let _held = crate::project_writes();
+        // Глоссарий меняет только его ручка: откат правок окна (undo) присылает снимок со старым глоссарием.
+        match st.load_project(&pid) {
+            Ok(stored) => proj.glossary = stored.glossary,
+            Err(resp) => return resp,
+        }
+        if let Err(e) = crate::write_project(&dir, &proj) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+        }
     }
     crate::project_response(&st, &dir, &proj)
 }
@@ -379,7 +383,6 @@ pub async fn remix_project(
     }
 }
 
-/// Поставить ремикс с args.instruction (его же сохраняет job.json для «Продолжить»).
 pub(crate) async fn remix_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<String, Box<Response>> {
     let instruction = args.get("instruction").and_then(Value::as_str).unwrap_or("").to_string();
     if instruction.trim().is_empty() {
@@ -400,8 +403,11 @@ pub(crate) async fn remix_enqueue(st: &AppState, pid: &str, args: &Value) -> Res
     let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
         use dub_translate::{flat_rewrite, Seg};
 
-        let text = std::fs::read_to_string(&proj_path).map_err(|e| e.to_string())?;
-        let mut p = Project::from_json(&text).map_err(|e| e.to_string())?;
+        let read = |path: &std::path::Path| -> Result<Project, String> {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("чтение {}: {e}", path.display()))?;
+            Project::from_json(&text).map_err(|e| format!("разбор {}: {e}", path.display()))
+        };
+        let p = read(&proj_path)?;
         if p.segments.is_empty() {
             return Err("no transcript to remix — analyze first".into());
         }
@@ -423,6 +429,7 @@ pub(crate) async fn remix_enqueue(st: &AppState, pid: &str, args: &Value) -> Res
         .map_err(|e| format!("ремикс: LLM недоступен — {e}"))?;
         let client = prov.client();
 
+        let inputs: Vec<(String, String)> = p.segments.iter().map(|s| (s.id.clone(), s.src_text.clone())).collect();
         let mut segs: Vec<Seg> = p
             .segments
             .iter()
@@ -435,17 +442,22 @@ pub(crate) async fn remix_enqueue(st: &AppState, pid: &str, args: &Value) -> Res
         drop(prov);
         r.map_err(|e| format!("remix: {e}"))?;
 
-        for (i, s) in p.segments.iter_mut().enumerate() {
-            if let Some(sg) = segs.get(i) {
-                if !sg.tgt.trim().is_empty() {
-                    s.tgt_text = sg.tgt.clone();
-                }
+        // Ремикс шёл минутами: правки, сделанные за это время, остаются, а новый текст ложится, только пока
+        // реплики те же, что переписывались.
+        let _held = crate::project_writes();
+        let mut fresh = read(&proj_path)?;
+        if fresh.segments.iter().map(|s| (s.id.clone(), s.src_text.clone())).collect::<Vec<_>>() != inputs {
+            return Err("ремикс: реплики изменились, пока шёл ремикс — проект не менялся, запустите ремикс ещё раз".into());
+        }
+        for (s, sg) in fresh.segments.iter_mut().zip(segs) {
+            if !sg.tgt.trim().is_empty() {
+                s.tgt_text = sg.tgt;
             }
             s.dirty = true;
         }
-        p.audio.rewrite = Some(instr.clone());
-        save_project_atomic(&dir_for_job, &p)?;
-        serde_json::to_value(&p).map_err(|e| e.to_string())
+        fresh.audio.rewrite = Some(instr.clone());
+        crate::write_project(&dir_for_job, &fresh)?;
+        serde_json::to_value(&fresh).map_err(|e| e.to_string())
     });
     st.jobs
         .enqueue(jobs::JobMeta::persistent(jobs::JobKind::Remix, pid, dir, args.clone()), job)

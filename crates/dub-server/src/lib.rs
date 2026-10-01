@@ -953,10 +953,9 @@ async fn voice_slots_assign(
         Ok(d) => d,
         Err(r) => return r,
     };
-    let mut proj = match st.load_project(&pid) {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
+    if let Err(r) = st.load_project(&pid) {
+        return r;
+    }
     // Списки имён из тела; проверяем существование каждого в voices/ (.wav|.mp3).
     let slots = voice_slots::Slots::from_json(&body);
     if let Some(n) = slots.missing_in(&list_voice_names(&st.voices_dir)).first() {
@@ -968,8 +967,22 @@ async fn voice_slots_assign(
 
     let dir_job = dir.clone();
     let res = tokio::task::spawn_blocking(mcp::carry(move || {
-        let assigns = voice_slots::assign(&mut proj, &vocals, &dir_job, &slots);
-        save_project_atomic(&dir_job, &proj)?;
+        let path = dir_job.join("project.json");
+        let read = || -> Result<Project, String> {
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("чтение {}: {e}", path.display()))?;
+            Project::from_json(&text).map_err(|e| format!("разбор {}: {e}", path.display()))
+        };
+        let measured = read()?;
+        let assigns = voice_slots::plan(&measured, &vocals, &dir_job, &slots);
+        // Замер F0 идёт секунды: правки, пришедшие за это время, остаются, а голоса ложатся, только пока
+        // спикеры те же, что мерились.
+        let _held = project_writes();
+        let mut proj = read()?;
+        if voice_slots::speakers(&proj) != voice_slots::speakers(&measured) {
+            return Err("голоса по слотам: спикеры изменились, пока мерился голос — проект не менялся, запустите ещё раз".to_string());
+        }
+        voice_slots::apply(&mut proj, &assigns);
+        write_project(&dir_job, &proj)?;
         Ok::<_, String>((assigns, proj))
     }))
     .await;
@@ -2306,17 +2319,15 @@ async fn retranslate_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
     let job: jobs::JobFn = Box::new(move |progress: jobs::ProgressFn| {
         use dub_translate::{flat_run_with, FlatOpts, Seg};
         let pj = dir_for_job.join("project.json");
-        let text = std::fs::read_to_string(&pj).map_err(|e| e.to_string())?;
-        let mut p = Project::from_json(&text).map_err(|e| e.to_string())?;
-        p.tgt_lang = lang_c.clone();
-        p.mode = mode.clone();
-        // Закадр/субтитры не переписывают текст «смешно» — сбрасываем rewrite, чтобы derived-режим во фронте
-        // не показал «funny» после перехода в dub/nodub/voiceover из транскрипта.
-        p.audio.rewrite = None;
-        let spoken = matches!(p.mode.as_str(), "dub" | "voiceover");
+        let read = |path: &Path| -> Result<Project, String> {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("чтение {}: {e}", path.display()))?;
+            Project::from_json(&text).map_err(|e| format!("разбор {}: {e}", path.display()))
+        };
+        let p = read(&pj)?;
+        let spoken = matches!(mode.as_str(), "dub" | "voiceover");
         progress(json!({ "type": "progress", "stage": "translate",
             "msg": format!("Перевод {} строк → {}", p.segments.len(), lang_c) }));
-        let prov = match crate::llm_provider::open(
+        let prov = crate::llm_provider::open(
             &crate::llm_provider::LlmOpen {
                 llama_bin: &llama_bin,
                 mt_model: &mt_model,
@@ -2324,60 +2335,62 @@ async fn retranslate_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
                 models_root: &models_root_xl,
             },
             crate::llm_provider::LlmMode::Text,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                // Если LLM недоступен для перевода, мы ВСЁ РАВНО обновляем p.mode и сохраняем проект,
-                // чтобы переход из «Транскрипта» в Дубляж/Закадр/Субтитры происходил успешно.
-                p.mode = mode.clone();
-                for s in &mut p.segments {
-                    if s.tgt_text.trim().is_empty() {
-                        s.tgt_text = s.src_text.clone();
-                    }
-                }
-                progress(json!({ "type": "progress", "stage": "translate",
-                    "msg": format!("⚠ LLM недоступен ({e}) — режим изменен на {}, текстом оставлен исходный", mode) }));
-                save_project_atomic(&dir_for_job, &p)?;
-                return Ok(json!({ "project_id": pid_res, "ok": true }));
-            }
-        };
+        )
+        .map_err(|e| format!("перевод не выполнен: LLM недоступен: {e}"))?;
         let client = prov.client();
         // src_text -> Lx (тайминги/спикеры/раскладка остаются от транскрипта). Вручную добавленные фразы
         // (пустой src_text) переводим из текущего tgt_text (как в export_lang).
+        let input = |s: &dub_core::Segment| -> (String, String) {
+            let text = if s.src_text.trim().is_empty() { &s.tgt_text } else { &s.src_text };
+            (s.id.clone(), text.clone())
+        };
+        let inputs: Vec<(String, String)> = p.segments.iter().map(input).collect();
         let mut segs: Vec<Seg> = p
             .segments
             .iter()
-            .map(|s| {
-                let spk = crate::analyze::speaker_to_i64(s.speaker.as_deref());
-                let src = if s.src_text.trim().is_empty() { s.tgt_text.clone() } else { s.src_text.clone() };
-                Seg::new(src, spk)
-            })
+            .zip(&inputs)
+            .map(|(s, (_, text))| Seg::new(text.clone(), crate::analyze::speaker_to_i64(s.speaker.as_deref())))
             .collect();
         let contract = dub_translate::Contract::for_client(client);
         let opts = FlatOpts { src: "auto", tgt: &lang_c, spoken, style: &p.audio.translate_style, glossary: &p.glossary, contract: &contract };
         flat_run_with(client, &mut segs, &opts, &mut |m: &str| progress(json!({ "type": "progress", "stage": "translate", "msg": m.trim() })))
             .map_err(|e| format!("translate: {e}"))?;
-        p.glossary_fp = glossary_api::fingerprint(&p.glossary, &lang_c);
-        for (s, sg) in p.segments.iter_mut().zip(segs) {
+        // Титры: text -> Lx (позиции/стиль остаются).
+        let titles: Vec<String> = p.captions.titles.iter().map(|ti| ti.text.clone()).collect();
+        let mut title_tgts: Vec<String> = Vec::new();
+        if !titles.is_empty() {
+            let mut tsegs: Vec<Seg> = titles.iter().map(|text| Seg::new(text.clone(), 0)).collect();
+            let topts = FlatOpts { src: "auto", tgt: &lang_c, spoken: false, style: &p.audio.translate_style, glossary: &[], contract: &contract };
+            flat_run_with(client, &mut tsegs, &topts, &mut |m: &str| progress(json!({ "type": "progress", "stage": "translate", "msg": m.trim() })))
+                .map_err(|e| format!("перевод титров: {e}"))?;
+            title_tgts = tsegs.into_iter().map(|sg| sg.tgt).collect();
+        }
+        drop(prov);
+        // Перевод шёл минутами: правки, сделанные за это время, остаются, а перевод ложится, только пока
+        // реплики и титры те же, что переводились.
+        let _held = project_writes();
+        let mut fresh = read(&pj)?;
+        let now: Vec<(String, String)> = fresh.segments.iter().map(input).collect();
+        let now_titles: Vec<&str> = fresh.captions.titles.iter().map(|ti| ti.text.as_str()).collect();
+        if now != inputs || now_titles != titles.iter().map(String::as_str).collect::<Vec<_>>() {
+            return Err("перевод: реплики или титры изменились, пока шёл перевод — проект не менялся, запустите перевод ещё раз".into());
+        }
+        fresh.tgt_lang = lang_c.clone();
+        fresh.mode = mode.clone();
+        // Закадр/субтитры не переписывают текст «смешно» — сбрасываем rewrite, чтобы derived-режим во фронте
+        // не показал «funny» после перехода в dub/nodub/voiceover из транскрипта.
+        fresh.audio.rewrite = None;
+        fresh.glossary_fp = glossary_api::fingerprint(&p.glossary, &lang_c);
+        for (s, sg) in fresh.segments.iter_mut().zip(segs) {
             if !sg.tgt.trim().is_empty() {
                 s.tgt_text = sg.tgt;
             }
             s.dirty = true; // новый язык -> ре-TTS при рендере/озвучке
         }
-        // Титры: text -> Lx (позиции/стиль остаются). Сбой перевода -> чистим tgt (рендер покажет исходный).
-        if !p.captions.titles.is_empty() {
-            let mut tsegs: Vec<Seg> = p.captions.titles.iter().map(|ti| Seg::new(ti.text.clone(), 0)).collect();
-            let topts = FlatOpts { src: "auto", tgt: &lang_c, spoken: false, style: &p.audio.translate_style, glossary: &[], contract: &contract };
-            let ok = flat_run_with(client, &mut tsegs, &topts, &mut |m: &str| eprintln!("[translate] {}", m.trim())).is_ok();
-            for (ti, sg) in p.captions.titles.iter_mut().zip(tsegs) {
-                ti.tgt = if ok && !sg.tgt.trim().is_empty() { sg.tgt } else { String::new() };
-            }
+        for (ti, tgt) in fresh.captions.titles.iter_mut().zip(title_tgts) {
+            ti.tgt = if tgt.trim().is_empty() { String::new() } else { tgt };
         }
-        drop(prov);
-        if let Some(now) = glossary_api::on_disk(&dir_for_job)? {
-            p.glossary = now;
-        }
-        save_project_atomic(&dir_for_job, &p)?;
+        write_project(&dir_for_job, &fresh)?;
         Ok(json!({ "project_id": pid_res, "ok": true }))
     });
     st.jobs

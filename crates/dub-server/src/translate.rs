@@ -2,8 +2,8 @@
 //! крейта dub-translate (Gemma через сайдкар llama-server). Заполняет tgt_text сегментов, titles/brands/
 //! sub_style/sub_y и raw_ctx в Project. Все решения (do_translate / same_lang / rewrite) — как в питоне.
 //!
-//! Fail-safe: любой сбой (нет llama-бинаря / нет весов / упал сервер) логируется в SSE и оставляет tgt
-//! пустым — перевод не блокирует транскрипт-стадию analyze (её результат уже валиден).
+//! Перевод нужен, но не выполнен (нет llama-бинаря / нет весов / упал сервер / большая часть строк осталась
+//! на исходном языке) — стадия возвращает Err с причиной, и analyze падает с ней.
 
 use dub_core::{Brand, GlossaryEntry, Project, SubStyle};
 use dub_llm::ChatClient;
@@ -109,8 +109,8 @@ pub fn stage(
     }
 
     // Провайдеры перевода и vision выбираются независимо (своя Gemma / локальный сервер / OpenRouter): облачный
-    // перевод не требует локальных весов. Перевод недоступен — стадия пропускается с причиной (fail-safe);
-    // недоступный vision перевод не останавливает.
+    // перевод не требует локальных весов. Перевод недоступен — Err с причиной; недоступный vision перевод
+    // не останавливает.
     let pair = match crate::llm_provider::open_pair(&crate::llm_provider::LlmOpen {
         llama_bin: &paths.llama_bin,
         mt_model: &paths.mt_model,

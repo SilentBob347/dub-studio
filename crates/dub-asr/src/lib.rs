@@ -176,18 +176,14 @@ pub struct SpeakerSegment {
 pub trait AsrEngine {
     fn transcribe(&mut self, wav: &Path, lang: &str) -> Result<Vec<Segment>, AsrError>;
     fn transcribe_turns(&mut self, wav: &Path, turns: &[Turn], lang: &str) -> Result<Vec<SpeakerSegment>, AsrError>;
-    /// Пакетная транскрипция МНОГИХ коротких файлов → полный текст каждого (None = не распознан/сбой).
-    /// Дефолт — цикл transcribe (Parakeet in-process и так быстр); Whisper переопределяет ОДНИМ
+    /// Пакетная транскрипция МНОГИХ коротких файлов → полный текст каждого; Err — файл не распознан (с
+    /// причиной). Дефолт — цикл transcribe (Parakeet in-process и так быстр); Whisper переопределяет ОДНИМ
     /// сабпроцессом на весь список (старт процесса дорогой, 333 файла по-одному — минуты впустую).
     /// Используется QC-верификацией синтеза в рендере (сверка сказанного с ожидаемым переводом).
-    fn transcribe_many(&mut self, files: &[std::path::PathBuf], lang: &str) -> Vec<Option<String>> {
+    fn transcribe_many(&mut self, files: &[std::path::PathBuf], lang: &str) -> Vec<Result<String, AsrError>> {
         files
             .iter()
-            .map(|f| {
-                self.transcribe(f, lang)
-                    .ok()
-                    .map(|segs| segs.into_iter().map(|s| s.text).collect::<Vec<_>>().join(" "))
-            })
+            .map(|f| self.transcribe(f, lang).map(|segs| segs.into_iter().map(|s| s.text).collect::<Vec<_>>().join(" ")))
             .collect()
     }
     /// Пакетная транскрипция МНОГИХ коротких файлов со словными таймингами (секунды от начала файла).

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AudioLines, Check, FolderOpen, Search, Trash2, X } from "lucide-react";
 import { api, type ProjectListing } from "../lib/api";
@@ -7,6 +7,7 @@ import { DUB_LANGS } from "../lib/i18n";
 import { facet, NO_FILTER, PROJECT_ORDERS, selectProjects, useListOrder, type ProjectFilter, type ProjectStatusFilter } from "../lib/projectList";
 import SortMenu from "./SortMenu";
 import ConfirmDialog from "./ConfirmDialog";
+import { useEscapeLayer } from "../lib/escape";
 
 // Сотни карточек с кадром-превью — сотни запросов к ffmpeg-превью; рисуем пачками.
 const PAGE = 60;
@@ -52,15 +53,7 @@ export default function ProjectsList({ projects, onOpen, onDelete, onClose }: {
   const langs = useMemo(() => facet(projects, "tgt_lang"), [projects]);
   const filtered = filter.query.trim() !== "" || filter.modes.size > 0 || filter.langs.size > 0 || filter.status !== "all";
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || deleting) return;
-      e.stopPropagation();
-      onClose();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [deleting, onClose]);
+  useEscapeLayer(onClose);
 
   const setF = (patch: Partial<ProjectFilter>) => { setFilter((f) => ({ ...f, ...patch })); setShown(PAGE); };
   const modeLabel = (m: string) => (m in MODE_KEYS ? t(MODE_KEYS[m as keyof typeof MODE_KEYS]) : m);

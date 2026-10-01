@@ -106,19 +106,36 @@ impl SegCkpts {
     /// Нет файла — пусто; битый — ошибка с причиной.
     pub fn load(wd: &Path) -> Result<Self, String> {
         let path = wd.join(SEG_CKPT_FILE);
-        let map = match std::fs::read_to_string(&path) {
-            Ok(t) => serde_json::from_str(&t).map_err(|e| format!("разбор {}: {e}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
-            Err(e) => return Err(format!("чтение {}: {e}", path.display())),
-        };
+        let map = Self::read(&path)?;
         Ok(SegCkpts { path, map })
+    }
+
+    /// Пустой набор ключей вместо файла, который не читается (запись поверх него).
+    pub(crate) fn start_over(wd: &Path) -> Result<Self, String> {
+        let ckpts = SegCkpts { path: wd.join(SEG_CKPT_FILE), map: Default::default() };
+        let body = serde_json::to_vec_pretty(&ckpts.map).map_err(|e| e.to_string())?;
+        dub_core::atomic::write(&ckpts.path, &body)?;
+        Ok(ckpts)
+    }
+
+    fn read(path: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
+        match std::fs::read_to_string(path) {
+            Ok(t) => serde_json::from_str(&t).map_err(|e| format!("разбор {}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(e) => Err(format!("чтение {}: {e}", path.display())),
+        }
     }
 
     pub fn get(&self, sid: &str) -> Option<&str> {
         self.map.get(sid).map(String::as_str)
     }
 
+    /// Пишет поверх того, что в файле сейчас, а не своей копии: ключ, записанный другим писателем за время
+    /// рендера (выбор дубля), не откатывается.
     pub(crate) fn set(&mut self, sid: &str, key: &str) -> Result<(), String> {
+        static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.map = Self::read(&self.path)?;
         if self.get(sid) == Some(key) {
             return Ok(());
         }
@@ -635,6 +652,21 @@ fn qc_similarity(expected: &str, heard: &str) -> f64 {
     hit as f64 / a.len().max(b.len()) as f64
 }
 
+/// Текст i-й фразы пакета распознавания; None — фраза не распознана, причина добавлена в `failed`.
+fn heard_text<'a>(heard: &'a [Result<String, dub_asr::AsrError>], i: usize, failed: &mut Vec<String>) -> Option<&'a str> {
+    match heard.get(i) {
+        Some(Ok(text)) => Some(text.as_str()),
+        Some(Err(e)) => {
+            failed.push(e.to_string());
+            None
+        }
+        None => {
+            failed.push("распознавание не вернуло ответ".to_string());
+            None
+        }
+    }
+}
+
 /// Динамический размах фразы (дБ, peak↔trough покадрового RMS 25мс) — скалярный «скор чистоты» для
 /// выбора наименее плохой попытки, когда ВСЕ ретраи с артефактом: речь ~53дБ, гул 3-11дБ (та же
 /// эмпирика, что у гул-ветки synth_defect). Невалидный/короткий клип -> 0.0 (хуже всех).
@@ -1104,7 +1136,7 @@ fn build_dub_pass(
         Ok(c) => c,
         Err(e) => {
             emit(progress, "tts", &format!("{e} — ключи синтеза начаты заново"));
-            SegCkpts { path: wd.join(SEG_CKPT_FILE), map: Default::default() }
+            SegCkpts::start_over(wd)?
         }
     };
     let needs = |ckpts: &SegCkpts, idx: usize| -> bool {
@@ -1649,15 +1681,19 @@ fn build_dub_pass(
             crate::takes::History::load(wd, &sid)?.set_qc(wd, &sid, n, sim)
         };
         let mut bad_idx: Vec<usize> = Vec::new();
+        let mut unheard: Vec<String> = Vec::new();
         for (i, q) in qc_list.iter().enumerate() {
             // Междометия НЕ пропускаем: вой «О,»->«ОООО…» жил именно на них (QC-скан R5b);
             // ложные капризы ASR на коротких гасит префикс-режим qc_similarity (0.5 на пустом ASR).
-            let h = heard.get(i).and_then(|x| x.as_deref()).unwrap_or("");
+            let Some(h) = heard_text(&heard, i, &mut unheard) else { continue };
             let sim = qc_similarity(&q.3, h);
             qc_note(q.0, qc_takes[i], sim)?;
             if sim < 0.35 {
                 bad_idx.push(i);
             }
+        }
+        if let Some(why) = unheard.first() {
+            emit(progress, "tts", &format!("QC: {} из {} фраз не сверены — распознавание не удалось: {why}", unheard.len(), qc_list.len()));
         }
         if !bad_idx.is_empty() {
             emit(progress, "tts", &format!("QC: {} фраз не совпали с переводом — пересинтез", bad_idx.len()));
@@ -1738,8 +1774,9 @@ fn build_dub_pass(
             let files2: Vec<PathBuf> = bad_idx.iter().map(|&i| qc_list[i].2.clone()).collect();
             let heard2 = qc_asr.transcribe_many(&files2, &proj.tgt_lang);
             let mut still = 0usize;
+            let mut unheard2: Vec<String> = Vec::new();
             for (j, &i) in bad_idx.iter().enumerate() {
-                let h = heard2.get(j).and_then(|x| x.as_deref()).unwrap_or("");
+                let Some(h) = heard_text(&heard2, j, &mut unheard2) else { continue };
                 let sim = qc_similarity(&qc_list[i].3, h);
                 qc_note(qc_list[i].0, qc_takes[i], sim)?;
                 if sim < 0.35 {
@@ -1749,9 +1786,17 @@ fn build_dub_pass(
                     emit(progress, "tts", &format!("⚠ QC: сегмент {} не совпадает с текстом перевода — оставлена сгенерированная озвучка", qc_list[i].0));
                 }
             }
-            emit(progress, "tts", &format!("QC итог: исправлено {}/{}, осталось помеченных {}", bad_idx.len() - still, bad_idx.len(), still));
-        } else {
+            if let Some(why) = unheard2.first() {
+                emit(progress, "tts", &format!("QC: {} пересинтезированных фраз не сверены — распознавание не удалось: {why}", unheard2.len()));
+            }
+            emit(progress, "tts", &format!(
+                "QC итог: исправлено {}/{}, осталось помеченных {}, не сверено {}",
+                bad_idx.len() - still - unheard2.len(), bad_idx.len(), still, unheard2.len()
+            ));
+        } else if unheard.is_empty() {
             emit(progress, "tts", "QC: все фразы подтверждены транскрипцией ✓");
+        } else {
+            emit(progress, "tts", "QC: остальные фразы подтверждены транскрипцией");
         }
     }
 
@@ -2271,7 +2316,12 @@ fn build_speaker_refs(
     // REF-QC: транскрипт каждого кандидата сверяем с текстом его окна — реф обязан ЗВУЧАТЬ как его
     // текст (кривой реф = кривой ref_text = каскад брака в клоне). Сбой ASR -> None -> кандидат
     // принимается без сверки (не хуже прежнего поведения).
-    let heard: Vec<Option<String>> = asr.transcribe_many(&batch, "auto");
+    let heard = asr.transcribe_many(&batch, "auto");
+    let unheard = heard.iter().filter(|h| h.is_err()).count();
+    if let Some(Err(e)) = heard.iter().find(|h| h.is_err()) {
+        emit(progress, "tts", &format!("сверка рефов: {unheard} кандидатов приняты без сверки — распознавание не удалось: {e}"));
+    }
+    let heard: Vec<Option<String>> = heard.into_iter().map(Result::ok).collect();
     for spk in &speakers {
         let cands = &cand_map[spk];
         if cands.is_empty() {
@@ -2287,7 +2337,7 @@ fn build_speaker_refs(
                 let h = heard.get(base + i).and_then(|o| o.as_deref());
                 let ok = match h {
                     Some(t) => qc_similarity(expect, t) >= 0.5,
-                    None => true, // ASR молчит про сбой — доверяем скорингу
+                    None => true, // не распознан (причина уже в журнале) — доверяем скорингу
                 };
                 (i, h, ok)
             })

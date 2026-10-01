@@ -80,23 +80,38 @@ async fn interrupted_job_is_listed_and_resumes_with_same_kind_and_args() {
     assert_eq!(jobs["jobs"][0]["kind"], "retranslate");
     assert_eq!(jobs["project_job"]["kind"], "retranslate");
 
-    // Long-poll до конца: без LLM ретрансляция меняет режим и завершается.
+    // Long-poll до конца: без LLM перевод не выполнен — джоба падает с причиной, проект не меняется.
     let (st, snap) = call(&app, "GET", &format!("/jobs/{job_id}?wait=30")).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(snap["status"], "done", "{snap}");
+    assert_eq!(snap["status"], "error", "{snap}");
     assert_eq!(snap["pid"], PID);
+    assert!(snap["error"].as_str().is_some_and(|e| e.contains("LLM недоступен")), "{snap}");
     // Снапшот живёт в истории: второй читатель тоже его видит.
     let (_, again) = call(&app, "GET", &format!("/jobs/{job_id}")).await;
-    assert_eq!(again["result"]["project_id"], PID);
-    assert_eq!(job_file(&root)["state"], "done");
+    assert_eq!(again["status"], "error");
+    assert_eq!(job_file(&root)["state"], "failed");
+    let (_, project) = call(&app, "GET", &format!("/projects/{PID}")).await;
+    assert_eq!(project["mode"], "transcribe");
 
-    let (st, body) = call(&app, "POST", &format!("/projects/{PID}/resume")).await;
-    assert_eq!(st, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "nothing_to_resume");
     let (st, _) = call(&app, "POST", &format!("/jobs/{job_id}/cancel")).await;
     assert_eq!(st, StatusCode::CONFLICT);
     let (st, _) = call(&app, "GET", "/jobs/nosuchjob000").await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_finished_job_has_nothing_to_resume() {
+    let root = fixture_root("done");
+    let mut job = job_file(&root);
+    job["state"] = json!("done");
+    std::fs::write(root.join("workspace").join(PID).join("job.json"), job.to_string()).unwrap();
+    let app = build_router(AppState::new(&root));
+
+    let (st, body) = call(&app, "POST", &format!("/projects/{PID}/resume")).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "nothing_to_resume");
 
     let _ = std::fs::remove_dir_all(&root);
 }

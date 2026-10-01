@@ -405,7 +405,7 @@ function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
             const dis = e.cloud && !hasOrKey;
             return (
               <button key={e.id} title={dis ? t("cloud.needKey") : ""}
-                onClick={() => { if (dis) { openSettings("cloud:key"); } else if (e.cloud) { setSel("or_asr_on", "1"); } else { setSel("or_asr_on", "0"); setAsrEngine(e.id); api.setSelection("asr_engine", e.id).catch(() => {}); } }}
+                onClick={() => { if (dis) { openSettings("cloud:key"); } else if (e.cloud) { setSel("or_asr_on", "1"); } else { setSel("or_asr_on", "0"); setAsrEngine(e.id); api.setSelection("asr_engine", e.id).catch((er) => { setErr(er instanceof Error ? er.message : String(er)); loadCap(); }); } }}
                 className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${active ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} ${dis ? "opacity-50" : ""}`}>
                 {e.label}
               </button>
@@ -4080,7 +4080,7 @@ function FirstRun() {
           </div>
         )}
 
-        {statusErr && !status && (
+        {statusErr && (
           <div className="mt-4 rounded-lg border border-[var(--color-warn)]/40 px-3 py-2 mono text-[11px] text-[var(--color-warn)] break-words">{statusErr}</div>
         )}
 
@@ -4519,12 +4519,9 @@ function TranscriptView() {
         setStage("editor");
         return;
       }
-      try {
-        const patched = await api.patch(pid, { mode });
-        setProject(patched);
-      } catch {
-        setProject({ ...p, mode });
-      }
+      useStore.getState().pushActivity(err instanceof Error ? err.message : String(err), "error");
+      try { setProject(await api.getProject(pid)); }
+      catch (e) { useStore.getState().pushActivity(String(e), "error"); }
       setStage("editor");
     } finally { setReanalyzing(false); }
   }

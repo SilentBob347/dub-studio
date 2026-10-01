@@ -1354,7 +1354,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_retranslate",
-                description: "Translate the project's recognised lines into lang without recognising the speech again, and switch it to mode: dub (the default), voiceover or nodub (subtitles). Titles are translated too. A job; the lines become dirty and are voiced at the next project_dub_audio or project_render.",
+                description: "Translate the project's recognised lines into lang without recognising the speech again, and switch it to mode: dub (the default), voiceover or nodub (subtitles). Titles are translated too. A job; the lines become dirty and are voiced at the next project_dub_audio or project_render. Without a translation model it fails and the project stays as it was; other edits made while it runs are kept, but if the lines or titles themselves change meanwhile it fails and changes nothing.",
                 schema: || object(json!({ "pid": pid(), "lang": { "type": "string" }, "mode": { "type": "string", "enum": ["dub", "voiceover", "nodub"] } }), &["pid", "lang"]),
                 call: |args| {
                     let path = project_path(args, "/retranslate")?;
@@ -1363,7 +1363,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_remix",
-                description: "Rewrite every line of the dub by an instruction - a theme, a funny version - through the translation model. A job; every line becomes dirty.",
+                description: "Rewrite every line of the dub by an instruction - a theme, a funny version - through the translation model. A job; every line becomes dirty. Other edits made while it runs are kept, but if the lines themselves change meanwhile it fails and changes nothing.",
                 schema: || object(json!({ "pid": pid(), "instruction": { "type": "string" } }), &["pid", "instruction"]),
                 call: |args| {
                     let path = project_path(args, "/remix")?;

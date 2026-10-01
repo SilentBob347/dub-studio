@@ -10,7 +10,7 @@ single-page UI (`frontend/`).
   the shipped app may need it. The Python code of the first era (`backend/`, `dub-engine/`) is
   legacy and is not a reference for behaviour.
 - The model stack is fixed: Parakeet-TDT v3 (int8 ONNX) and Whisper-Faster for recognition,
-  Sortformer v2 for diarization, Gemma-4 12B (GGUF) through llama-server for translation and
+  Nemotron 3 Diarization (Streaming Sortformer v3) for diarization, Gemma-4 12B (GGUF) through llama-server for translation and
   vision, Higgs Audio v3 through `audiocpp_engine.dll` for voice, Mel-Band Roformer through
   BSRoformer.cpp for separation, PP-OCR (ONNX) for on-screen text, SCRFD / LVFace / anime_face /
   CCIP / WeSpeaker for casting. Do not swap a model, a quantization or an engine without the

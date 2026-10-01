@@ -452,30 +452,36 @@ impl AsrEngine for WhisperAsr {
     }
 
     /// Пакет: ОДИН сабпроцесс на весь список (filelist .txt — Purfview поддерживает; старт процесса
-    /// дорогой, поэтому не по-файлово). JSONы читаем по stem'ам входных файлов. Сбой пакета -> все None
-    /// (вызывающий QC это переживает: непроверенные сегменты просто не ретраятся по ASR-критерию).
+    /// дорогой, поэтому не по-файлово). JSONы читаем по stem'ам входных файлов. Сбой пакета -> Err с его
+    /// причиной у каждого файла.
     /// Сегменты с сильным признаком галлюцинации (титр субтитровщика, звук в скобках, ни букв, ни цифр) в
     /// текст не входят: иначе фантомная фраза на тихом клипе давала бы ложное сходство с ожидаемым.
     /// Фразы из списка («Thank you.», «Watch out!») остаются: перевод их и правда содержит.
-    fn transcribe_many(&mut self, files: &[PathBuf], lang: &str) -> Vec<Option<String>> {
-        let Ok(batch) = self.run_filelist(files, lang, false) else {
-            return files.iter().map(|_| None).collect();
+    fn transcribe_many(&mut self, files: &[PathBuf], lang: &str) -> Vec<Result<String, AsrError>> {
+        let batch = match self.run_filelist(files, lang, false) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = e.to_string();
+                return files.iter().map(|_| Err(AsrError::Io(msg.clone()))).collect();
+            }
         };
         let out = batch
             .jsons
-            .iter()
+            .into_iter()
             .map(|j| {
-                let v: serde_json::Value = serde_json::from_str(j.as_ref().ok()?).ok()?;
-                let segs = v.get("segments")?.as_array()?;
-                Some(
-                    segs.iter()
-                        .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
-                        .filter(|t| !hallucination_kind(t, HallucinationRules::Whisper).is_some_and(|k| k.is_strong()))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .trim()
-                        .to_string(),
-                )
+                let v: serde_json::Value = serde_json::from_str(&j?).map_err(|e| AsrError::Io(format!("ответ whisper не JSON: {e}")))?;
+                let segs = v
+                    .get("segments")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| AsrError::Io("в ответе whisper нет segments".to_string()))?;
+                Ok(segs
+                    .iter()
+                    .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
+                    .filter(|t| !hallucination_kind(t, HallucinationRules::Whisper).is_some_and(|k| k.is_strong()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .trim()
+                    .to_string())
             })
             .collect();
         let _ = std::fs::remove_dir_all(&batch.out_dir);

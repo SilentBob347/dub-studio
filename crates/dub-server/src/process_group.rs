@@ -1,6 +1,6 @@
 //! Всё, что запускает студия, умирает вместе со студией.
 //!
-//! Деструкторы сайдкаров (llama-server, bs_roformer-cli, whisper, ffmpeg, openrouter-helper) не
+//! Деструкторы сайдкаров (llama-server, bs_roformer-cli, whisper, ffmpeg) не
 //! срабатывают, когда процесс снимают диспетчером задач, `taskkill /F`, падением или закрытием окна
 //! при живом рабочем потоке. Единственный честный ответ Windows — job object с
 //! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`: процесс кладёт в него себя, все дети наследуют job при
