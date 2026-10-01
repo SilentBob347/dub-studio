@@ -381,6 +381,13 @@ impl Fetches {
                 f.error = Some(e.detail);
             }
         }
+        // Пароль прокси живёт в хранилище, а не в папке загрузки: proxy.conf пишется заново к каждому запуску.
+        let conf = self.dir(id).join(ytdlp::PROXY_CONF);
+        match std::fs::remove_file(&conf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::error!("{} с паролем прокси не удалён: {e}", conf.display()),
+        }
         self.save(&list);
     }
 

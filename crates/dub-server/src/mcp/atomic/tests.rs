@@ -404,3 +404,11 @@ fn voices_other_than_asked_are_named_by_speaker() {
     let subtitles = held("nodub", ["0", "0"], json!({ "mode": "clone", "name": null }));
     assert!(degradations(&subtitles, &json!({}), &setup(&[], false), &autocast).unwrap().is_empty(), "subtitles voice nothing");
 }
+
+#[test]
+fn bilingual_subtitles_hold_the_translation() {
+    let project = json!({ "mode": "nodub", "tgt_lang": "es", "subs": { "mode": "bilingual" }, "meta": { "src_lang": "en" } });
+    assert_eq!(super::lines_of("bi1", &project, None), Ok("tgt"));
+    assert_eq!(super::lines_of("bi1", &project, Some("es")), Ok("tgt"));
+    assert_eq!(super::lines_of("bi1", &project, Some("en")), Ok("src"));
+}

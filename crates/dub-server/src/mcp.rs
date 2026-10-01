@@ -671,22 +671,6 @@ fn annotations(name: &str) -> Value {
 
 // ---------------------------------------------------------------- origin and agent
 
-/// Only the studio's own page and local agents may drive it: a web page in
-/// the user's browser, or one rebinding a domain to this computer, sends its
-/// own origin and is refused.
-fn local_origin(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers.get(header::ORIGIN) else { return true };
-    let Ok(origin) = origin.to_str() else { return false };
-    let Some((scheme, rest)) = origin.split_once("://") else { return false };
-    let host = rest.split('/').next().unwrap_or_default();
-    let host = if host.starts_with('[') { host.split(']').next().map(|name| format!("{name}]")).unwrap_or_default() } else { host.split(':').next().unwrap_or_default().to_string() };
-    scheme == "tauri" || ["localhost", "127.0.0.1", "[::1]", "tauri.localhost"].contains(&host.as_str())
-}
-
-fn foreign_origin() -> Response {
-    (StatusCode::FORBIDDEN, "This studio answers only its own window and agents on this computer.").into_response()
-}
-
 struct Agent {
     /// When an agent last called the server, and what it called.
     last_call: Mutex<Option<(std::time::Instant, String)>>,
@@ -1078,26 +1062,48 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "proxy_test",
-                description: "Check whether Hugging Face (model downloads) and OpenRouter (the cloud stages) are reachable through a proxy - an http, https or socks5 URL, user:pass@ allowed - or directly when url is empty. password goes with a url that names the user without one; the stored password is used only for the stored address.",
-                schema: || object(json!({ "url": { "type": "string" }, "password": { "type": "string" } }), &[]),
+                description: "Check, before saving, whether Hugging Face (model downloads) and OpenRouter (the cloud stages) are reachable: mode custom (default) through the proxy at url - any seller's notation, host:port:user:password included, kind giving the scheme of an address without one - mode system through the Windows proxy, mode off directly. password goes with a url that names the user without one; the stored password is used only for the stored address.",
+                schema: || {
+                    object(
+                        json!({
+                            "mode": { "type": "string", "enum": ["custom", "system", "off"] },
+                            "kind": { "type": "string", "enum": ["http", "https", "socks5", "socks4"] },
+                            "url": { "type": "string" },
+                            "password": { "type": "string" },
+                        }),
+                        &[],
+                    )
+                },
                 call: |args| {
                     let mut body = json!({ "url": args.get("url").and_then(Value::as_str).unwrap_or_default() });
-                    if let Some(password) = args.get("password").and_then(Value::as_str) {
-                        body["password"] = password.into();
+                    for field in ["mode", "kind", "password"] {
+                        if let Some(value) = args.get(field).and_then(Value::as_str) {
+                            body[field] = value.into();
+                        }
                     }
                     post("/engine/proxy/test".into(), body)
                 },
             },
             Tool {
                 name: "proxy_settings_get",
-                description: "The proxy all the studio's traffic goes through (model downloads, OpenRouter): whether it is on, its address without the password, and whether a password is stored.",
+                description: "The proxy all the studio's traffic goes through (model downloads, OpenRouter): mode (system - as in Windows, custom - its own address, off - direct), kind (the scheme an address without one gets), its address without the password, whether a password is stored, and problem - why a stored address of its own cannot be read.",
                 schema: nothing,
                 call: |_| get("/engine/proxy/settings".into()),
             },
             Tool {
                 name: "proxy_settings_set",
-                description: "Set the proxy: url (http, https or socks5, user@host:port; a password written into it is stored apart and never shown), password to change only the password (null removes it), on to switch the proxy on or off. Fields left out stay. proxy_test checks an address first.",
-                schema: || object(json!({ "on": { "type": "boolean" }, "url": { "type": "string" }, "password": { "type": ["string", "null"] } }), &[]),
+                description: "Set the proxy: mode system (as in Windows), custom (the address in url) or off (direct); kind (http, https, socks5, socks4) for an address written without a scheme; url in any seller's notation (user@host:port, host:port:user:password; a password written into it is stored apart and never shown; empty removes the address); password to change only the password (null removes it). Fields left out stay; mode custom needs an address. proxy_test checks first.",
+                schema: || {
+                    object(
+                        json!({
+                            "mode": { "type": "string", "enum": ["system", "custom", "off"] },
+                            "kind": { "type": "string", "enum": ["http", "https", "socks5", "socks4"] },
+                            "url": { "type": "string" },
+                            "password": { "type": ["string", "null"] },
+                        }),
+                        &[],
+                    )
+                },
                 call: |args| send(Method::PUT, "/engine/proxy/settings".into(), body_without(args, &[])),
             },
             Tool {
@@ -1303,7 +1309,7 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "project_analyze",
-                description: "Analyze a project's video: separate the voices from the background, find who speaks, recognise the speech, translate it into tgt_lang, read the on-screen text (detect) and style the subtitles after the original. A job: studio_wait with its job_id, then project_get shows the lines. mode: auto (dub when there is speech), dub, voiceover (the translation over the quieted original), nodub (subtitles only), transcribe (the transcript in the original language). src_lang: auto or a code (studio://languages). subs: auto, none, transcribe, translate. burn: burn the subtitles into the video (default on). rewrite: an instruction for a funny or themed version of the dub. translate_style: the tone of the translation. casting: find the characters by voice and face (content_type real or anime, auto guesses), casting_ref applies a saved casting (casting_library_list). import_translated: the subtitles given to project_create are already in tgt_lang. Analyzing again replaces the project's lines.",
+                description: "Analyze a project's video: separate the voices from the background, find who speaks, recognise the speech, translate it into tgt_lang, read the on-screen text (detect) and style the subtitles after the original. A job: studio_wait with its job_id, then project_get shows the lines. mode: auto (dub when there is speech), dub, voiceover (the translation over the quieted original), nodub (subtitles only), transcribe (the transcript in the original language). src_lang: auto or a code (studio://languages). subs: auto, none, transcribe, translate, bilingual (the translation with the original line beside it). burn: burn the subtitles into the video (default on). rewrite: an instruction for a funny or themed version of the dub. translate_style: the tone of the translation. casting: find the characters by voice and face (content_type real or anime, auto guesses), casting_ref applies a saved casting (casting_library_list). import_translated: the subtitles given to project_create are already in tgt_lang. Analyzing again replaces the project's lines.",
                 schema: || {
                     object(
                         json!({
@@ -2266,8 +2272,8 @@ fn tool_title(name: &str) -> String {
 }
 
 pub async fn handle(headers: HeaderMap, body: axum::body::Bytes) -> Response {
-    if !local_origin(&headers) {
-        return foreign_origin();
+    if !crate::guard::local_origin(&headers) {
+        return crate::guard::foreign_origin();
     }
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return rpc_failure(StatusCode::BAD_REQUEST, Value::Null, -32700, "Parse error".into(), None);
@@ -2912,18 +2918,6 @@ mod tests {
         assert_eq!(busy(&json!({ "jobs": [{ "kind": "render", "status": "running" }, { "status": "queued" }] })).unwrap(), ["render", "unknown"]);
         assert!(busy(&json!({ "jobs_error": "GET /jobs: 404" })).is_err(), "jobs that cannot be read are not idle");
         assert!(finished(&json!({ "status": "cancelled" })) && !finished(&json!({ "status": "running" })) && !finished(&json!({ "status": "cancelling" })));
-    }
-
-    #[test]
-    fn only_local_pages_and_agents_may_drive_the_studio() {
-        let from = |origin: &str| {
-            let mut headers = HeaderMap::new();
-            headers.insert(header::ORIGIN, origin.parse().unwrap());
-            local_origin(&headers)
-        };
-        assert!(local_origin(&HeaderMap::new()), "an agent sends no origin");
-        assert!(from("http://127.0.0.1:3791") && from("http://localhost") && from("http://tauri.localhost") && from("tauri://localhost") && from("http://[::1]:8791"));
-        assert!(!from("https://example.com") && !from("http://127.0.0.1.evil.com") && !from("null"));
     }
 
     #[test]

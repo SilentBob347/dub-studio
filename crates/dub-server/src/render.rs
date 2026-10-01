@@ -1234,6 +1234,7 @@ fn build_dub_pass(
         // История дублей хранит показанный текст реплики (его сверяют выбор и закрепление дубля в правках
         // проекта), синтез идёт текстом для синтеза `tgt`.
         let shown_tgt = shown.segments.get(fi).map_or(tgt, |o| o.tgt_text.trim());
+        let shortened = shown.segments.get(fi).is_some_and(crate::shorten::already_shortened);
         // Синтез ТОЛЬКО если нет файла или ключ синтеза (текст/спикер/голос/реф/движок/нонс regen) не
         // совпал с записанным. dirty — флаг UI; для проектов без записанных ключей решает он.
         let key = keys[idx].as_str();
@@ -1253,23 +1254,32 @@ fn build_dub_pass(
         // Закреплённый дубль рендер не заменяет, пока текст реплики тот, что в нём озвучен.
         let mut pinned_key: Option<String> = None;
         if let Some(p) = hist.pinned_for(shown_tgt).cloned() {
-            hist.restore(wd, &sid, p.n, &raw)?;
+            hist = crate::takes::History::update(wd, &sid, |h| h.restore(wd, &sid, p.n, &raw))?.0;
             if need_synth {
                 emit(progress, "tts", &format!("фраза {fi}: звучит закреплённый дубль — новая озвучка его не заменяет"));
             }
             need_synth = false;
             pinned_key = Some(p.key);
         } else if hist.pinned_take().is_some() {
-            hist.pinned = None;
-            hist.save(wd, &sid)?;
-            emit(progress, "tts", &format!("фраза {fi}: закрепление дубля снято — текст реплики изменён"));
+            let (fresh, unpinned) = crate::takes::History::update(wd, &sid, |h| {
+                if h.pinned_take().is_none() || h.pinned_for(shown_tgt).is_some() {
+                    return Ok(false);
+                }
+                h.pinned = None;
+                h.save(wd, &sid)?;
+                Ok(true)
+            })?;
+            hist = fresh;
+            if unpinned {
+                emit(progress, "tts", &format!("фраза {fi}: закрепление дубля снято — текст реплики изменён"));
+            }
         }
         // Выбранный из истории дубль звучит, пока текст и нонс те, что в нём, даже если ключ синтеза с тех пор
         // сменился (голос, референс, опции): выбор пользователя не откатывается молча.
         if pinned_key.is_none() {
             if let Some(sel) = hist.selected_for(shown_tgt, s.extra.get(REGEN_NONCE)).cloned() {
                 if sel.key != key {
-                    hist.restore(wd, &sid, sel.n, &raw)?;
+                    hist = crate::takes::History::update(wd, &sid, |h| h.restore(wd, &sid, sel.n, &raw))?.0;
                     emit(progress, "tts", &format!("фраза {fi}: звучит выбранный дубль {} — новая озвучка его не заменяет", sel.n));
                     need_synth = false;
                     pinned_key = Some(sel.key);
@@ -1280,7 +1290,8 @@ fn build_dub_pass(
         if need_synth && hist.takes.is_empty() && raw.is_file() {
             if let Some((rk, text)) = recorded.clone().zip(prior_text(&prior_timing, s)) {
                 let meta = crate::takes::NewTake { text, key: rk, nonce: None, voice: String::new(), reference: String::new(), params: String::new(), source: "synth" };
-                hist.add(wd, &sid, &raw, meta, media::duration(&raw)?)?;
+                let dur = media::duration(&raw)?;
+                hist = crate::takes::History::update(wd, &sid, |h| h.add(wd, &sid, &raw, meta, dur))?.0;
             }
         }
         let mut from_history = false;
@@ -1290,7 +1301,7 @@ fn build_dub_pass(
             need_synth = false;
         } else if need_synth {
             if let Some(n) = hist.by_key(key).map(|t| t.n) {
-                hist.restore(wd, &sid, n, &raw)?;
+                crate::takes::History::update(wd, &sid, |h| h.restore(wd, &sid, n, &raw))?;
                 need_synth = false;
                 from_history = true;
             }
@@ -1475,7 +1486,7 @@ fn build_dub_pass(
         let synthesized = pinned_key.is_none() && ((need_synth && !kept_original) || batch_new.contains(&idx));
         let mut take_n: Option<u32> = None;
         if synthesized {
-            let source = if crate::shorten::already_shortened(s) { "shorten" } else { "synth" };
+            let source = if shortened { "shorten" } else { "synth" };
             let meta = crate::takes::NewTake {
                 text: shown_tgt.to_string(),
                 key: key.to_string(),
@@ -1485,7 +1496,8 @@ fn build_dub_pass(
                 params: take_params.clone(),
                 source,
             };
-            take_n = Some(hist.add(wd, &sid, &raw, meta, media::duration(&raw)?)?);
+            let dur = media::duration(&raw)?;
+            take_n = Some(crate::takes::History::update(wd, &sid, |h| h.add(wd, &sid, &raw, meta, dur))?.1);
         }
         // слот: от текущего onset до старта СЛЕДУЮЩЕГО сегмента ПО ИНДЕКСУ (fi+1) полного списка /
         // конца видео (питон nxt = segs[i+1].start if i+1<len else total). Целевая длительность при
@@ -1543,7 +1555,7 @@ fn build_dub_pass(
                                 params: opts.clone(),
                                 source: "multitake",
                             };
-                            let n = hist.add(wd, &sid, &take_path, meta, td)?;
+                            let n = crate::takes::History::update(wd, &sid, |h| h.add(wd, &sid, &take_path, meta, td))?.1;
                             std::fs::remove_file(&take_path).map_err(|e| format!("{}: {e}", take_path.display()))?;
                             let score = (placed_secs(&samples, sr as u32) - target).abs();
                             if score < best_score {
@@ -1557,7 +1569,7 @@ fn build_dub_pass(
                 }
             }
             if let Some(bn) = best {
-                hist.restore(wd, &sid, bn, &raw)?;
+                crate::takes::History::update(wd, &sid, |h| h.restore(wd, &sid, bn, &raw))?;
                 if best != take_n {
                     emit(progress, "tts", &format!("сегмент {fi}: multi-take — выбран дубль ближе к слоту ({best_score:.2}с отклонение)"));
                 }
@@ -1627,7 +1639,7 @@ fn build_dub_pass(
             voice: voice_of(s),
             lang: proj.tgt_lang.clone(),
         }));
-        if pass.shorten && synthesized && pinned_key.is_none() && !crate::shorten::already_shortened(s) {
+        if pass.shorten && synthesized && pinned_key.is_none() && !shortened {
             shorten_cands.push((placed.len() - 1, s.id.clone()));
         }
         // В QC — только реально синтезированное в этом прогоне (кэш уже проверялся в своём прогоне).
@@ -1678,7 +1690,7 @@ fn build_dub_pass(
         let qc_note = |fi: usize, n: Option<u32>, sim: f64| -> Result<(), String> {
             let Some(n) = n else { return Ok(()) };
             let sid = sid_of(fi, &proj.segments[fi]);
-            crate::takes::History::load(wd, &sid)?.set_qc(wd, &sid, n, sim)
+            crate::takes::History::update(wd, &sid, |h| h.set_qc(wd, &sid, n, sim)).map(|_| ())
         };
         let mut bad_idx: Vec<usize> = Vec::new();
         let mut unheard: Vec<String> = Vec::new();
@@ -1756,7 +1768,7 @@ fn build_dub_pass(
                                 params: opts.clone(),
                                 source: "qc",
                             };
-                            qc_takes[i] = Some(crate::takes::History::load(wd, &sid)?.add(wd, &sid, raw, meta, raw_dur)?);
+                            qc_takes[i] = Some(crate::takes::History::update(wd, &sid, |h| h.add(wd, &sid, raw, meta, raw_dur))?.1);
                             if let Some(rec) = fit_recs[*pidx].as_mut() {
                                 rec.raw = placed_dur;
                                 rec.needed = dub_core::fit::needed(placed_dur, *room);

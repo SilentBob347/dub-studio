@@ -1241,7 +1241,10 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
         slug => slug.to_string(),
     };
     let before = segments.len();
-    proj.segments = segments.into_iter().filter(|s| has_speech_text(&s.src_text)).collect();
+    proj.segments = segments
+        .into_iter()
+        .filter(|s| has_speech_text(if args.import_translated { &s.tgt_text } else { &s.src_text }))
+        .collect();
     if proj.segments.len() < before {
         emit(progress, "asr", &format!("убрано сегментов без слов: {}", before - proj.segments.len()));
     }

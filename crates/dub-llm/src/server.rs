@@ -208,12 +208,6 @@ impl LlamaServer {
         // На Windows cudart/ggml DLL лежат рядом с llama-server.exe (tools/llama) — бинарь находит их
         // сам, доп. настройка PATH не нужна.
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| LlmError::Spawn(format!("spawn llama-server: {e}")))?;
-
-        let base_url = format!("http://127.0.0.1:{port}");
-        let log_tail: LogTail = Arc::new(Mutex::new(VecDeque::new()));
         let log_file: LogFile = match &opts.log_file {
             Some(path) => {
                 if let Some(dir) = path.parent() {
@@ -231,6 +225,12 @@ impl LlamaServer {
             }
             None => None,
         };
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| LlmError::Spawn(format!("spawn llama-server: {e}")))?;
+
+        let base_url = format!("http://127.0.0.1:{port}");
+        let log_tail: LogTail = Arc::new(Mutex::new(VecDeque::new()));
         if let Some(out) = child.stdout.take() {
             drain_to_tail(out, log_tail.clone(), log_file.clone());
         }

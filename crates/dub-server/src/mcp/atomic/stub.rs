@@ -224,7 +224,7 @@ fn analyzed(before: &Value, query: &str) -> Value {
     let asked: HashMap<String, String> = axum::extract::Query::try_from_uri(&uri).expect("the analysis's query decodes").0;
     let get = |key: &str| asked.get(key).cloned().unwrap_or_default();
     let (mode, subs, tgt) = (get("mode"), get("subs"), get("tgt_lang"));
-    let translated = mode == "dub" || mode == "voiceover" || subs == "translate";
+    let translated = mode == "dub" || mode == "voiceover" || subs == "translate" || subs == "bilingual";
     let speakers = mode != "nodub";
     let line = |id: &str, start: f64, end: f64, speaker: &str, words: &str| {
         let tgt_text = if translated { format!("[{tgt}] {words}") } else { words.to_string() };

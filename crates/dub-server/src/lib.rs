@@ -2233,6 +2233,11 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
             let opts = FlatOpts { src: "auto", tgt: &lang_c, spoken, style: &p.audio.translate_style, glossary: &p.glossary, contract: &contract };
             flat_run_with(client, &mut segs, &opts, &mut |m: &str| progress(json!({ "type": "progress", "stage": "translate", "msg": m.trim() })))
                 .map_err(|e| format!("translate: {e}"))?;
+            let glossary = dub_core::glossary::for_translation(&p.glossary, &lang_c);
+            if let Some(note) = crate::translate::untranslated_note(segs.iter().map(|sg| (sg.text.as_str(), sg.tgt.as_str())), &lang_c, &glossary) {
+                tracing::warn!("export_lang -> {lang_c}: {note}");
+                progress(json!({ "type": "progress", "stage": "translate", "msg": format!("перевод: {note}") }));
+            }
             p.glossary_fp = glossary_api::fingerprint(&p.glossary, &lang_c);
             for (s, sg) in p.segments.iter_mut().zip(segs) {
                 if !sg.tgt.trim().is_empty() {
@@ -2245,7 +2250,13 @@ async fn export_lang_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
             if !p.captions.titles.is_empty() {
                 let mut tsegs: Vec<Seg> = p.captions.titles.iter().map(|ti| Seg::new(ti.text.clone(), 0)).collect();
                 let topts = FlatOpts { src: "auto", tgt: &lang_c, spoken: false, style: &p.audio.translate_style, glossary: &[], contract: &contract };
-                let ok = flat_run_with(client, &mut tsegs, &topts, &mut |m: &str| eprintln!("[translate] {}", m.trim())).is_ok();
+                let done = flat_run_with(client, &mut tsegs, &topts, &mut |m: &str| progress(json!({ "type": "progress", "stage": "translate", "msg": m.trim() })));
+                if let Err(e) = &done {
+                    tracing::warn!("export_lang {lang_c}: титры не переведены: {e}");
+                    progress(json!({ "type": "progress", "stage": "translate",
+                        "msg": format!("титры не переведены ({e}) — в видео они останутся на исходном языке") }));
+                }
+                let ok = done.is_ok();
                 for (ti, sg) in p.captions.titles.iter_mut().zip(tsegs) {
                     ti.tgt = if ok && !sg.tgt.trim().is_empty() { sg.tgt } else { String::new() };
                 }
@@ -2355,6 +2366,11 @@ async fn retranslate_enqueue(st: &AppState, pid: &str, args: &Value) -> Result<S
         let opts = FlatOpts { src: "auto", tgt: &lang_c, spoken, style: &p.audio.translate_style, glossary: &p.glossary, contract: &contract };
         flat_run_with(client, &mut segs, &opts, &mut |m: &str| progress(json!({ "type": "progress", "stage": "translate", "msg": m.trim() })))
             .map_err(|e| format!("translate: {e}"))?;
+        let glossary = dub_core::glossary::for_translation(&p.glossary, &lang_c);
+        if let Some(note) = crate::translate::untranslated_note(segs.iter().map(|sg| (sg.text.as_str(), sg.tgt.as_str())), &lang_c, &glossary) {
+            tracing::warn!("retranslate {pid_res} -> {lang_c}: {note}");
+            progress(json!({ "type": "progress", "stage": "translate", "msg": format!("перевод: {note}") }));
+        }
         // Титры: text -> Lx (позиции/стиль остаются).
         let titles: Vec<String> = p.captions.titles.iter().map(|ti| ti.text.clone()).collect();
         let mut title_tgts: Vec<String> = Vec::new();

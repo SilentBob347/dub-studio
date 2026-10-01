@@ -85,7 +85,23 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Держится от чтения истории фразы до её записи: рендер озвучивает фразу, пока окно и агент выбирают и
+/// закрепляют её дубли. Не реентерабелен.
+fn writes() -> std::sync::MutexGuard<'static, ()> {
+    static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl History {
+    /// Правка истории по её свежей копии с диска под замком историй: копия, прочитанная раньше, затёрла бы
+    /// то, что за это время записали другие. Возвращает историю после правки и ответ правки.
+    pub fn update<T>(wd: &Path, sid: &str, edit: impl FnOnce(&mut History) -> Result<T, String>) -> Result<(History, T), String> {
+        let _held = writes();
+        let mut h = History::load(wd, sid)?;
+        let out = edit(&mut h)?;
+        Ok((h, out))
+    }
+
     /// Нет файла — пустая история; битый — ошибка с причиной.
     pub fn load(wd: &Path, sid: &str) -> Result<Self, String> {
         let p = dir_of(wd, sid).join(FILE);
@@ -218,6 +234,7 @@ impl History {
 
 /// Снять закрепление, если текст реплики теперь не тот, что озвучен в закреплённом дубле. true — снято.
 pub fn unpin_if_stale(wd: &Path, sid: &str, text: &str) -> Result<bool, String> {
+    let _held = writes();
     let mut h = History::load(wd, sid)?;
     match h.pinned_take() {
         Some(_) if h.pinned_for(text).is_none() => {
@@ -372,6 +389,7 @@ pub fn commit(wd: &Path, proj: &dub_core::Project, edit: &Value) -> Result<(), S
     let op = edit.get("op").and_then(Value::as_str).unwrap_or_default();
     let id = edit_id(edit).map_err(|(_, m)| m)?;
     let sid = seg_sid(proj, &id).map_err(|(_, m)| m)?;
+    let _held = writes();
     let mut h = History::load(wd, &sid)?;
     match op {
         "take_select" => {
@@ -526,6 +544,25 @@ mod tests {
         assert_eq!(History::load(&d, "s2").unwrap().pinned, None);
         let all = summaries(&d).unwrap();
         assert_eq!(all["s2"]["count"], 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_take_added_after_a_pin_from_the_window_keeps_the_pin() {
+        let d = wd("pin-race");
+        let mut held = History::default();
+        let first = held.add(&d, "s8", &clip(&d, "a.wav", b"A"), take("Привет", "k1"), 1.0).unwrap();
+        // the window pins while the render still holds its earlier copy of the history
+        History::update(&d, "s8", |h| {
+            h.pinned = h.active;
+            h.save(&d, "s8")
+        })
+        .unwrap();
+        let (fresh, second) = History::update(&d, "s8", |h| h.add(&d, "s8", &clip(&d, "b.wav", b"B"), take("Привет", "k2"), 1.0)).unwrap();
+        assert_eq!(fresh.pinned, Some(first));
+        assert_eq!(fresh.active, Some(second));
+        assert_eq!(History::load(&d, "s8").unwrap().pinned, Some(first));
+        assert_eq!(held.pinned, None);
         std::fs::remove_dir_all(&d).unwrap();
     }
 

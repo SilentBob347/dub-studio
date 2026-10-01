@@ -930,7 +930,7 @@ async fn export_subtitles(args: &Value) -> Result<Value, String> {
 
 /// Which lines a language asks for: tgt, the translation, or src, the recognised words.
 fn lines_of(pid: &str, project: &Value, lang: Option<&str>) -> Result<&'static str, String> {
-    let translated = matches!(project["mode"].as_str(), Some("dub" | "voiceover")) || project["subs"]["mode"] == "translate";
+    let translated = matches!(project["mode"].as_str(), Some("dub" | "voiceover")) || matches!(project["subs"]["mode"].as_str(), Some("translate" | "bilingual"));
     let tgt = project["tgt_lang"].as_str().unwrap_or_default().to_lowercase();
     let src = project["meta"]["src_lang"].as_str().unwrap_or("auto").to_lowercase();
     let lang = lang.map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty());

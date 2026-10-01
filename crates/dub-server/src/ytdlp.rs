@@ -524,7 +524,7 @@ fn base_args(deno: &Path, ffmpeg: &Path, cache: &Path) -> Vec<std::ffi::OsString
 pub const PROBE_ARGS: [&str; 2] = ["-J", "--flat-playlist"];
 
 /// Файл конфигурации yt-dlp с прокси этого вызова.
-const PROXY_CONF: &str = "proxy.conf";
+pub(crate) const PROXY_CONF: &str = "proxy.conf";
 
 /// Прокси для ссылки по маршруту прокси студии (dub_llm::net): нет прокси — `--proxy ""`, напрямую мимо
 /// прокси Windows; прокси без логина и пароля — аргументом; с ними — файлом `work/proxy.conf` через

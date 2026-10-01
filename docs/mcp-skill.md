@@ -266,8 +266,9 @@ already there gets (2), (3).
 voices. `settings_set` switches the stages: `or_llm_on`/`or_llm` (translation),
 `or_vision_on`/`or_vision`, `or_tts_on`/`or_tts_model`/`or_tts_voice`, `or_asr_on`/`or_asr`.
 `engine_presets_get` and `engine_preset_apply` set everything for this computer's card or
-for the cloud at once. `proxy_test` checks a proxy before `proxy_settings_set` stores it
-(`proxy_settings_get` shows it, the password hidden).
+for the cloud at once. The proxy has three modes: `system` (as in Windows), `custom` (its own
+address, `kind` giving the scheme of an address without one) and `off`; `proxy_test` checks a mode
+and address before `proxy_settings_set` stores them (`proxy_settings_get` shows them, the password hidden).
 
 ## Working in the window, in front of the user
 

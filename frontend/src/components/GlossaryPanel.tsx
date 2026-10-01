@@ -30,7 +30,7 @@ const blank = (lang: string): GlossaryEntry => ({ term: "", translation: "", kee
 const retranslateMode = (p: Project): string | null => {
   if (p.audio.rewrite) return null;
   if (p.mode === "dub" || p.mode === "voiceover") return p.mode;
-  if (p.mode === "nodub" && p.subs.mode === "translate") return "nodub";
+  if (p.mode === "nodub" && (p.subs.mode === "translate" || p.subs.mode === "bilingual")) return "nodub";
   return null;
 };
 

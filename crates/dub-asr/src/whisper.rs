@@ -357,7 +357,7 @@ impl WhisperAsr {
             .map_err(|e| AsrError::WavRead(json_path.display().to_string(), e.to_string()))?;
         let parsed = parse_whisper_json(&txt);
         let _ = std::fs::remove_dir_all(&out_dir);
-        Ok(parsed)
+        parsed
     }
 }
 
@@ -501,7 +501,7 @@ impl AsrEngine for WhisperAsr {
         let out = batch
             .jsons
             .into_iter()
-            .map(|j| j.map(|txt| parse_whisper_json(&txt).into_segments().into_iter().flat_map(|s| s.words).collect()))
+            .map(|j| j.and_then(|txt| parse_whisper_json(&txt)).map(|p| p.into_segments().into_iter().flat_map(|s| s.words).collect()))
             .collect();
         let _ = std::fs::remove_dir_all(&batch.out_dir);
         out
@@ -562,18 +562,18 @@ impl AsrEngine for WhisperAsr {
 
 /// Распарсить JSON faster-whisper (openai-формат) в словный поток. Берём words каждого сегмента
 /// ({word,start,end}); если у сегмента нет words — сам сегмент как одно «слово» (fallback). Ведущий
-/// пробел в word тримим (segment_words соединяет через " "). Устойчиво к отсутствующим полям.
+/// пробел в word тримим (segment_words соединяет через " "). Ответ, который не JSON или без списка
+/// segments, — ошибка распознавания, а не пустая речь.
 /// Сегмент, который целиком — галлюцинация Whisper (is_hallucination), уходит в `suspects` отдельным
 /// сегментом со своими словами и в общий поток не попадает.
-fn parse_whisper_json(txt: &str) -> Parsed {
-    let v: serde_json::Value = match serde_json::from_str(txt) {
-        Ok(v) => v,
-        Err(_) => return Parsed::default(),
-    };
+fn parse_whisper_json(txt: &str) -> Result<Parsed, AsrError> {
+    let v: serde_json::Value =
+        serde_json::from_str(txt).map_err(|e| AsrError::Parakeet(format!("whisper: вывод не JSON: {e}")))?;
     let mut out = Parsed::default();
-    let Some(segs) = v.get("segments").and_then(|s| s.as_array()) else {
-        return out;
-    };
+    let segs = v
+        .get("segments")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| AsrError::Parakeet("whisper: в выводе нет списка segments".into()))?;
     for seg in segs {
         let text = seg.get("text").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         let seg_start = seg.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0);
@@ -620,7 +620,7 @@ fn parse_whisper_json(txt: &str) -> Parsed {
             out.words.extend(words);
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -634,7 +634,7 @@ mod tests {
                 {"word":" Hello","start":0.0,"end":0.4,"probability":0.9},
                 {"word":" world.","start":0.4,"end":0.8,"probability":0.8}]}],
             "language":"en"}"#;
-        let ws = parse_whisper_json(j).words;
+        let ws = parse_whisper_json(j).unwrap().words;
         assert_eq!(ws.len(), 2);
         assert_eq!(ws[0].word, "Hello");
         assert_eq!(ws[1].word, "world.");
@@ -644,15 +644,16 @@ mod tests {
     #[test]
     fn falls_back_to_segment_when_no_words() {
         let j = r#"{"segments":[{"start":1.0,"end":2.0,"text":" No words here"}],"language":"ru"}"#;
-        let ws = parse_whisper_json(j).words;
+        let ws = parse_whisper_json(j).unwrap().words;
         assert_eq!(ws.len(), 1);
         assert_eq!(ws[0].word, "No words here");
     }
 
     #[test]
-    fn empty_on_garbage() {
-        assert!(parse_whisper_json("not json").words.is_empty());
-        assert!(parse_whisper_json("{}").words.is_empty());
+    fn garbage_is_an_error_and_no_segments_is_silence() {
+        assert!(parse_whisper_json("not json").is_err());
+        assert!(parse_whisper_json("{}").is_err());
+        assert!(parse_whisper_json(r#"{"segments":[],"language":"en"}"#).unwrap().words.is_empty());
     }
 
     #[test]
@@ -664,7 +665,7 @@ mod tests {
                 {"word":" Субтитры","start":1.3,"end":2.0},{"word":" сделал","start":2.0,"end":2.4},
                 {"word":" DimaTorzok","start":2.4,"end":3.0}]},
             {"start":3.1,"end":3.8,"text":" завтра.","words":[{"word":" завтра.","start":3.1,"end":3.8}]}]}"#;
-        let p = parse_whisper_json(j);
+        let p = parse_whisper_json(j).unwrap();
         let heard: Vec<&str> = p.words.iter().map(|w| w.word.as_str()).collect();
         assert_eq!(heard, ["Мы", "уходим", "завтра."]);
         assert_eq!(p.suspects.len(), 1);

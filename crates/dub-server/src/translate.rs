@@ -210,8 +210,13 @@ pub fn stage(
     if rewrite.is_none() && !spoken.is_empty() {
         let share = untranslated as f64 / spoken.len() as f64;
         if share >= UNTRANSLATED_FAIL_SHARE {
+            let hint = if src.is_empty() || src_lc == "auto" {
+                "; если речь в ролике уже на языке перевода, укажите язык оригинала — тогда перевод не нужен"
+            } else {
+                ""
+            };
             return Err(format!(
-                "перевод не выполнен: {untranslated} из {} строк остались на исходном языке (подробности — в журнале и logs/llama-server.log)",
+                "перевод не выполнен: {untranslated} из {} строк остались на исходном языке{hint} (подробности — в журнале и logs/llama-server.log)",
                 spoken.len()
             ));
         }
@@ -220,6 +225,23 @@ pub fn stage(
         "перевод готов: {}/{} строк, тайтлов={}",
         spoken.len() - untranslated, spoken.len(), proj.captions.titles.len()));
     Ok(())
+}
+
+/// Строка журнала джобы о строках, оставшихся на исходном языке после перевода; None — переведены все.
+/// `pairs` — (что переводилось, что получилось).
+pub(crate) fn untranslated_note<'a>(
+    pairs: impl Iterator<Item = (&'a str, &'a str)>,
+    tgt_lang: &str,
+    glossary: &[GlossaryEntry],
+) -> Option<String> {
+    let (mut total, mut left) = (0usize, 0usize);
+    for (src, tgt) in pairs.filter(|(src, _)| !src.trim().is_empty()) {
+        total += 1;
+        if looks_untranslated(src, tgt, tgt_lang, glossary) {
+            left += 1;
+        }
+    }
+    (left > 0).then(|| format!("{left} из {total} строк остались на исходном языке (подробности — в logs/llama-server.log)"))
 }
 
 /// extra (ctx_extra.json) -> типизированные captions.sub_style/sub_y/titles/brands + raw_ctx.

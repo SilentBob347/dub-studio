@@ -70,16 +70,17 @@ pub fn start(path: &std::path::Path, device: Option<String>) -> Result<(), Strin
     std::thread::spawn(move || {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         let host = cpal::default_host();
-        let device = match device {
-            Some(name) => host
-                .input_devices()
-                .ok()
-                .and_then(|mut it| it.find(|d| device_name(d).is_some_and(|n| n == name)))
-                .or_else(|| host.default_input_device()),
+        let wanted = device;
+        let device = match &wanted {
+            Some(name) => host.input_devices().ok().and_then(|mut it| it.find(|d| device_name(d).is_some_and(|n| &n == name))),
             None => host.default_input_device(),
         };
         let Some(device) = device else {
-            let _ = ready_tx.send(Err("Микрофон не найден".into()));
+            let missing = match &wanted {
+                Some(name) => format!("Микрофон «{name}» не найден — он отключён или переименован; выберите другой"),
+                None => "Микрофон не найден".into(),
+            };
+            let _ = ready_tx.send(Err(missing));
             return;
         };
         let supported = match device.default_input_config() {

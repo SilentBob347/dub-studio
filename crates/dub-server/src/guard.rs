@@ -13,7 +13,7 @@ const LOCAL_HOSTS: [&str; 4] = ["localhost", "127.0.0.1", "[::1]", "tauri.localh
 /// Only the studio's own page and local agents may drive it: a web page in
 /// the user's browser, or one rebinding a domain to this computer, sends its
 /// own origin and is refused.
-fn local_origin(headers: &HeaderMap) -> bool {
+pub(crate) fn local_origin(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN) else { return true };
     local_origin_value(origin)
 }
@@ -26,7 +26,7 @@ fn local_origin_value(origin: &HeaderValue) -> bool {
     scheme == "tauri" || LOCAL_HOSTS.contains(&host.as_str())
 }
 
-fn foreign_origin() -> Response {
+pub(crate) fn foreign_origin() -> Response {
     (StatusCode::FORBIDDEN, "This studio answers only its own window and agents on this computer.").into_response()
 }
 
