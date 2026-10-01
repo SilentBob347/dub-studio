@@ -28,7 +28,16 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace
       - name: Test workspace
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee test.log
+      - name: Failed tests
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^test .* FAILED$|^error(\[|:)" test.log | head -40 | sed 's/^/::error::/'
+          grep -A6 "panicked at" test.log | awk 'BEGIN { RS = "--\n" } { gsub(/\r?\n/, " | "); print "::error::" $0 }' | head -30
       # The desktop shell embeds frontend/dist at compile time and dist is not in git.
       - uses: actions/setup-node@v4
         with:
