@@ -211,9 +211,66 @@ pub fn load_profile_casting(repo_root: &Path, slug: &str) -> Option<dub_faces::C
     dub_faces::load_casting(&profile_dir(repo_root, slug).join("casting.json"))
 }
 
+/// Файл глоссария профиля сериала: {"entries": [...]}.
+const GLOSSARY_FILE: &str = "glossary.json";
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct SeriesGlossary {
+    #[serde(default)]
+    entries: Vec<dub_core::GlossaryEntry>,
+}
+
+/// Каталог существующего профиля: безопасный slug и casting.json на месте.
+fn existing_profile(repo_root: &Path, slug: &str) -> Option<PathBuf> {
+    let dir = profile_dir(repo_root, slug);
+    (is_safe_slug(slug) && dir.join("casting.json").is_file()).then_some(dir)
+}
+
+/// Глоссарий профиля сериала. None — такого профиля нет; Err — glossary.json есть, но не читается.
+/// Профиль без glossary.json — пустой глоссарий.
+pub fn read_glossary(repo_root: &Path, slug: &str) -> Option<Result<Vec<dub_core::GlossaryEntry>, String>> {
+    let dir = existing_profile(repo_root, slug)?;
+    let path = dir.join(GLOSSARY_FILE);
+    if !path.is_file() {
+        return Some(Ok(Vec::new()));
+    }
+    Some(
+        std::fs::read_to_string(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))
+            .and_then(|text| serde_json::from_str::<SeriesGlossary>(&text).map_err(|e| format!("{}: {e}", path.display())))
+            .map(|g| g.entries),
+    )
+}
+
+/// Записать глоссарий профиля (атомарно). Err — профиля нет или запись не удалась.
+pub fn write_glossary(repo_root: &Path, slug: &str, entries: &[dub_core::GlossaryEntry]) -> Result<(), String> {
+    let dir = existing_profile(repo_root, slug).ok_or_else(|| format!("профиль «{slug}» не найден"))?;
+    let json = serde_json::to_string_pretty(&SeriesGlossary { entries: entries.to_vec() }).map_err(|e| e.to_string())?;
+    dub_core::atomic::write(&dir.join(GLOSSARY_FILE), json.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_series_glossary_lives_beside_its_profile() {
+        let repo = std::env::temp_dir().join(format!("dublib_gloss_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        assert!(read_glossary(&repo, "show").is_none(), "no profile");
+        assert!(write_glossary(&repo, "show", &[]).unwrap_err().contains("не найден"));
+        let dir = profile_dir(&repo, "show");
+        std::fs::create_dir_all(&dir).unwrap();
+        dub_faces::save_casting(&dir.join("casting.json"), &dub_faces::Casting::default()).unwrap();
+        assert_eq!(read_glossary(&repo, "show").unwrap().unwrap(), vec![]);
+        let e = dub_core::GlossaryEntry { term: "Hogwarts".into(), translation: "Хогвартс".into(), ..Default::default() };
+        write_glossary(&repo, "show", std::slice::from_ref(&e)).unwrap();
+        assert_eq!(read_glossary(&repo, "show").unwrap().unwrap(), vec![e]);
+        std::fs::write(dir.join(GLOSSARY_FILE), "{broken").unwrap();
+        assert!(read_glossary(&repo, "show").unwrap().is_err());
+        assert!(read_glossary(&repo, "../show").is_none());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 
     #[test]
     fn slugify_translit_and_kebab() {

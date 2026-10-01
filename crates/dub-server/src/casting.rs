@@ -186,13 +186,13 @@ fn merge_smallest_into_nearest(embs: &[Vec<f32>], mut labels: Vec<usize>, cap: u
     labels
 }
 
-/// Голосовая кластеризация СЕГМЕНТОВ (#83 global speakers, по указанию юзера): Sortformer даёт ≤4 спикеров
+/// Голосовая кластеризация СЕГМЕНТОВ (#83 global speakers, по указанию юзера): диаризация даёт ≤8 спикеров
 /// ОДНОВРЕМЕННО в окне, но за всё видео их больше. Эмбеддим вокал каждого сегмента (WeSpeaker) и
 /// кластеризуем по cosine -> присваиваем КАЖДОМУ сегменту глобальную голосовую метку "v{k}". Находит
 /// персонажей больше Sortformer'а (слитых/пропущенных, напр. мужского) и сливает один голос из разных окон
 /// в одного. Возвращает КЛОН проекта с переразмеченными segment.speaker; None -> нет модели/вокала/1 кластер
 /// (оставляем Sortformer-разметку). Дорого (эмбеддинг на сегмент), но только при включённом кастинге.
-/// Голосовая переразметка спикеров (#83/#115): Sortformer даёт ≤4 в окне, а персонажей больше —
+/// Голосовая переразметка спикеров (#83/#115): диаризация даёт ≤8 в окне, а персонажей больше —
 /// кластеризуем вокал по сегментам (WeSpeaker average-linkage) и ПЕРЕРАЗМЕЧАЕМ сами сегменты метками
 /// «v{k}» НА МЕСТЕ. Зовётся в пайплайне ПОСЛЕ ASR (до перевода/TTS) -> дубляж идёт по N голосам, счётчик
 /// реплик у персонажей верный, кастинг строится на тех же метках (0 реплик больше не бывает). Возвращает
@@ -310,24 +310,24 @@ pub fn recluster_segments(paths: &AnalyzePaths, segments: &mut [Segment], progre
         .collect::<std::collections::HashSet<&String>>()
         .len();
     if k <= 1 || k <= orig_count {
-        // Кластеризация не дала БОЛЬШЕ персонажей, чем Sortformer -> не переразмечаем (не рискуем).
+        // Кластеризация не дала БОЛЬШЕ персонажей, чем диаризация -> не переразмечаем (не рискуем).
         return 0;
     }
-    // Sortformer УВЕРЕННО сказал один спикер (orig_count<=1): дробим ТОЛЬКО если новые кластеры реально
-    // населены. Настоящий второй голос имеет заметную долю реплик; горстка сегментов в отдельном кластере —
-    // это разброс просодии ОДНОГО человека (крик/шёпот), а не второй персонаж. Иначе монолог рвётся на
-    // v0/v1 и озвучивается двумя голосами (регресс снятия n_spk-гейта). Требуем 2-й кластер >=2 и >=15%.
-    if orig_count <= 1 {
-        let mut sizes = vec![0usize; k];
-        for &l in &labels {
-            sizes[l] += 1;
-        }
-        sizes.sort_unstable_by(|a, b| b.cmp(a));
-        let second = sizes.get(1).copied().unwrap_or(0);
-        let min_needed = 2.max((labels.len() as f64 * 0.15).ceil() as usize);
-        if second < min_needed {
-            return 0; // разброс просодии одного спикера, не второй голос
-        }
+    // Персонаж по голосу — только населённый кластер: настоящий голос имеет заметную долю реплик, а горстка
+    // сегментов в отдельном кластере — разброс просодии одного человека (крик/шёпот). Переразмечаем, только
+    // если населённых кластеров больше, чем спикеров у диаризации; одиночки доливаем в ближайший населённый.
+    let min_needed = 2.max((labels.len() as f64 * 0.15).ceil() as usize);
+    let mut sizes = vec![0usize; k];
+    for &l in &labels {
+        sizes[l] += 1;
+    }
+    let populated = sizes.iter().filter(|&&n| n >= min_needed).count();
+    if populated <= orig_count.max(1) {
+        return 0;
+    }
+    if populated < k {
+        labels = merge_smallest_into_nearest(&embs, labels, populated);
+        k = labels.iter().copied().max().map(|m| m + 1).unwrap_or(0);
     }
     // seg_idx -> голосовая метка (для эмбеддированных).
     let mut seg_label: HashMap<usize, usize> = HashMap::new();
@@ -353,7 +353,7 @@ pub fn recluster_segments(paths: &AnalyzePaths, segments: &mut [Segment], progre
     emit(
         progress,
         "asr",
-        &format!("голосовая переразметка: {k} персонажей по голосу (Sortformer нашёл {orig_count})"),
+        &format!("голосовая переразметка: {k} персонажей по голосу (диаризация нашла {orig_count})"),
     );
     k
 }
@@ -791,6 +791,28 @@ fn load_face_emb(models_root: &Path, anime: bool, progress: &Progress) -> Option
             }
         }
     }
+}
+
+/// Отпечаток моделей кастинга для ключа стадии: имя+размер файлов детектора/эмбеддера лица и голоса
+/// (0 — нет файла). Докачанные модели меняют ключ, и кастинг пересчитывается уже с аватарами.
+pub fn models_fingerprint(models_root: &Path, anime: bool) -> String {
+    let voice = std::env::var("DUB_FACES_WESPEAKER")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dub_faces::wespeaker_path(models_root));
+    let face: Vec<std::path::PathBuf> = if anime {
+        vec![models_root.join("faces").join("anime_face").join("model.onnx"), dub_faces::ccip_path(models_root)]
+    } else {
+        let m = FacesModels::resolve(models_root);
+        vec![m.scrfd, m.lvface]
+    };
+    face.iter()
+        .chain(std::iter::once(&voice))
+        .map(|p| {
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            format!("{}:{size}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// Извлечь один кадр видео в момент t (сек) -> RgbImage. Быстрый seek (-ss ПЕРЕД -i).

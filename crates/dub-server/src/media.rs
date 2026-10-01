@@ -2,6 +2,7 @@
 //! видеопоток, fps, кодек) и extract_audio -> wav 16k mono. Тяжёлого ничего: только вызовы бинарей.
 
 use serde_json::Value;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Command;
 
@@ -114,40 +115,50 @@ pub fn probe(input: &Path) -> Result<MediaMeta, String> {
     })
 }
 
+/// Первый фильтр каждого извлечения звука, которое идёт в синхронные стадии (ASR, диаризация, сепарация,
+/// микс, рендер, волна таймлайна): сэмплы стоят по своим меткам времени (дыра в pts заполнена тишиной,
+/// наложение срезано), и поток начинается с t=0 контейнера, как картинка.
+pub const SYNC_AF: &str = "aresample=async=1:first_pts=0";
+
+fn os_args(parts: &[&OsStr]) -> Vec<OsString> {
+    parts.iter().map(|p| p.to_os_string()).collect()
+}
+
+fn extract_wav_16k_mono_args(input: &Path, out_wav: &Path) -> Vec<OsString> {
+    os_args(&[
+        OsStr::new("-y"), OsStr::new("-i"), input.as_os_str(),
+        OsStr::new("-vn"), OsStr::new("-af"), OsStr::new(SYNC_AF),
+        OsStr::new("-ac"), OsStr::new("1"), OsStr::new("-ar"), OsStr::new("16000"),
+        OsStr::new("-c:a"), OsStr::new("pcm_s16le"), OsStr::new("-f"), OsStr::new("wav"), out_wav.as_os_str(),
+    ])
+}
+
 /// Извлечь аудиодорожку в WAV 16 кГц mono (pcm_s16le) — вход ASR. Порт media.to_16k_mono/extract_audio
 /// (объединённо: сразу 16k/mono, т.к. дальше в порту нет separation-стадии). Если у видео нет аудио —
 /// ffmpeg вернёт ошибку, которую пробрасываем.
 pub fn extract_wav_16k_mono(input: &Path, out_wav: &Path) -> Result<(), String> {
-    let status = Command::new(FFMPEG)
-        .arg("-y")
-        .arg("-i")
-        .arg(input)
-        .args([
-            "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav",
-        ])
-        .arg(out_wav)
-        .output()
-        .map_err(|e| format!("ffmpeg запуск не удался: {e}"))?;
-    if !status.status.success() {
-        return Err(format!(
-            "ffmpeg extract_audio код {:?}: {}",
-            status.status.code(),
-            String::from_utf8_lossy(&status.stderr)
-        ));
-    }
-    if !out_wav.is_file() {
-        return Err("ffmpeg не создал wav".into());
-    }
-    Ok(())
+    dub_core::atomic::write_with(out_wav, |tmp| {
+        let mut cmd = Command::new(FFMPEG);
+        cmd.args(extract_wav_16k_mono_args(input, tmp));
+        let status = dub_core::proc::output(&mut cmd).map_err(|e| format!("ffmpeg запуск не удался: {e}"))?;
+        if !status.status.success() {
+            return Err(format!(
+                "ffmpeg extract_audio код {:?}: {}",
+                status.status.code(),
+                String::from_utf8_lossy(&status.stderr)
+            ));
+        }
+        if !tmp.is_file() {
+            return Err("ffmpeg не создал wav".into());
+        }
+        Ok(())
+    })
 }
 
 // ─── Рендер-хелперы (порт media.py: extract_audio/duration/time_stretch/mix/mux/trim) ─────────
 
 fn run_ff(args: &[&std::ffi::OsStr]) -> Result<(), String> {
-    let out = Command::new(FFMPEG)
-        .args(args)
-        .output()
-        .map_err(|e| format!("ffmpeg запуск: {e}"))?;
+    let out = dub_core::proc::output(Command::new(FFMPEG).args(args)).map_err(|e| format!("ffmpeg запуск: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let tail: String = err.chars().rev().take(1500).collect::<String>().chars().rev().collect();
@@ -169,6 +180,7 @@ fn run_ff_timeout(args: &[&std::ffi::OsStr], secs: u64) -> Result<(), String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("ffmpeg запуск: {e}"))?;
+    let _tracked = dub_core::proc::track(child.id());
     let mut se = child.stderr.take().expect("piped stderr");
     let th_err = std::thread::spawn(move || {
         let mut b = Vec::new();
@@ -197,26 +209,37 @@ fn run_ff_timeout(args: &[&std::ffi::OsStr], secs: u64) -> Result<(), String> {
     Ok(())
 }
 
-use std::ffi::OsStr;
+fn run_ff_args(args: &[OsString]) -> Result<(), String> {
+    let refs: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    run_ff(&refs)
+}
 
-/// Извлечь аудио в WAV sr/ac (порт media.extract_audio). Для сепарации: sr=44100, ac=2.
-pub fn extract_audio(video: &Path, out_wav: &Path, sr: u32, ac: u32) -> Result<(), String> {
-    let sr = sr.to_string();
-    let ac = ac.to_string();
-    run_ff(&[
+fn extract_audio_args(video: &Path, out_wav: &Path, sr: u32, ac: u32) -> Vec<OsString> {
+    let (sr, ac) = (sr.to_string(), ac.to_string());
+    os_args(&[
         OsStr::new("-y"), OsStr::new("-i"), video.as_os_str(),
-        OsStr::new("-vn"), OsStr::new("-ac"), OsStr::new(&ac),
+        OsStr::new("-vn"), OsStr::new("-af"), OsStr::new(SYNC_AF), OsStr::new("-ac"), OsStr::new(&ac),
         OsStr::new("-ar"), OsStr::new(&sr), out_wav.as_os_str(),
     ])
 }
 
-/// WAV/медиа -> 16k mono (порт media.to_16k_mono).
-pub fn to_16k_mono(src: &Path, dst: &Path) -> Result<(), String> {
-    run_ff(&[
+/// Извлечь аудио в WAV sr/ac (порт media.extract_audio). Для сепарации: sr=44100, ac=2.
+/// Пишет атомарно: недописанный файл не появится под целевым именем.
+pub fn extract_audio(video: &Path, out_wav: &Path, sr: u32, ac: u32) -> Result<(), String> {
+    dub_core::atomic::write_with(out_wav, |tmp| run_ff_args(&extract_audio_args(video, tmp, sr, ac)))
+}
+
+fn to_16k_mono_args(src: &Path, dst: &Path) -> Vec<OsString> {
+    os_args(&[
         OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
-        OsStr::new("-vn"), OsStr::new("-ac"), OsStr::new("1"),
+        OsStr::new("-vn"), OsStr::new("-af"), OsStr::new(SYNC_AF), OsStr::new("-ac"), OsStr::new("1"),
         OsStr::new("-ar"), OsStr::new("16000"), dst.as_os_str(),
     ])
+}
+
+/// WAV/медиа -> 16k mono (порт media.to_16k_mono). Пишет атомарно.
+pub fn to_16k_mono(src: &Path, dst: &Path) -> Result<(), String> {
+    dub_core::atomic::write_with(dst, |tmp| run_ff_args(&to_16k_mono_args(src, tmp)))
 }
 
 /// Длительность файла в секундах (ffprobe format.duration). Порт media.duration.
@@ -260,6 +283,22 @@ pub fn time_stretch(src: &Path, dst: &Path, factor: f64) -> Result<(), String> {
     ])
 }
 
+/// Частота промежуточных стадий микса: частота audio_hq/стемов сепарации, чтобы по цепочке
+/// mix -> loudnorm -> gain не было лишних пересчётов частоты. loudnorm внутри работает на 192 кГц,
+/// поэтому частота выхода задаётся явно.
+const MIX_SR: &str = "44100";
+
+/// Кодек и частота промежуточного файла микса: float32 WAV без потерь (сумма голоса и фона может
+/// выйти за 0 dBFS — float хранит это до loudnorm без клипа). Сжатие с потерями одно — в mux.
+/// `-rf64 auto`: многочасовой стерео-float переходит границу RIFF в 4 ГБ.
+fn lossless_out() -> [&'static OsStr; 6] {
+    [
+        OsStr::new("-c:a"), OsStr::new("pcm_f32le"),
+        OsStr::new("-ar"), OsStr::new(MIX_SR),
+        OsStr::new("-rf64"), OsStr::new("auto"),
+    ]
+}
+
 /// Свести дубль-вокал поверх фона. МУЗЫКУ НЕ ГЛУШИМ (прямой приказ юзера, многократно): вокал уже вырезан
 /// сепарацией, поэтому инструментал = чистый реальный фон и звучит в ПОЛНЫЙ уровень (1.0) — дублированный
 /// голос заменяет вырезанный вокал, фон остаётся как в оригинале. amix normalize=0 НЕ делит входы пополам
@@ -269,11 +308,13 @@ pub fn mix(voice: &Path, music: &Path, out: &Path) -> Result<(), String> {
     let fc = "[0:a]aformat=channel_layouts=stereo[v];\
               [1:a]aformat=channel_layouts=stereo[m];\
               [v][m]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[a]";
-    run_ff(&[
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("-y"), OsStr::new("-i"), voice.as_os_str(), OsStr::new("-i"), music.as_os_str(),
         OsStr::new("-filter_complex"), OsStr::new(fc), OsStr::new("-map"), OsStr::new("[a]"),
-        OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), out.as_os_str(),
-    ])
+    ];
+    args.extend(lossless_out());
+    args.push(out.as_os_str());
+    run_ff(&args)
 }
 
 /// Сведение диалог+фон с САЙДЧЕЙН-ДАКИНГОМ — проф. практика дубляжа: компрессор приглушает фон
@@ -286,11 +327,13 @@ pub fn mix_ducked(voice: &Path, music: &Path, out: &Path) -> Result<(), String> 
               [1:a]aformat=channel_layouts=stereo[m];\
               [m][vkey]sidechaincompress=threshold=0.02:ratio=8:attack=150:release=600:makeup=1[bg];\
               [v][bg]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[a]";
-    run_ff(&[
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("-y"), OsStr::new("-i"), voice.as_os_str(), OsStr::new("-i"), music.as_os_str(),
         OsStr::new("-filter_complex"), OsStr::new(fc), OsStr::new("-map"), OsStr::new("[a]"),
-        OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), out.as_os_str(),
-    ])
+    ];
+    args.extend(lossless_out());
+    args.push(out.as_os_str());
+    run_ff(&args)
 }
 
 /// Речевой блок на таймлайне [start,end] — слитые по паузе <1.6с реплики дубляжа. Границы берутся из
@@ -386,36 +429,59 @@ fn mix_env_g(voice: &Path, music: &Path, blocks: &[SpeechBlock], g: f64, out: &P
     std::fs::write(&script, &fc).map_err(|e| format!("env filter-скрипт: {e}"))?;
     // Таймаут пропорционален длине музыки (eval=frame дорог на многочасовом): max(600с, 2×длит.).
     let secs = (duration(music).unwrap_or(0.0) * 2.0).max(600.0) as u64;
-    let r = run_ff_timeout(&[
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("-y"), OsStr::new("-i"), voice.as_os_str(), OsStr::new("-i"), music.as_os_str(),
         OsStr::new(dub_captions::burn::filter_script_flag()), script.as_os_str(),
         OsStr::new("-map"), OsStr::new("[a]"),
-        OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), out.as_os_str(),
-    ], secs);
+    ];
+    args.extend(lossless_out());
+    args.push(out.as_os_str());
+    let r = run_ff_timeout(&args, secs);
     let _ = std::fs::remove_file(&script); // прибрать временный filter-скрипт (в т.ч. при ошибке)
     r
 }
 
-/// Финальная нормализация программы по EBU R128 (ffmpeg loudnorm): интегральная громкость к I LUFS
-/// + true-peak лимитер к TP dBTP. Решение юзера (best-practice, НЕ питон): ставится последним шагом на
-/// смиксованную дорожку — держит целевую громкость соцсетей и ловит пики (пофразного клэмпа поэтому нет).
+/// Финальная нормализация программы по EBU R128 (ffmpeg loudnorm): интегральная громкость к I LUFS и
+/// true-peak лимитер к TP dBTP. Решение юзера (best-practice, НЕ питон): ставится последним шагом на
+/// смиксованную дорожку — держит целевую громкость соцсетей и ловит межфразовые суммы и микс с фоном
+/// (пики отдельной фразы до этого опускает пофразный лимитер normalize_voice). Выход без потерь: после
+/// loudnorm уже нет перекодирования, которое сдвинуло бы true-peak.
 pub fn loudnorm(src: &Path, dst: &Path, i: f64, tp: f64, lra: f64) -> Result<(), String> {
     let af = format!("loudnorm=I={i}:TP={tp}:LRA={lra}");
-    run_ff(&[
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
         OsStr::new("-af"), OsStr::new(&af),
+    ];
+    args.extend(lossless_out());
+    args.push(dst.as_os_str());
+    run_ff(&args)
+}
+
+/// Усилить всю дорожку на `gain_db` dB (монтажный гейн, наша opt-in фича). Выход без потерь.
+pub fn gain(src: &Path, dst: &Path, gain_db: f64) -> Result<(), String> {
+    let af = format!("volume={gain_db}dB");
+    let mut args: Vec<&OsStr> = vec![
+        OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
+        OsStr::new("-af"), OsStr::new(&af),
+    ];
+    args.extend(lossless_out());
+    args.push(dst.as_os_str());
+    run_ff(&args)
+}
+
+fn preview_aac_args(src: &Path, dst: &Path) -> Vec<OsString> {
+    os_args(&[
+        OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
+        OsStr::new("-vn"), OsStr::new("-af"), OsStr::new(SYNC_AF),
+        OsStr::new("-ac"), OsStr::new("2"), OsStr::new("-ar"), OsStr::new(MIX_SR),
         OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), dst.as_os_str(),
     ])
 }
 
-/// Усилить всю дорожку на `gain_db` dB (монтажный гейн, наша opt-in фича). Перекодирование в aac.
-pub fn gain(src: &Path, dst: &Path, gain_db: f64) -> Result<(), String> {
-    let af = format!("volume={gain_db}dB");
-    run_ff(&[
-        OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
-        OsStr::new("-af"), OsStr::new(&af),
-        OsStr::new("-c:a"), OsStr::new("aac"), OsStr::new("-b:a"), OsStr::new("192k"), dst.as_os_str(),
-    ])
+/// Дорожка для прослушивания в редакторе (<audio> WebView): одно кодирование AAC из несжатого
+/// микса. Источник может быть и видео (nodub: звук оригинала), поэтому -vn.
+pub fn encode_preview_aac(src: &Path, dst: &Path) -> Result<(), String> {
+    run_ff_args(&preview_aac_args(src, dst))
 }
 
 /// Смуксить видео (copy) + аудио (aac). БЕЗ -shortest (выход по длиннейшему потоку). Порт media.mux.
@@ -554,7 +620,7 @@ pub fn has_audio(input: &Path) -> bool {
 }
 
 /// Сконвертировать аудио в PCM 16-bit WAV (стерео). Финальный формат аудио-режима (вход без видео):
-/// пачка WAV -> пачка озвученных WAV. Лоссовость только от исходного mix (aac), сам WAV без потерь.
+/// пачка WAV -> пачка озвученных WAV. Микс приходит несжатым float, здесь только квантование в 16 бит.
 pub fn to_wav(src: &Path, dst: &Path) -> Result<(), String> {
     run_ff(&[
         OsStr::new("-y"), OsStr::new("-i"), src.as_os_str(),
@@ -563,16 +629,108 @@ pub fn to_wav(src: &Path, dst: &Path) -> Result<(), String> {
     ])
 }
 
-/// Вырезать [start,end] в mono @ sr Гц. Порт media.trim(..., sr=16000): реф-клипы 16к, keep-сплайс 24к.
-pub fn trim(src: &Path, dst: &Path, start: f64, end: f64, sr: u32) -> Result<(), String> {
-    let ss = format!("{:.3}", start);
-    let to = format!("{:.3}", end);
-    let ar = sr.to_string();
-    run_ff(&[
+fn cut_args(src: &Path, dst: &Path, start: f64, end: f64, sr: u32, ac: u32) -> Vec<OsString> {
+    let (ss, to, ar, ac) = (format!("{start:.3}"), format!("{end:.3}"), sr.to_string(), ac.to_string());
+    os_args(&[
         OsStr::new("-y"), OsStr::new("-ss"), OsStr::new(&ss), OsStr::new("-to"), OsStr::new(&to),
-        OsStr::new("-i"), src.as_os_str(), OsStr::new("-ac"), OsStr::new("1"),
+        OsStr::new("-i"), src.as_os_str(), OsStr::new("-af"), OsStr::new(SYNC_AF), OsStr::new("-ac"), OsStr::new(&ac),
         OsStr::new("-ar"), OsStr::new(&ar), dst.as_os_str(),
     ])
+}
+
+/// Вырезать [start,end] в mono @ sr Гц. Порт media.trim(..., sr=16000): keep-сплайс 24к, клипы голоса 16к.
+/// Пишет атомарно (seg-файлы — кэш по существованию).
+pub fn trim(src: &Path, dst: &Path, start: f64, end: f64, sr: u32) -> Result<(), String> {
+    cut(src, dst, start, end, sr, 1)
+}
+
+/// Вырезать [start,end] в sr Гц с ac каналами (вход сепарации — 44.1 кГц стерео). Пишет атомарно.
+pub fn cut(src: &Path, dst: &Path, start: f64, end: f64, sr: u32, ac: u32) -> Result<(), String> {
+    dub_core::atomic::write_with(dst, |tmp| run_ff_args(&cut_args(src, tmp, start, end, sr, ac)))
+}
+
+/// Фейды 15 мс на обоих краях рефа: разворот клипа даёт фейду в конце ту же точку отсчёта, что в начале,
+/// без знания длины.
+const REF_FADES: &str = "afade=t=in:d=0.015:curve=hsin,areverse,afade=t=in:d=0.015:curve=hsin,areverse";
+
+/// Метка стемов проекта: из звука какого извлечения они посчитаны.
+const STEMS_MARK: &str = "source.ver";
+/// Версия извлечения звука, из которого сепарируются стемы проекта: поднимать вместе с изменением
+/// извлечения (SYNC_AF). Стемы прежнего извлечения на файле с дырами в метках расходятся с картинкой.
+pub const STEMS_SOURCE_VER: &str = "sync-v2";
+
+/// Посчитаны ли стемы проекта (`wd/stems`) из звука текущего извлечения.
+pub fn stems_current(wd: &Path) -> Result<bool, String> {
+    let mark = wd.join("stems").join(STEMS_MARK);
+    match std::fs::read_to_string(&mark) {
+        Ok(v) => Ok(v.trim() == STEMS_SOURCE_VER),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", mark.display())),
+    }
+}
+
+/// Стемы проекта из звука прежнего извлечения удаляются вместе с audio_hq.wav и чистым 16k-вокалом
+/// (analyze берёт их по существованию): их посчитают заново. true — было что удалить.
+pub fn drop_stale_separation(wd: &Path) -> Result<bool, String> {
+    let stems = wd.join("stems");
+    if !stems.is_dir() || stems_current(wd)? {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(&stems).map_err(|e| format!("{}: {e}", stems.display()))?;
+    for name in ["audio_hq.wav", "vocals16_clean.wav"] {
+        let path = wd.join(name);
+        if path.is_file() {
+            std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+    }
+    Ok(true)
+}
+
+/// Отметить стемы `stems` как посчитанные из звука текущего извлечения.
+pub fn mark_separation(stems: &Path) -> Result<(), String> {
+    let mark = stems.join(STEMS_MARK);
+    std::fs::write(&mark, STEMS_SOURCE_VER).map_err(|e| format!("{}: {e}", mark.display()))
+}
+
+/// Самая высокая частота рефа: выше неё wav-мюксер ffmpeg пишет заголовок EXTENSIBLE, который Higgs не
+/// читает (голос, записанный на 96 или 192 кГц).
+const REF_MAX_RATE: u32 = 48_000;
+
+fn trim_ref_args(src: &Path, dst: &Path, start: f64, end: f64, rate: Option<u32>) -> Vec<OsString> {
+    let (ss, to, af) = (format!("{start:.3}"), format!("{end:.3}"), format!("{SYNC_AF},{REF_FADES}"));
+    let mut args = os_args(&[
+        OsStr::new("-y"), OsStr::new("-ss"), OsStr::new(&ss), OsStr::new("-to"), OsStr::new(&to),
+        OsStr::new("-i"), src.as_os_str(), OsStr::new("-vn"), OsStr::new("-af"), OsStr::new(&af),
+        OsStr::new("-ac"), OsStr::new("1"),
+    ]);
+    if let Some(rate) = rate {
+        args.extend([OsString::from("-ar"), OsString::from(rate.to_string())]);
+    }
+    args.extend([OsString::from("-c:a"), OsString::from("pcm_s16le"), dst.as_os_str().to_os_string()]);
+    args
+}
+
+/// Частота первого звукового потока файла (ffprobe).
+pub fn audio_rate(src: &Path) -> Result<u32, String> {
+    let out = Command::new(FFPROBE)
+        .args(["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "csv=p=0"])
+        .arg(src)
+        .output()
+        .map_err(|e| format!("ffprobe запуск не удался: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    match (out.status.success(), text.trim().parse::<u32>()) {
+        (true, Ok(rate)) if rate > 0 => Ok(rate),
+        _ => Err(format!("{}: частота звука не прочитана ({})", src.display(), String::from_utf8_lossy(&out.stderr).trim())),
+    }
+}
+
+/// Реф клона: [start,end] источника моно на его собственной частоте (не выше 48 кГц), PCM16 с простым
+/// заголовком (float WAV и заголовок EXTENSIBLE Higgs не читает), фейды 15 мс на краях. Частоту движок
+/// приводит к своей сам. Пишет атомарно.
+pub fn trim_ref(src: &Path, dst: &Path, start: f64, end: f64) -> Result<(), String> {
+    let rate = audio_rate(src)?;
+    let out_rate = (rate > REF_MAX_RATE).then_some(REF_MAX_RATE);
+    dub_core::atomic::write_with(dst, |tmp| run_ff_args(&trim_ref_args(src, tmp, start, end, out_rate)))
 }
 
 // ─── Оконная нарезка для полнометражного пайплайна (#79) ──────────────────────────────────────────
@@ -749,5 +907,173 @@ mod iso639_tests {
         for (code, _) in dub_translate::WHISPER_LANGS {
             assert_ne!(iso639_1_to_2(code), "und", "no ISO 639-2 mapping for {code}");
         }
+    }
+}
+
+#[cfg(test)]
+mod lossless_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("dub_media_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn sine_wav(path: &Path, sr: u32, channels: u16, amp: f32, secs: f32) {
+        let spec = hound::WavSpec { channels, sample_rate: sr, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..(sr as f32 * secs) as usize {
+            let v = amp * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr as f32).sin();
+            for _ in 0..channels {
+                w.write_sample(v).unwrap();
+            }
+        }
+        w.finalize().unwrap();
+    }
+
+    fn read(path: &Path) -> (hound::WavSpec, Vec<f32>) {
+        let mut r = hound::WavReader::open(path).unwrap();
+        let spec = r.spec();
+        let s: Vec<f32> = r.samples::<f32>().map(|x| x.unwrap()).collect();
+        (spec, s)
+    }
+
+    #[test]
+    fn mix_and_loudnorm_stay_lossless_float_at_the_mix_rate() {
+        let d = tmp("mix");
+        let voice = d.join("dub_vocals.wav");
+        let music = d.join("instrumental.wav");
+        sine_wav(&voice, 24_000, 1, 0.8, 1.0);
+        sine_wav(&music, 44_100, 2, 0.8, 1.0);
+        let mixed = d.join("new_audio.wav");
+        mix(&voice, &music, &mixed).unwrap();
+        let (spec, s) = read(&mixed);
+        assert_eq!(spec.sample_format, hound::SampleFormat::Float);
+        assert_eq!(spec.sample_rate, 44_100);
+        let peak = s.iter().fold(0.0f32, |p, v| p.max(v.abs()));
+        assert!(peak > 1.2, "сумма голоса и фона выше 0 dBFS должна дожить до loudnorm без клипа: {peak}");
+
+        let normed = d.join("final_audio.wav");
+        loudnorm(&mixed, &normed, -14.0, -1.0, 11.0).unwrap();
+        let (spec, s) = read(&normed);
+        assert_eq!(spec.sample_format, hound::SampleFormat::Float);
+        assert_eq!(spec.sample_rate, 44_100, "loudnorm без явной частоты отдаёт 192 кГц");
+        assert!(s.iter().all(|v| v.abs() <= 1.0));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sync_filter_leads_every_audio_extraction() {
+        assert_eq!(SYNC_AF, "aresample=async=1:first_pts=0");
+        let (i, o) = (Path::new("in.mp4"), Path::new("out.wav"));
+        let all = [
+            ("extract_wav_16k_mono", extract_wav_16k_mono_args(i, o)),
+            ("extract_audio", extract_audio_args(i, o, 44_100, 2)),
+            ("to_16k_mono", to_16k_mono_args(i, o)),
+            ("trim", cut_args(i, o, 1.0, 2.0, 24_000, 1)),
+            ("cut", cut_args(i, o, 1.0, 2.0, 44_100, 2)),
+            ("trim_ref", trim_ref_args(i, o, 1.0, 2.0, None)),
+            ("trim_ref 96k", trim_ref_args(i, o, 1.0, 2.0, Some(REF_MAX_RATE))),
+            ("encode_preview_aac", preview_aac_args(i, o)),
+        ];
+        for (name, args) in all {
+            let at: Vec<usize> = args.iter().enumerate().filter(|(_, a)| *a == "-af").map(|(k, _)| k).collect();
+            assert_eq!(at.len(), 1, "{name}: одна цепочка -af {args:?}");
+            let chain = args[at[0] + 1].to_string_lossy();
+            assert!(chain.starts_with(SYNC_AF), "{name}: aresample первым в цепочке: {chain}");
+        }
+    }
+
+    fn rms_of(s: &[f32]) -> f32 {
+        (s.iter().map(|v| v * v).sum::<f32>() / s.len().max(1) as f32).sqrt()
+    }
+
+    #[test]
+    fn extracted_audio_follows_timestamps_across_a_gap() {
+        let d = tmp("gap");
+        let src = d.join("gap.mkv");
+        // 2.5 с звука, с первой секунды его метки сдвинуты на 0.5 с вперёд (дыра в pts); картинка 3 с.
+        run_ff(&[
+            OsStr::new("-v"), OsStr::new("error"), OsStr::new("-y"),
+            OsStr::new("-f"), OsStr::new("lavfi"), OsStr::new("-i"), OsStr::new("sine=f=440:d=2.5:r=48000"),
+            OsStr::new("-f"), OsStr::new("lavfi"), OsStr::new("-i"), OsStr::new("color=c=black:s=64x64:r=25:d=3"),
+            OsStr::new("-filter_complex"), OsStr::new("[0:a]asetpts='if(gte(T,1),PTS+0.5/TB,PTS)'[a]"),
+            OsStr::new("-map"), OsStr::new("1:v"), OsStr::new("-map"), OsStr::new("[a]"),
+            OsStr::new("-c:v"), OsStr::new("rawvideo"), OsStr::new("-c:a"), OsStr::new("pcm_s16le"),
+            src.as_os_str(),
+        ])
+        .unwrap();
+        let container = probe(&src).unwrap().duration;
+        let frame = 1.0 / 25.0;
+        assert!((container - 3.0).abs() <= frame, "контейнер {container}");
+
+        let v16 = d.join("v16.wav");
+        extract_wav_16k_mono(&src, &v16).unwrap();
+        let hq = d.join("hq.wav");
+        extract_audio(&src, &hq, 44_100, 2).unwrap();
+        let m16 = d.join("m16.wav");
+        to_16k_mono(&src, &m16).unwrap();
+        for w in [&v16, &hq, &m16] {
+            let got = duration(w).unwrap();
+            assert!((got - container).abs() <= frame, "{}: {got} против {container}", w.display());
+        }
+        // Дыра стоит на своём месте: 1.0–1.5 с тишина, звук после неё начинается с 1.5 с.
+        let (s, sr) = crate::wavio::read_mono_f32(&v16).unwrap();
+        let at = |t: f64| (t * sr as f64) as usize;
+        assert!(rms_of(&s[at(1.1)..at(1.4)]) < 1e-3);
+        assert!(rms_of(&s[at(1.6)..at(1.9)]) > 0.05);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stems_of_an_earlier_extraction_are_separated_again() {
+        let d = tmp("stale_stems");
+        let stems = d.join("stems");
+        std::fs::create_dir_all(&stems).unwrap();
+        for name in ["vocals.wav", "instrumental.wav"] {
+            std::fs::write(stems.join(name), b"w").unwrap();
+        }
+        std::fs::write(d.join("audio_hq.wav"), b"hq").unwrap();
+        std::fs::write(d.join("vocals16_clean.wav"), b"c").unwrap();
+        std::fs::write(d.join("vocals16.wav"), b"v").unwrap();
+        assert!(!stems_current(&d).unwrap(), "стемы без метки — прежнего извлечения");
+        assert!(drop_stale_separation(&d).unwrap());
+        assert!(!stems.exists() && !d.join("audio_hq.wav").exists() && !d.join("vocals16_clean.wav").exists());
+        assert!(d.join("vocals16.wav").exists(), "16k-вход ASR ключуется своим EXTRACT_VER");
+        std::fs::create_dir_all(&stems).unwrap();
+        mark_separation(&stems).unwrap();
+        assert!(stems_current(&d).unwrap());
+        assert!(!drop_stale_separation(&d).unwrap(), "стемы текущего извлечения остаются");
+        assert!(stems.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn clone_ref_is_mono_pcm16_at_the_source_rate_with_edge_fades() {
+        let d = tmp("ref");
+        for (sr, want) in [(44_100u32, 44_100u32), (16_000, 16_000), (96_000, 48_000)] {
+            let src = d.join(format!("vocals_{sr}.wav"));
+            sine_wav(&src, sr, 2, 0.5, 3.0);
+            let out = d.join(format!("ref_{sr}.wav"));
+            trim_ref(&src, &out, 1.0, 2.5).unwrap();
+            let bytes = std::fs::read(&out).unwrap();
+            assert_eq!(u16::from_le_bytes([bytes[20], bytes[21]]), 1, "WAVE_FORMAT_PCM, а не EXTENSIBLE ({sr})");
+            let sr = want;
+            let mut r = hound::WavReader::open(&out).unwrap();
+            let spec = r.spec();
+            assert_eq!(spec.sample_rate, sr, "частота источника, не выше 48 кГц");
+            assert_eq!((spec.channels, spec.bits_per_sample, spec.sample_format), (1, 16, hound::SampleFormat::Int));
+            let s: Vec<f32> = r.samples::<i16>().map(|v| v.unwrap() as f32 / 32768.0).collect();
+            assert!((s.len() as f64 / sr as f64 - 1.5).abs() < 0.01, "длина {}", s.len());
+            let ms = |t: f64| (t * sr as f64 / 1000.0) as usize;
+            let peak = |a: &[f32]| a.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let body = peak(&s[ms(20.0)..ms(40.0)]);
+            assert!(body > 0.2, "за фейдом полный уровень: {body}");
+            assert!(peak(&s[..ms(2.0)]) < 0.1 * body, "фейд на входе");
+            assert!(peak(&s[s.len() - ms(2.0)..]) < 0.1 * body, "фейд на выходе");
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

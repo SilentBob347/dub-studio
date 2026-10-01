@@ -108,7 +108,7 @@ impl Default for EngineOpts {
             tts_steps: 10,
             tts_cuda_graphs: true,
             tts_triton: true,
-            sortformer_model: "diar_streaming_sortformer_4spk-v2".to_string(),
+            sortformer_model: "nemotron3_diar_v3".to_string(),
             sortformer_python,
             voice_pack,
             burn_cq: 24,

@@ -1,15 +1,61 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
+import { FolderOpen } from "lucide-react";
+import { DONATE } from "./lib/links";
+import { OPEN_SETTINGS_EVENT, SETTINGS_SECTIONS, openSettings } from "./lib/settingsNav";
+import { createLaunchSaver, loadWithMigration } from "./lib/launchDefaults";
+import SettingsModal from "./components/settings/SettingsModal";
+import ProjectsList, { MODE_KEYS } from "./components/ProjectsList";
+import ConfirmDialog from "./components/ConfirmDialog";
+import ServerOffline from "./components/ServerOffline";
 import { motion } from "motion/react";
-import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders } from "lucide-react";
+import { Upload, Languages, AudioLines, Sparkles, ArrowRight, ShieldCheck, Download, Loader2, Trash2, Plus, Captions, Columns2, FolderDown, ExternalLink, X, Undo2, Redo2, Settings, Eye, EyeOff, Play, Pause, RotateCw, RefreshCw, Square, Droplet, Check, HelpCircle, Copy, Star, Music, Move, Minimize2, FileText, Users, Mic2, AlignLeft, AlignCenter, AlignRight, ChevronFirst, ChevronLast, ArrowLeftToLine, ArrowRightToLine, ChevronDown, ChevronUp, GripVertical, ScrollText, Clock, Keyboard, Save, ZoomIn, ZoomOut, Sliders, Merge, Scissors, Bot, History, Pin } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useFloatable, dockSlot } from "./lib/useFloatable";
-import { api, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectSummary, type Character } from "./lib/api";
+import { api, llmProviderOf, slot, ApiError, SetupError, JobCancelledError, type Selection, type AnalyzePost, type AnalyzeResult, type JobKind, type Project, type Capabilities, type SetupStatus, type SetupComponent, type ProjectListing, type LaunchDefaults, type Character, type DownloadJob, type UrlFetch, type ShortenResult } from "./lib/api";
 import { LANGS, DUB_LANGS, setLang, type Lang } from "./lib/i18n";
 import { useStore } from "./store";
 import PreviewCanvas from "./components/PreviewCanvas";
-import { playSfx, sfxEnabled, setSfxEnabled } from "./lib/sfx";
+import SubsContentControl from "./components/SubsContentControl";
+import { subtitleText } from "./lib/subtitleText";
+import { playSfx } from "./lib/sfx";
 import ResourceMonitor from "./components/ResourceMonitor";
+import { GENDER_LABEL_KEY, genderKey } from "./lib/gender";
+import OpenRouterKey from "./components/OpenRouterKey";
+import ProxySection from "./components/ProxySection";
+import { ANALYZE_STEPS, STAGE_TO_STEPKEY } from "./lib/stages";
+import { enqueueWhenFree, finishAnalyze, reportVoiceSlots, watchLocal, watchTracked, watchWithResume } from "./lib/jobs";
+import CancelJobButton from "./components/CancelJobButton";
+import JobFailurePanel from "./components/JobFailurePanel";
+import ProjectJobBar from "./components/ProjectJobBar";
+import { ContinueJobButton, JobStateLabel } from "./components/RecentJobBadge";
+import AgentPanel from "./components/AgentPanel";
+import WhatsNew from "./components/WhatsNew";
+import DownloadProgress from "./components/DownloadProgress";
+import ModelsFolder from "./components/ModelsFolder";
+import GpuNotice from "./components/GpuNotice";
+import RemoveComponent from "./components/RemoveComponent";
+import { useSetupStatus } from "./lib/useSetupStatus";
+import { useDownloadErrorText, useGpuReasonText } from "./lib/setupText";
+import { fmtBytes } from "./lib/format";
+import { makeSpeakerVoice } from "./lib/speakerVoice";
+import SubsAlignToggle from "./components/SubsAlignToggle";
+import UrlImport from "./components/UrlImport";
+import YtDlpTool from "./components/YtDlpTool";
+import FitBadge from "./components/FitBadge";
+import FitToolbar from "./components/FitToolbar";
+import TakesPanel from "./components/TakesPanel";
+import { fitOver } from "./lib/fit";
+import LlmProviders from "./components/LlmProviders";
+import OpenRouterModelSelect, { OpenRouterCatalogRow } from "./components/OpenRouterModelSelect";
+import BridgeHost from "./components/BridgeHost";
+import { useChanged, useEditorBridge, useProjectSync, useTranscriptBridge, type Draft } from "./components/editorBridge";
+import { CASTING_CHANGED, PROJECTS_CHANGED, SETTINGS_CHANGED, VOICES_CHANGED, bridgeError, takeArgs, textArg, useBridgeCommand } from "./lib/mcpBridge";
+import { named } from "./lib/a11y";
+import { goHome, openProject as openProjectIn } from "./lib/openProject";
+import { GlossaryButton } from "./components/GlossaryPanel";
+import { SourceText, TtsSkipNote } from "./components/SegmentText";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -56,7 +102,7 @@ function LanguageSwitcher() {
 // резолвится при генерации.
 const VARIANT_SLOT: Record<string, [string, string]> = {
   higgs: ["tts", "q8_0"], "higgs-q6_k": ["tts", "q6_k"], "higgs-q4_k_m": ["tts", "q4_k_m"],
-  parakeet: ["asr", "int8"], "parakeet-fp32": ["asr", "fp32"],
+  parakeet: ["asr", "int8"], "parakeet-fp32": ["asr", "fp32"], "parakeet-ultra": ["asr", "ultra"],
   gemma: ["mt", "q4_0"], "gemma-q5_0": ["mt", "q5_0"], "gemma-q6_k": ["mt", "q6_k"], "gemma-q8_0": ["mt", "q8_0"],
   roformer: ["sep", "Q8_0"], "roformer-q5": ["sep", "Q5_0"], "roformer-q4": ["sep", "Q4_0"],
   "whisper-tiny": ["whisper_model", "tiny"], "whisper-base": ["whisper_model", "base"],
@@ -64,8 +110,16 @@ const VARIANT_SLOT: Record<string, [string, string]> = {
   "whisper-large-v3": ["whisper_model", "large-v3"], "whisper-large-v3-turbo": ["whisper_model", "large-v3-turbo"],
 };
 // Какой из ids сейчас активен по выбору (active.json из capabilities.selection).
-const activeVariantId = (ids: string[], sel: Record<string, string>): string | undefined =>
+const activeVariantId = (ids: string[], sel: Selection): string | undefined =>
   ids.find((id) => { const m = VARIANT_SLOT[id]; return !!m && sel[m[0]] === m[1]; });
+
+type VariantI18n = Record<string, { label: "asrVariant.int8" | "asrVariant.fp32" | "asrVariant.ultra"; hint: "asrVariant.int8Hint" | "asrVariant.fp32Hint" | "asrVariant.ultraHint" }>;
+// Варианты Parakeet: int8 и fp32 — базовая модель NVIDIA, Ultra — её дообученная Moondream версия.
+const ASR_VARIANT_I18N: VariantI18n = {
+  parakeet: { label: "asrVariant.int8", hint: "asrVariant.int8Hint" },
+  "parakeet-fp32": { label: "asrVariant.fp32", hint: "asrVariant.fp32Hint" },
+  "parakeet-ultra": { label: "asrVariant.ultra", hint: "asrVariant.ultraHint" },
+};
 
 // 25 европейских языков, которые распознаёт дефолтный ASR Parakeet-TDT v3. Источник вне этого набора
 // требует Whisper (99 языков) — переключаем движок автоматически с уведомлением.
@@ -75,10 +129,11 @@ const PARAKEET_LANGS = new Set([
 ]);
 
 // Модели и компоненты в настройках: список из /setup/status с кнопками скачки/докачки и прогрессом.
-function ModelsSection() {
+// part="cloud" — раздел «Облако» (ключ OpenRouter и потоки) на том же состоянии выбора.
+function ModelsSection({ part = "models" }: { part?: "models" | "cloud" }) {
   const { t } = useTranslation();
-  const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [prog, setProg] = useState<{ id: string; pct: number } | null>(null);
+  const errText = useDownloadErrorText();
+  const gpuReasonText = useGpuReasonText();
   // Выбор ASR-движка (parakeet|whisper) + квант Whisper (compute) — из capabilities.selection.
   const [cap, setCap] = useState<Capabilities | null>(null);
   const [asrEngine, setAsrEngine] = useState<string>("parakeet");
@@ -88,44 +143,47 @@ function ModelsSection() {
   const [picks, setPicks] = useState<Record<string, string>>({});
   const [err, setErr] = useState<string | null>(null);            // ошибки скачки/импорта — показываем, не глотаем
   // Облачные движки OpenRouter — НЕ отдельный блок, а альтернатива локальному движку ВНУТРИ каждой группы
-  // (перевод: Gemma|OpenRouter, TTS: Higgs|OpenRouter), как Parakeet|Whisper в ASR. Ключ общий на все стадии.
-  const [orModels, setOrModels] = useState<Record<string, { id: string }[]>>({});
+  // (перевод: Gemma|свой сервер|OpenRouter, TTS: Higgs|OpenRouter), как Parakeet|Whisper в ASR. Ключ общий на все стадии.
   const [orVoices, setOrVoices] = useState<{ name: string; gender: string; age: string; ru: boolean }[]>([]);
   const [ttsRu, setTtsRu] = useState<boolean | null>(null);
   const loadCap = () => api.capabilities().then((c) => {
     setCap(c);
-    const s = c.selection ?? {};
-    setAsrEngine(s.asr_engine ?? "parakeet");
-    setWhisperCompute(s.whisper_compute ?? "int8");
+    setAsrEngine(slot(c.selection, "asr_engine") ?? "parakeet");
+    setWhisperCompute(slot(c.selection, "whisper_compute") ?? "int8");
   }).catch(() => {});
-  const refresh = () => { api.setupStatus().then(setStatus).catch(() => {}); loadCap(); };
-  useEffect(() => { refresh(); }, []);
-  const selv = (k: string) => cap?.selection?.[k] ?? "";
-  const hasOrKey = (cap?.selection?.or_key ?? "").trim().length > 0;
+  // Статус компонентов + фоновая закачка (опрос, пока она идёт). Скачанный вариант становится активным на
+  // бэке — после закачки перечитываем выбор.
+  const { status, error: statusErr, refresh: refreshStatus, adopt, downloading } = useSetupStatus(() => { loadCap(); });
+  const prog = downloading ? status?.active ?? null : null;
+  const partPct = (id: string) => {
+    const p = prog?.parts.find((x) => x.id === id);
+    return p && p.total > 0 ? (p.done / p.total) * 100 : prog?.ids.includes(id) ? 0 : null;
+  };
+  useEffect(() => { loadCap(); }, []);
+  const selv = (k: string) => slot(cap?.selection, k) ?? "";
+  const hasOrKey = cap?.selection?.or_key_set === true;
   const setSel = (k: string, v: string) => api.setSelection(k, v).then(loadCap).catch(() => {});
-  // Каталоги моделей по стадиям — динамически из OpenRouter, как только есть рабочий ключ (без хардкода id).
-  useEffect(() => {
-    if (!hasOrKey) return;
-    (["llm", "vision", "tts", "asr"] as const).forEach((kind) =>
-      api.openrouterModels(kind).then((r) => setOrModels((m) => ({ ...m, [kind]: r.models }))).catch(() => {}));
-  }, [hasOrKey]);
   // Голоса выбранной облачной TTS-модели (пол/возраст/русский) для дропдауна + предупреждения о русском.
-  const orTtsModel = cap?.selection?.or_tts_model ?? "";
+  const orTtsModel = slot(cap?.selection, "or_tts_model") ?? "";
   useEffect(() => {
     if (!orTtsModel) { setOrVoices([]); setTtsRu(null); return; }
     api.openrouterVoices(orTtsModel).then((r) => { setOrVoices(r.voices); setTtsRu(r.supportsRussian); }).catch(() => {});
   }, [orTtsModel]);
-  const dl = async (id: string) => {
-    if (prog) return;
-    setProg({ id, pct: 0 }); setErr(null);
-    try {
-      const { job_id } = await api.setupDownload([id]);
-      await api.watchJob(job_id, (e) => { if (e.type === "progress" && (e.component === id || !e.component)) setProg({ id, pct: e.pct ?? 0 }); });
-    } catch (e) { setErr(`${id}: ${e instanceof Error ? e.message : String(e)}`); } finally { setProg(null); await refresh(); }
+  const setupErr = (e: unknown) => setErr(e instanceof SetupError ? `${errText(e.code)} · ${e.detail}` : e instanceof Error ? e.message : String(e));
+  const dl = async (ids: string[]) => {
+    if (downloading) return;
+    setErr(null);
+    try { await api.setupDownload(ids); await refreshStatus(); } catch (e) { setupErr(e); }
   };
+  const pause = () => { api.setupCancel().then(() => refreshStatus()).catch(setupErr); };
+  useChanged(SETTINGS_CHANGED, () => { loadCap(); refreshStatus().catch(setupErr); });
   const browseId = async (id: string) => {
     if (prog) return;
-    try { const r = await api.setupBrowse(id); if (r.picked) setStatus(r.status); } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+    try {
+      const r = await api.setupBrowse(id);
+      if (r.picked) adopt(r.status);
+      if (r.errors.length > 0) setErr(`${t("downloads.importErrors")} · ${r.errors.join("; ")}`);
+    } catch (e) { setupErr(e); }
   };
   const BrowseBtn = ({ id }: { id: string }) => (
     <button onClick={() => browseId(id)} disabled={!!prog} title={t("settings.browseFolder")}
@@ -133,13 +191,36 @@ function ModelsSection() {
       <FolderDown size={12} />
     </button>
   );
-  if (!status) return <div className="mono text-[11px] text-[var(--color-muted)]">…</div>;
+  if (part === "cloud") return (
+    <div className="max-w-2xl space-y-2">
+      <div data-settings-part="key"><OpenRouterKey onSaved={loadCap} /></div>
+      {hasOrKey && <OpenRouterCatalogRow />}
+      {hasOrKey && (
+        <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
+          <div className="flex items-center gap-2.5">
+            <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[var(--color-muted)]" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[12px] font-medium truncate">{t("cloud.threads")}</div>
+              <div className="mono text-[10px] text-[var(--color-muted)] truncate">{t("cloud.threadsHint")}</div>
+            </div>
+            <select value={selv("or_concurrency") || "6"} onChange={(e) => setSel("or_concurrency", e.target.value)}
+              className="shrink-0 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[11px] mono focus:border-[var(--color-accent)] focus:outline-none">
+              {["1", "2", "4", "6", "8", "12", "16"].map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  if (!status) return <div className="mono text-[11px] text-[var(--color-muted)]">{statusErr ?? "…"}</div>;
   const byId = Object.fromEntries(status.components.map((c) => [c.id, c]));
   const get = (id: string) => byId[id] as SetupComponent | undefined;
 
   // строка одного компонента (кнопка скачать/докачать + прогресс)
   const Row = (c: SetupComponent) => {
-    const active = prog?.id === c.id;
+    const pct = partPct(c.id);
+    const active = pct != null;
     return (
       <div key={c.id} className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${c.installed ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />
@@ -149,13 +230,14 @@ function ModelsSection() {
         </div>
         {active ? (
           <div className="w-24 shrink-0">
-            <div className="h-1.5 rounded-full bg-white/10 overflow-hidden"><div className="h-full bg-[var(--color-accent)] transition-[width]" style={{ width: `${prog?.pct ?? 0}%` }} /></div>
-            <div className="mono text-[10px] text-[var(--color-muted)] text-right mt-0.5">{Math.round(prog?.pct ?? 0)}%</div>
+            <div className="h-1.5 rounded-full bg-white/10 overflow-hidden"><div className="h-full bg-[var(--color-accent)] transition-[width]" style={{ width: `${pct ?? 0}%` }} /></div>
+            <div className="mono text-[10px] text-[var(--color-muted)] text-right mt-0.5">{Math.round(pct ?? 0)}%</div>
           </div>
         ) : (
           <div className="flex items-center gap-1.5 shrink-0">
+            <RemoveComponent c={c} disabled={!!prog} onDone={(s) => { adopt(s); loadCap(); }} onError={setErr} />
             <BrowseBtn id={c.id} />
-            <button onClick={() => dl(c.id)} disabled={!!prog}
+            <button onClick={() => dl([c.id])} disabled={!!prog}
               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[12px] border border-[var(--color-border)] text-[var(--color-accent-2)] hover:border-[var(--color-accent)] disabled:opacity-40">
               {c.installed ? <RefreshCw size={12} /> : <Download size={12} />}{c.installed ? t("settings.redownload") : t("setup.downloadOne")}
             </button>
@@ -168,21 +250,24 @@ function ModelsSection() {
   // модель с выбором кванта: дропдаун вариантов + скачать выбранный. КОНТРОЛИРУЕМЫЙ — выбранное значение
   // берётся из поднятого picks / активного выбора (active.json), НЕ из внутреннего useState (иначе ре-рендер
   // секции сбрасывал бы дропдаун на дефолт). При смене — пишем picks и активируем на бэке (если установлен).
-  const VariantPicker = ({ base, ids }: { base: string; ids: string[] }) => {
+  const VariantPicker = ({ base, ids, i18n }: { base: string; ids: string[]; i18n?: VariantI18n }) => {
     const variants = ids.map(get).filter(Boolean) as SetupComponent[];
     const installed = variants.find((v) => v.installed);
     const sel = cap?.selection ?? {};
     const pick = picks[ids[0]] ?? activeVariantId(ids, sel) ?? installed?.id ?? variants[0]?.id ?? "";
     const c = get(pick);
     if (!c) return null;
-    const quant = (v: SetupComponent) => (v.name.match(/\b(q\d[\w]*|int8|fp32|f16|large-v3-turbo|large-v3|tiny|base|small|medium)\b/i)?.[1] ?? v.name);
-    const active = prog?.id === c.id;
+    const quant = (v: SetupComponent) => i18n?.[v.id] ? t(i18n[v.id].label) : (v.name.match(/\b(q\d[\w]*|int8|fp32|f16|large-v3-turbo|large-v3|tiny|base|small|medium)\b/i)?.[1] ?? v.name);
+    const hint = i18n?.[c.id] ? t(i18n[c.id].hint) : "";
+    const pct = partPct(c.id);
+    const active = pct != null;
     return (
       <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
         <div className="flex items-center gap-2.5">
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${variants.some((v) => v.installed) ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />
           <div className="min-w-0 flex-1">
             <div className="text-[12px] font-medium truncate">{base}</div>
+            {hint && <div className="text-[10px] leading-snug text-[var(--color-muted)]">{hint}</div>}
             <div className="mono text-[10px] text-[var(--color-muted)] truncate">{c.vram ? `${fmtBytes(c.vram)} VRAM · ` : ""}{fmtBytes(c.size)} {t("settings.disk")}{c.installed ? "" : ` · ${t("settings.notInstalled")}`}</div>
           </div>
           <select value={pick} onChange={(e) => {
@@ -196,11 +281,12 @@ function ModelsSection() {
             {variants.map((v) => <option key={v.id} value={v.id}>{quant(v)}{v.installed ? " ✓" : ""} · {fmtBytes(v.size)}{v.vram ? ` / ${fmtBytes(v.vram)} VRAM` : ""}</option>)}
           </select>
           {active ? (
-            <span className="mono text-[11px] text-[var(--color-accent)] w-10 text-right">{Math.round(prog?.pct ?? 0)}%</span>
+            <span className="mono text-[11px] text-[var(--color-accent)] w-10 text-right">{Math.round(pct ?? 0)}%</span>
           ) : (
             <>
+              <RemoveComponent c={c} disabled={!!prog} onDone={(s) => { adopt(s); loadCap(); }} onError={setErr} />
               <BrowseBtn id={c.id} />
-              <button onClick={() => dl(c.id)} disabled={!!prog} title={c.installed ? t("settings.redownload") : t("setup.downloadOne")}
+              <button onClick={() => dl([c.id])} disabled={!!prog} title={c.installed ? t("settings.redownload") : t("setup.downloadOne")}
                 className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[12px] border border-[var(--color-border)] text-[var(--color-accent-2)] hover:border-[var(--color-accent)] disabled:opacity-40">
                 {c.installed ? <RefreshCw size={12} /> : <Download size={12} />}
               </button>
@@ -225,38 +311,51 @@ function ModelsSection() {
   const EngineTabs = ({ cloud, onLocal, onCloud, localLabel }: { cloud: boolean; onLocal: () => void; onCloud: () => void; localLabel: string }) => (
     <div className="flex gap-1 mb-1.5">
       <button onClick={onLocal} className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${!cloud ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>{localLabel}</button>
-      <button onClick={onCloud} disabled={!hasOrKey} title={hasOrKey ? "" : "Введите ключ OpenRouter ниже (Облачные настройки)"}
-        className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${cloud ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`}>OpenRouter</button>
+      <button onClick={hasOrKey ? onCloud : () => openSettings("cloud:key")} title={hasOrKey ? "" : t("cloud.needKey")}
+        className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${cloud ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} ${hasOrKey ? "" : "opacity-50"}`}>OpenRouter</button>
     </div>
   );
   // На чём считать стадию (устройство): Авто / GPU (CUDA) / CPU — свои табы в каждом разделе, по
   // аналогии с провайдерами. Независимый ключ на стадию (sep_backend / diar_backend / asr_backend).
   const BackendTabs = ({ k }: { k: string }) => {
     const cur = selv(k) || "auto";
+    const gpuOff = !status.gpu.cuda13Ok;
     return (
       <div className="flex gap-1 mb-1.5">
-        {([["auto", "Авто"], ["gpu", "GPU (CUDA)"], ["cpu", "CPU"]] as const).map(([id, label]) => (
-          <button key={id} onClick={() => setSel(k, id)}
-            className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${cur === id ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>{label}</button>
+        {([["auto", t("settings.auto")], ["gpu", "GPU (CUDA)"], ["cpu", "CPU"]] as const).map(([id, label]) => (
+          <button key={id} onClick={() => setSel(k, id)} disabled={id === "gpu" && gpuOff && cur !== "gpu"}
+            title={id === "gpu" && gpuOff ? gpuReasonText(status.gpu) : undefined}
+            className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${cur === id ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`}>{label}</button>
         ))}
       </div>
     );
   };
   const orSelectCls = "w-full bg-[var(--color-surface)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[11px] mono focus:border-[var(--color-accent)] focus:outline-none";
-  const OrModelSelect = ({ kind, k, empty }: { kind: "llm" | "vision" | "tts" | "asr"; k: string; empty: string }) => (
-    <select value={selv(k)} onChange={(e) => setSel(k, e.target.value)} className={orSelectCls}>
-      <option value="">{empty}</option>
-      {(orModels[kind] ?? []).map((m) => <option key={m.id} value={m.id}>{m.id}</option>)}
-    </select>
+  // Модели OpenRouter стадии: имя, цена, контекст — из каталога (кэш на сервере).
+  const orModelSelect = (kind: "tts" | "asr", k: string, empty: string) => (
+    <OpenRouterModelSelect kind={kind} value={selv(k)} onChange={(id) => { if (id) setSel(k, id); }} placeholder={empty} />
   );
+  const needsGemma = llmProviderOf(cap?.selection, "llm") === "local" || llmProviderOf(cap?.selection, "vision") === "local";
 
   const browse = async () => {
     if (prog) return;
-    try { const r = await api.setupBrowse(); if (r.picked) setStatus(r.status); } catch { /* ignore */ }
+    try {
+      const r = await api.setupBrowse();
+      if (r.picked) adopt(r.status);
+      if (r.errors.length > 0) setErr(`${t("downloads.importErrors")} · ${r.errors.join("; ")}`);
+    } catch (e) { setupErr(e); }
   };
+  const driverUrl = get("nvidia-driver")?.externalUrl;
 
   return (
     <div>
+      <div className="mb-3 space-y-2">
+        <ModelsFolder status={status} />
+        <GpuNotice gpu={status.gpu} driverUrl={driverUrl} />
+        {status.active && status.active.status !== "completed" && (
+          <DownloadProgress job={status.active} onPause={pause} onResume={(ids) => { dl(ids); }} />
+        )}
+      </div>
       <button onClick={browse} disabled={!!prog}
         className="mb-3 w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-dashed border-[var(--color-border)] text-[12px] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] transition-colors disabled:opacity-40">
         <FolderDown size={14} />{t("settings.browseFolder")}
@@ -271,22 +370,22 @@ function ModelsSection() {
         <EngineTabs cloud={selv("or_tts_on") === "1"} localLabel="Higgs Audio v3" onLocal={() => setSel("or_tts_on", "0")} onCloud={() => setSel("or_tts_on", "1")} />
         {selv("or_tts_on") === "1" ? (
           <div className={`${orRowCls} space-y-2`}>
-            <OrModelSelect kind="tts" k="or_tts_model" empty="— выбрать TTS-модель —" />
-            {ttsRu === false && <div className="text-[11px] text-[var(--color-warn)]">⚠ Модель не поддерживает русский — выберите другую для русского дубляжа.</div>}
+            {orModelSelect("tts", "or_tts_model", t("providers.pickTtsModel"))}
+            {ttsRu === false && <div className="text-[11px] text-[var(--color-warn)]">{t("cloud.ttsNoRussian")}</div>}
             <div className="flex items-center gap-2">
               <button onClick={() => setSel("or_tts_autocast", (selv("or_tts_autocast") || "1") !== "0" ? "0" : "1")}
-                className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${(selv("or_tts_autocast") || "1") !== "0" ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface)] border border-[var(--color-border)]"}`}>
+                role="switch" aria-checked={(selv("or_tts_autocast") || "1") !== "0"} className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${(selv("or_tts_autocast") || "1") !== "0" ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface)] border border-[var(--color-border)]"}`}>
                 <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${(selv("or_tts_autocast") || "1") !== "0" ? "left-[18px]" : "left-0.5"}`} />
               </button>
-              <span className="text-[12px]">Автокастинг голосов</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-accent)]/20 text-[var(--color-accent)] uppercase tracking-wider">бета</span>
+              <span className="text-[12px]">{t("cloud.autocast")}</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-accent)]/20 text-[var(--color-accent)] uppercase tracking-wider">{t("cloud.beta")}</span>
             </div>
             {(selv("or_tts_autocast") || "1") !== "0" ? (
-              <div className="text-[11px] text-[var(--color-muted)]">Голос по полу спикера автоматически, разным спикерам — разные.</div>
+              <div className="text-[11px] text-[var(--color-muted)]">{t("cloud.autocastHint")}</div>
             ) : (
               <select value={selv("or_tts_voice")} onChange={(e) => setSel("or_tts_voice", e.target.value)} className={orSelectCls}>
-                <option value="">— один голос на всех —</option>
-                {orVoices.map((v) => <option key={v.name} value={v.name}>{v.gender === "male" ? "♂" : v.gender === "female" ? "♀" : "•"} {v.name}{v.age === "teen" || v.age === "child" ? ` · ${v.age}` : ""}</option>)}
+                <option value="">{t("cloud.oneVoice")}</option>
+                {orVoices.map((v) => <option key={v.name} value={v.name}>{v.gender === "male" ? "♂" : v.gender === "female" ? "♀" : "•"} {v.name}{v.age === "teen" ? ` · ${t("voice.ageTeen")}` : v.age === "child" ? ` · ${t("voice.ageChild")}` : ""}</option>)}
               </select>
             )}
           </div>
@@ -305,9 +404,9 @@ function ModelsSection() {
             const active = e.cloud ? asrCloud : (!asrCloud && asrEngine === e.id);
             const dis = e.cloud && !hasOrKey;
             return (
-              <button key={e.id} disabled={dis} title={dis ? "Введите ключ OpenRouter ниже (Облачные настройки)" : ""}
-                onClick={() => { if (e.cloud) { setSel("or_asr_on", "1"); } else { setSel("or_asr_on", "0"); setAsrEngine(e.id); api.setSelection("asr_engine", e.id).catch(() => {}); } }}
-                className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${active ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} disabled:opacity-40`}>
+              <button key={e.id} title={dis ? t("cloud.needKey") : ""}
+                onClick={() => { if (dis) { openSettings("cloud:key"); } else if (e.cloud) { setSel("or_asr_on", "1"); } else { setSel("or_asr_on", "0"); setAsrEngine(e.id); api.setSelection("asr_engine", e.id).catch((er) => { setErr(er instanceof Error ? er.message : String(er)); loadCap(); }); } }}
+                className={`flex-1 px-2 py-1.5 rounded-md text-[12px] font-medium border transition-colors ${active ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_14%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"} ${dis ? "opacity-50" : ""}`}>
                 {e.label}
               </button>
             );
@@ -317,11 +416,11 @@ function ModelsSection() {
         {selv("or_asr_on") !== "1" && <BackendTabs k="asr_backend" />}
         {selv("or_asr_on") === "1" ? (
           <div className={`${orRowCls} space-y-2`}>
-            <OrModelSelect kind="asr" k="or_asr" empty="— выбрать STT-модель —" />
-            <div className="text-[11px] text-[var(--color-muted)]">Транскрипция через облако — тяжёлые локальные ASR-модели качать не нужно.</div>
+            {orModelSelect("asr", "or_asr", t("providers.pickAsrModel"))}
+            <div className="text-[11px] text-[var(--color-muted)]">{t("providers.asrCloudHint")}</div>
           </div>
         ) : asrEngine === "parakeet" ? (
-          <VariantPicker base="Parakeet-TDT 0.6B v3" ids={["parakeet", "parakeet-fp32"]} />
+          <VariantPicker base="Parakeet-TDT 0.6B v3" ids={["parakeet", "parakeet-fp32", "parakeet-ultra"]} i18n={ASR_VARIANT_I18N} />
         ) : (
           <>
             {rowOf("whisper-engine")}
@@ -344,20 +443,9 @@ function ModelsSection() {
         )}
       </Group>
       <Group label={t("settings.roleMt")}>
-        <EngineTabs cloud={selv("or_llm_on") === "1"} localLabel="Gemma-4 12B" onLocal={() => setSel("or_llm_on", "0")} onCloud={() => setSel("or_llm_on", "1")} />
-        {selv("or_llm_on") === "1" ? (
-          <div className={`${orRowCls} space-y-2`}>
-            <OrModelSelect kind="llm" k="or_llm" empty="— выбрать модель перевода —" />
-            <div className="flex items-center gap-2 pt-0.5">
-              <button onClick={() => setSel("or_vision_on", selv("or_vision_on") === "1" ? "0" : "1")}
-                className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${selv("or_vision_on") === "1" ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface)] border border-[var(--color-border)]"}`}>
-                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${selv("or_vision_on") === "1" ? "left-[18px]" : "left-0.5"}`} />
-              </button>
-              <span className="text-[12px]">Vision-анализ кадров через облако</span>
-            </div>
-            {selv("or_vision_on") === "1" && <OrModelSelect kind="vision" k="or_vision" empty="как модель перевода" />}
-          </div>
-        ) : (
+        {/* Перевод и vision — каждый своим провайдером: своя Gemma, локальный сервер или OpenRouter. */}
+        <LlmProviders selection={cap?.selection} hasOrKey={hasOrKey} onChanged={loadCap} />
+        {needsGemma && (
           <>
             <VariantPicker base="Gemma-4 12B QAT + vision" ids={["gemma", "gemma-q5_0", "gemma-q6_k", "gemma-q8_0"]} />
             {rowOf("llama")}
@@ -371,18 +459,19 @@ function ModelsSection() {
         {selv("sep_backend") === "cpu" ? rowOf("bsroformer-engine-cpu") : rowOf("bsroformer-engine")}
       </Group>
       <Group label={t("settings.roleDiar")}>
-        {/* На чём считать диаризацию — свои табы (Sortformer onnx: CUDA-EP / CPU-провайдер). */}
+        {/* На чём считать диаризацию — свои табы (Nemotron 3 Diarization onnx: CUDA-EP / CPU-провайдер). */}
         <BackendTabs k="diar_backend" />
         {rowOf("sortformer")}
       </Group>
       <Group label={t("settings.roleRuntime")}>{rowOf("onnxruntime")}{(selv("diar_backend") === "gpu" || selv("asr_backend") === "gpu") && rowOf("onnxruntime-gpu")}{(selv("diar_backend") === "gpu" || selv("asr_backend") === "gpu") && rowOf("cudnn")}{rowOf("ffmpeg")}{rowOf("cuda-runtime")}{rowOf("vcruntime")}{rowOf("ocr")}</Group>
+      <YtDlpTool installed={!!get("ytdlp")?.installed} row={rowOf("ytdlp")} />
       {/* Производительность / экономия RAM — ВИДИМЫЕ контролы (не авто-магия): против OOM на слабой памяти. */}
       <Group label={t("settings.perfTitle")}>
         {[
           { key: "llama_ubatch", label: t("settings.llamaUbatch"), hint: t("settings.llamaUbatchHint"), opts: cap?.llama_ubatches ?? ["0", "512", "256", "128"], def: "0", fmt: (v: string) => (v === "0" ? t("settings.auto") : v) },
           { key: "higgs_ref_secs", label: t("settings.higgsRef"), hint: t("settings.higgsRefHint"), opts: cap?.higgs_ref_secs_opts ?? ["12", "8", "6", "4"], def: "12", fmt: (v: string) => `${v}${t("settings.sec")}` },
         ].map((row) => {
-          const cur = cap?.selection?.[row.key] ?? row.def;
+          const cur = slot(cap?.selection, row.key) ?? row.def;
           return (
             <div key={row.key} className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
               <div className="flex items-center gap-2.5">
@@ -400,136 +489,14 @@ function ModelsSection() {
           );
         })}
       </Group>
-      {/* Облачные настройки OpenRouter — В КОНЦЕ: фишка приложения локальная/портативная, облако вторично
-          (опция для слабых ПК/скорости). Ключ + число параллельных потоков; сам выбор облачного движка —
-          в группах выше рядом с локальным (Higgs|OpenRouter и т.д.). */}
-      <div className="mt-2 pt-3 border-t border-[var(--color-border)]">
-        <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)] mb-1.5">Облачные настройки · OpenRouter</div>
-        <div className="space-y-2">
-          <OpenRouterKey onSaved={loadCap} />
-          {hasOrKey && (
-            <div className={orRowCls}>
-              <div className="flex items-center gap-2.5">
-                <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[var(--color-muted)]" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-[12px] font-medium truncate">Параллельные потоки</div>
-                  <div className="mono text-[10px] text-[var(--color-muted)] truncate">чанки в N коннектов — быстрее облачные ASR/TTS/перевод (1 = без многопоточности)</div>
-                </div>
-                <select value={selv("or_concurrency") || "6"} onChange={(e) => setSel("or_concurrency", e.target.value)}
-                  className="shrink-0 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[11px] mono focus:border-[var(--color-accent)] focus:outline-none">
-                  {["1", "2", "4", "6", "8", "12", "16"].map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-      {/* Прокси — В САМОМ КОНЦЕ: нужен только тем, у кого закрыт прямой доступ к HF/OpenRouter. Весь исходящий
-          трафик приложения (закачка моделей + облако) через свой прокси. */}
-      <div className="mt-2 pt-3 border-t border-[var(--color-border)]">
-        <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)] mb-1.5">Прокси</div>
-        <ProxySection />
-      </div>
-    </div>
-  );
-}
-
-// Прокси-сервер для всего исходящего трафика (закачка моделей + OpenRouter): у части юзеров прямой доступ к
-// HF/OpenRouter закрыт. URL может содержать логин:пароль -> прячем как ключ. «Проверить» бьёт в HF и OpenRouter
-// через указанный прокси. Действует сразу для закачки и облака; остальному (апдейтер) — рестарт.
-function ProxySection() {
-  const [url, setUrl] = useState("");
-  const [on, setOn] = useState(false);
-  const [show, setShow] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  useEffect(() => {
-    api.capabilities().then((c) => {
-      setUrl(c.selection?.proxy_url ?? "");
-      setOn((c.selection?.proxy_on ?? "") === "1");
-    }).catch(() => {});
-  }, []);
-  // Сохраняем URL (только непустой — setSelection не принимает пустое) + флаг вкл/выкл.
-  const save = async (nextOn: boolean) => {
-    if (url.trim()) await api.setSelection("proxy_url", url.trim());
-    await api.setSelection("proxy_on", nextOn ? "1" : "0");
-    setOn(nextOn);
-    setMsg(null);
-  };
-  const test = async () => {
-    setTesting(true); setMsg(null);
-    try {
-      const r = await api.proxyTest(url.trim());
-      if (r.ok) setMsg({ ok: true, text: "Работает — HF и OpenRouter доступны через прокси" });
-      else if (r.error) setMsg({ ok: false, text: r.error });
-      else {
-        const bad = [r.hf === false ? "закачка моделей (HF)" : "", r.openrouter === false ? "OpenRouter" : ""].filter(Boolean);
-        setMsg({ ok: false, text: `Недоступно через прокси: ${bad.join(", ") || "сервисы"}` });
-      }
-    } catch { setMsg({ ok: false, text: "Не удалось проверить прокси" }); }
-    setTesting(false);
-  };
-  return (
-    <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)] space-y-2">
-      <label className="flex items-center gap-2.5 cursor-pointer select-none">
-        <input type="checkbox" checked={on} onChange={(e) => save(e.target.checked)}
-          className="accent-[var(--color-accent)] w-3.5 h-3.5 shrink-0" />
-        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${on ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />
-        <span className="min-w-0 flex-1">
-          <span className="block text-[12px] font-medium">Проксировать весь трафик</span>
-          <span className="block mono text-[10px] text-[var(--color-muted)]">включите, если прямая закачка моделей или OpenRouter не работает</span>
-        </span>
-      </label>
-      <div className="flex gap-2">
-        <input type={show ? "text" : "password"} value={url} onChange={(e) => setUrl(e.target.value)} onBlur={() => { if (on && url.trim()) save(true); }} placeholder="http://user:pass@host:8080  ·  socks5://host:1080"
-          className="flex-1 px-2 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] mono focus:border-[var(--color-accent)] outline-none" />
-        <button onClick={() => setShow((s) => !s)} className="px-2 rounded-md border border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]">{show ? <EyeOff size={13} /> : <Eye size={13} />}</button>
-        <button onClick={test} disabled={testing || !url.trim()} className="px-3 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] hover:border-[var(--color-accent)] disabled:opacity-40">{testing ? "…" : "Проверить"}</button>
-      </div>
-      {msg && <div className={`text-[11px] ${msg.ok ? "text-[var(--color-accent)]" : "text-[var(--color-warn)]"}`}>{msg.text}</div>}
-      <div className="mono text-[10px] text-[var(--color-muted)] leading-snug">Поддержка HTTP/HTTPS/SOCKS5. Действует сразу для закачки моделей и облака.</div>
     </div>
   );
 }
 
 // Пресет под железо: автоопределение GPU/VRAM -> рекомендованные кванты, но юзер применяет любой сам.
 // Облачный пресет включает OpenRouter на все стадии — работает даже на слабом ПК без своей GPU.
-// Переиспользуемая строка ключа OpenRouter (настройки И первый запуск). onSaved — после успешной проверки.
-function OpenRouterKey({ onSaved }: { onSaved?: () => void }) {
-  const [key, setKey] = useState("");
-  const [show, setShow] = useState(false);
-  const [verifying, setVerifying] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [has, setHas] = useState(false);
-  useEffect(() => { api.capabilities().then((c) => { const k = c.selection?.or_key ?? ""; setKey(k); setHas(k.trim().length > 0); }).catch(() => {}); }, []);
-  const verify = async () => {
-    setVerifying(true); setMsg(null);
-    try {
-      const r = await api.openrouterVerify(key.trim());
-      if (r.ok) { await api.setSelection("or_key", key.trim()); setHas(true); setMsg({ ok: true, text: "Ключ рабочий — сохранён" }); onSaved?.(); }
-      else setMsg({ ok: false, text: "Ключ не принят OpenRouter" });
-    } catch { setMsg({ ok: false, text: "OpenRouter недоступен" }); }
-    setVerifying(false);
-  };
-  return (
-    <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
-      <div className="flex items-center gap-2 mb-1">
-        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${has ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />
-        <span className="text-[12px] font-medium">Ключ OpenRouter</span>
-        <span className="mono text-[10px] text-[var(--color-muted)]">для облачных движков (перевод / TTS)</span>
-      </div>
-      <div className="flex gap-2">
-        <input type={show ? "text" : "password"} value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-or-v1-…"
-          className="flex-1 px-2 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] mono focus:border-[var(--color-accent)] outline-none" />
-        <button onClick={() => setShow((s) => !s)} className="px-2 rounded-md border border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]">{show ? <EyeOff size={13} /> : <Eye size={13} />}</button>
-        <button onClick={verify} disabled={verifying || !key.trim()} className="px-3 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] hover:border-[var(--color-accent)] disabled:opacity-40">{verifying ? "…" : "Проверить"}</button>
-      </div>
-      {msg && <div className={`text-[11px] mt-1 ${msg.ok ? "text-[var(--color-accent)]" : "text-[var(--color-warn)]"}`}>{msg.text}</div>}
-    </div>
-  );
-}
-
 function PresetsSection({ onApplied }: { onApplied?: () => void }) {
+  const { t } = useTranslation();
   const [data, setData] = useState<Awaited<ReturnType<typeof api.hwPresets>> | null>(null);
   const [applied, setApplied] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -544,13 +511,13 @@ function PresetsSection({ onApplied }: { onApplied?: () => void }) {
   const curP = data?.presets.find((p) => p.id === cur);
   return (
     <div className="mb-4 pb-3 border-b border-[var(--color-border)]">
-      <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted)] mb-1.5">Пресет под железо</div>
+      <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted)] mb-1.5">{t("hwPreset.title")}</div>
       <div className="px-2.5 py-2 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)]">
         <div className="flex items-center gap-2.5">
           <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[var(--color-accent)]" />
           <div className="min-w-0 flex-1">
-            <div className="text-[12px] font-medium truncate">{hw ? (hw.hasGpu ? `${hw.gpuName} · ${hw.totalVramGb.toFixed(0)} ГБ VRAM` : "NVIDIA GPU не найдена") : "…"}</div>
-            <div className="mono text-[10px] text-[var(--color-muted)] truncate">{curP?.subtitle ?? `ОЗУ ${hw?.totalRamGb.toFixed(0) ?? "?"} ГБ`}</div>
+            <div className="text-[12px] font-medium truncate">{hw ? (hw.hasGpu ? t("hwPreset.gpu", { name: hw.gpuName, gb: hw.totalVramGb.toFixed(0) }) : t("hwPreset.noGpu")) : "…"}</div>
+            <div className="mono text-[10px] text-[var(--color-muted)] truncate">{curP?.subtitle ?? t("hwPreset.ram", { gb: hw?.totalRamGb.toFixed(0) ?? "?" })}</div>
           </div>
           <select value={cur} onChange={(e) => apply(e.target.value)} disabled={busy}
             className="shrink-0 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[11px] mono focus:border-[var(--color-accent)] focus:outline-none disabled:opacity-50">
@@ -561,152 +528,6 @@ function PresetsSection({ onApplied }: { onApplied?: () => void }) {
     </div>
   );
 }
-
-function SettingsModal({ onClose }: { onClose: () => void }) {
-  const { t } = useTranslation();
-  const [sfx, setSfx] = useState(sfxEnabled());
-  // Пер-стадийный бенчмарк (bench.json + ⏱ в журнале) — ВЫКЛ по умолчанию, состояние на бэке (active.json).
-  const [bench, setBench] = useState(false);
-  const [qcAsr, setQcAsr] = useState(false);
-  const [qcDur, setQcDur] = useState(true);
-  const [multitake, setMultitake] = useState(false);
-  const [breathOn, setBreathOn] = useState(false);
-  const [speechRateOn, setSpeechRateOn] = useState(true);
-  const [emoRefOn, setEmoRefOn] = useState(true);
-  useEffect(() => {
-    api.capabilities().then((c) => {
-      setBench(c.selection?.bench === "1");
-      setQcAsr(c.selection?.qc_asr === "1");
-      setQcDur(c.selection?.qc_duration !== "0");
-      setMultitake(c.selection?.multitake === "1");
-      setBreathOn(c.selection?.breath_on === "1");
-      setSpeechRateOn(c.selection?.speech_rate_on !== "0");
-      setEmoRefOn(c.selection?.emo_ref_on !== "0");
-    }).catch(() => {});
-  }, []);
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center glass-scrim anim-fade" onClick={onClose}>
-      <div className="w-[min(92vw,600px)] max-h-[86vh] flex flex-col rounded-xl glass-panel anim-pop p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-1">
-          <span className="font-semibold">{t("settings.title")}</span>
-          <button onClick={onClose} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={16} /></button>
-        </div>
-        <div className="overflow-y-auto flex-1 -mr-2 pr-2 space-y-1">
-          <label className="flex items-center justify-between gap-3 mb-2.5">
-            <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2"><Music size={14} className="text-[var(--color-muted)]" />{t("settings.sounds")}</span>
-            <button onClick={() => { const v = !sfx; setSfx(v); setSfxEnabled(v); if (v) playSfx("notify"); }} title={t("settings.sounds")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${sfx ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${sfx ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Проверка текста ASR */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title="Авто-проверка услышанного текста через Whisper ASR для отсечения тишины и дефектов">
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Captions size={14} className="text-[var(--color-accent-2)]" />
-                Проверка текста через ASR (QC)
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">авто-сверка озвучки через ASR (отключение ускоряет синтез)</span>
-            </div>
-            <button onClick={() => { const v = !qcAsr; setQcAsr(v); api.setSelection("qc_asr", v ? "1" : "0").catch(() => {}); }} title="Проверка текста через ASR"
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${qcAsr ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${qcAsr ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Контроль длительности фраз */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title="Подгонка скорости и контроль хронометража аудио под рамки субтитра">
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Clock size={14} className="text-[var(--color-accent-2)]" />
-                Контроль длительности фраз (Stretch QC)
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">подгонка хронометража и максимального растяжения</span>
-            </div>
-            <button onClick={() => { const v = !qcDur; setQcDur(v); api.setSelection("qc_duration", v ? "1" : "0").catch(() => {}); }} title="Контроль длительности фраз"
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${qcDur ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${qcDur ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Multi-take отбор (3 дубля) */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title="Генерировать 3 варианта озвучки каждой фразы и автоматически выбирать лучший по таймингу">
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Star size={14} className="text-[var(--color-accent-2)]" />
-                Multi-take отбор (3 дубля)
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">3 варианта озвучки — выбирается лучший по таймингу (медленнее, но качественнее)</span>
-            </div>
-            <button onClick={() => { const v = !multitake; setMultitake(v); api.setSelection("multitake", v ? "1" : "0").catch(() => {}); }} title="Multi-take отбор"
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${multitake ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${multitake ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Динамический темп речи TTS */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title="Динамическая адаптация темпа генерации нейросети под длину текста и доступный временной слот">
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Sparkles size={14} className="text-[var(--color-accent-2)]" />
-                Динамический темп речи (Speech Rate TTS)
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">адаптация скорости выговора нейросети под длину текста в окне</span>
-            </div>
-            <button onClick={() => { const v = !speechRateOn; setSpeechRateOn(v); api.setSelection("speech_rate_on", v ? "1" : "0").catch(() => {}); }} title="Динамический темп речи"
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${speechRateOn ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${speechRateOn ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Эмоциональный референс сцены (Emo-Ref) */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title="Перенос эмоций, интонации и подачи прямо из оригинального звука сцены">
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <Mic2 size={14} className="text-[var(--color-accent-2)]" />
-                Эмоциональный референс сцены (Emo-Ref)
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">копирование интонации, эмоции и подачи оригинала сцены</span>
-            </div>
-            <button onClick={() => { const v = !emoRefOn; setEmoRefOn(v); api.setSelection("emo_ref_on", v ? "1" : "0").catch(() => {}); }} title="Эмоциональный референс сцены"
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${emoRefOn ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${emoRefOn ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          {/* Вставка легких дыханий */}
-          <label className="flex items-center justify-between gap-3 mb-2.5" title="Автоматическая подстановка тихих естественных вдохов в паузах между репликами">
-            <div className="min-w-0 flex-1">
-              <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2 font-medium">
-                <AudioLines size={14} className="text-[var(--color-accent-2)]" />
-                Вставка дыханий между фразами
-              </span>
-              <span className="block text-[10px] text-[var(--color-muted)]">подстановка естественных мягких вдохов в паузах для оживления речи</span>
-            </div>
-            <button onClick={() => { const v = !breathOn; setBreathOn(v); api.setSelection("breath_on", v ? "1" : "0").catch(() => {}); }} title="Вставка дыханий"
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${breathOn ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${breathOn ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          <label className="flex items-center justify-between gap-3 mb-3 pb-3 border-b border-[var(--color-border)]" title={t("settings.benchHint")}>
-            <span className="text-[13px] text-[var(--color-text)] inline-flex items-center gap-2"><Clock size={14} className="text-[var(--color-muted)]" />{t("settings.bench")}</span>
-            <button onClick={() => { const v = !bench; setBench(v); api.setSelection("bench", v ? "1" : "0").catch(() => {}); }} title={t("settings.benchHint")}
-              className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${bench ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)] border border-[var(--color-border)]"}`}>
-              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${bench ? "left-[18px]" : "left-0.5"}`} />
-            </button>
-          </label>
-          <PresetsSection />
-          <ModelsSection />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const DONATE = {
-  boosty: "https://boosty.to/neuro_art",
-  dalink: "https://dalink.to/nerual_dreming",
-  github: "https://github.com/timoncool/dub-studio",
-  telegram: "https://t.me/nerual_dreming",
-  crypto: [["BTC", "1E7dHL22RpyhJGVpcvKdbyZgksSYkYeEBC"],
-           ["ETH · ERC20", "0xb5db65adf478983186d4897ba92fe2c25c594a0c"],
-           ["USDT · TRC20", "TQST9Lp2TjK6FiVkn4fwfGUee7NmkxEE7C"]] as const,
-};
 
 function HelpSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -740,10 +561,10 @@ function HelpModal({ onClose }: { onClose: () => void }) {
   const chip = "inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--color-surface-2)] border border-[var(--color-border)] text-[11px] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] transition-colors";
   return (
     <div className="fixed inset-0 z-50 grid place-items-center glass-scrim anim-fade" onClick={onClose}>
-      <div className="w-[min(92vw,640px)] max-h-[86vh] overflow-y-auto rounded-xl glass-panel anim-pop p-5" onClick={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="help-title" className="w-[min(92vw,640px)] max-h-[86vh] overflow-y-auto rounded-xl glass-panel anim-pop p-5" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-2">
-          <span className="flex items-center gap-2 font-semibold"><HelpCircle size={17} className="text-[var(--color-accent)]" />{t("help.title")}</span>
-          <button onClick={onClose} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={16} /></button>
+          <span id="help-title" className="flex items-center gap-2 font-semibold"><HelpCircle size={17} className="text-[var(--color-accent)]" />{t("help.title")}</span>
+          <button onClick={onClose} {...named(t("a11y.close"))} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={16} /></button>
         </div>
         <p className="text-[13px] leading-relaxed text-[var(--color-muted)]">{t("help.intro")}</p>
 
@@ -810,7 +631,8 @@ function StatusBar() {
   const fmt = (ms: number) => new Date(ms).toLocaleTimeString();
   return (
     <div className="relative flex-1 min-w-0 flex justify-center px-3">
-      <button onClick={() => setOpen((o) => !o)} title={t("status.log")}
+      <span className="sr-only" role="status" aria-live="polite">{text}</span>
+      <button onClick={() => setOpen((o) => !o)} title={t("status.log")} aria-expanded={open}
         className="inline-flex items-center gap-2 max-w-full px-3 py-1 rounded-md text-[12px] text-[var(--color-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-2)] transition-colors">
         {busy
           ? <Loader2 size={13} className="animate-spin text-[var(--color-accent)] shrink-0" />
@@ -821,7 +643,7 @@ function StatusBar() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute top-full mt-1 left-1/2 -translate-x-1/2 z-50 w-[min(560px,92vw)] max-h-[60vh] overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl p-1.5">
+          <div role="log" aria-label={t("status.log")} className="absolute top-full mt-1 left-1/2 -translate-x-1/2 z-50 w-[min(560px,92vw)] max-h-[60vh] overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl p-1.5">
             <div className="flex items-center justify-between px-2 py-1 mb-1 border-b border-[var(--color-border)]">
               <span className="text-[11px] uppercase tracking-wide text-[var(--color-muted)] inline-flex items-center gap-1.5"><ScrollText size={13} />{t("status.log")}</span>
               {activities.length > 0 && <button onClick={() => useStore.setState({ activities: [] })} className="text-[11px] text-[var(--color-muted)] hover:text-[var(--color-text)] transition-colors">{t("status.clear")}</button>}
@@ -830,7 +652,9 @@ function StatusBar() {
             {[...activities].reverse().map((a, i) => (
               <div key={i} className="flex items-start gap-2 px-2 py-1 text-[12px]">
                 <span className="mono text-[10px] text-[var(--color-muted)]/70 tabnum shrink-0 mt-[3px]">{fmt(a.t)}</span>
-                <span className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${a.kind === "error" ? "bg-[var(--color-warn)]" : a.kind === "done" ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />
+                {a.kind === "agent"
+                  ? <Bot size={12} aria-label={t("bridge.agent")} className="shrink-0 mt-[3px] text-[var(--color-accent)]" />
+                  : <span className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${a.kind === "error" ? "bg-[var(--color-warn)]" : a.kind === "done" ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}`} />}
                 <span className={`leading-snug break-words min-w-0 ${a.kind === "error" ? "text-[var(--color-warn)]" : "text-[var(--color-text)]"}`}>{a.text}</span>
               </div>
             ))}
@@ -841,18 +665,29 @@ function StatusBar() {
   );
 }
 
+const settingsRequest = (target: string) => (cur: { request: number } | null) => ({ target, request: (cur?.request ?? 0) + 1 });
+
 function TopBar() {
   const { t } = useTranslation();
-  const [settings, setSettings] = useState(false);
+  // Открытые настройки: цель «раздел[:часть]» и номер запроса — повторный запрос той же цели снова ведёт к ней.
+  const [settings, setSettings] = useState<{ target: string; request: number } | null>(null);
   const [help, setHelp] = useState(false);
-  const setStage = useStore((s) => s.setStage);
-  const setPid = useStore((s) => s.setPid);
-  const setProject = useStore((s) => s.setProject);
+  const openSettingsAt = (target: string) => setSettings(settingsRequest(target));
+  useEffect(() => {
+    const open = (e: Event) => setSettings(settingsRequest((e as CustomEvent<string>).detail));
+    window.addEventListener(OPEN_SETTINGS_EVENT, open);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, open);
+  }, []);
   // start over with a new video — the current project stays on disk (reachable via Recent), so no confirm needed
-  const newProject = () => {
-    setProject(null); setPid(null); setStage("empty");
-    try { history.replaceState(null, "", location.pathname); } catch { /* no-op */ }
-  };
+  const newProject = goHome;
+  useBridgeCommand("open_settings", (args) => {
+    takeArgs("ui_open_settings", args, ["section"]);
+    const section = textArg("ui_open_settings", args, "section") ?? "models";
+    if (!(SETTINGS_SECTIONS as readonly string[]).includes(section)) throw bridgeError("bad_value", { command: "ui_open_settings", field: "section", expected: SETTINGS_SECTIONS.join(", ") });
+    openSettingsAt(section);
+    return { open: "settings", section };
+  });
+  useBridgeCommand("open_help", (args) => { takeArgs("ui_open_help", args, []); setHelp(true); return { open: "help" }; });
   return (
     <header className="flex items-center gap-2 px-5 h-14 border-b border-[var(--color-border)] bg-[var(--color-surface)]">
       <div className="flex items-center gap-3 shrink-0">
@@ -869,19 +704,23 @@ function TopBar() {
         <div id="dock-slot" className="flex items-center gap-2 shrink-0" />
         {/* Экспорт-сплит редактора (портал) — статично рядом с «Новый». */}
         <div id="editor-actions-slot" className="flex items-center gap-2" />
-        <button onClick={newProject} title="Создать проект (ручная настройка)"
+        <button onClick={newProject} title={t("manual.newTitle")}
           className="inline-flex flex-col items-center justify-center px-3 py-1 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors shadow-sm">
           <span className="text-[12px] font-bold flex items-center gap-1"><Plus size={13} /> {t("nav.new")}</span>
-          <span className="text-[9px] text-[var(--color-muted)] font-normal leading-none mt-0.5">ручная настройка</span>
+          <span className="text-[9px] text-[var(--color-muted)] font-normal leading-none mt-0.5">{t("manual.newSub")}</span>
         </button>
+        <WhatsNew />
         <button onClick={() => setHelp(true)} title={t("help.title")}
           className="p-1.5 rounded-md text-[var(--color-muted)] hover:text-[var(--color-text)] transition-colors"><HelpCircle size={18} /></button>
-        <button onClick={() => setSettings(true)} title={t("settings.title")}
+        <button onClick={() => openSettingsAt("models")} title={t("prefs.title")} aria-label={t("prefs.title")}
           className="p-1.5 rounded-md text-[var(--color-muted)] hover:text-[var(--color-text)] transition-colors"><Settings size={18} /></button>
         <LanguageSwitcher />
       </div>
       {help && <HelpModal onClose={() => setHelp(false)} />}
-      {settings && <SettingsModal onClose={() => setSettings(false)} />}
+      {settings !== null && (
+        <SettingsModal target={settings.target} request={settings.request} onClose={() => setSettings(null)}
+          panes={{ models: <><PresetsSection /><ModelsSection /></>, cloud: <ModelsSection part="cloud" />, network: <ProxySection />, agent: <AgentPanel /> }} />
+      )}
     </header>
   );
 }
@@ -918,6 +757,7 @@ const TR_STYLE_PRESETS: Record<string, string> = {
   literary: "Literary register: natural expressive language, idiomatic phrasing, preserve tone and imagery.",
   casual: "Casual conversational register: everyday spoken language, contractions, simple words.",
 };
+const TR_STYLE_IDS = ["", "technical", "literary", "casual", "custom"] as const;
 // Итоговый текст стиля на бэк: пресет -> его текст; "custom" -> свой текст (обрезанный).
 function resolveTrStyle(choice: string, custom: string): string {
   return choice === "custom" ? custom.trim() : (TR_STYLE_PRESETS[choice] ?? "");
@@ -1000,8 +840,16 @@ function DropZone() {
   const inputRef = useRef<HTMLInputElement>(null);
   const batchRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
+  // Дефолты запуска хранит сервис (GET/PATCH /settings/launch): поля формы ниже — их рабочая копия,
+  // каждое изменение уходит на сервер, а с сервера форма заполняется при открытии.
+  const [launch] = useState(() => createLaunchSaver(api.saveLaunchDefaults,
+    (e) => useStore.getState().pushActivity(t("launch.saveFailed", { error: e instanceof Error ? e.message : String(e) }), "error")));
+  const saveLaunch = (patch: Partial<LaunchDefaults>) => launch.queue(patch);
+  useEffect(() => () => { void launch.flush(); }, [launch]);
   const [tgt, setTgt] = useState<string>((i18n.language as string) || "ru");   // translate TO (default = UI lang)
   const [src, setSrc] = useState("auto");                                       // translate FROM (auto-detect)
+  const chooseTgt = (lang: string) => { setTgt(lang); saveLaunch({ tgt_lang: lang }); };
+  const chooseSrc = (lang: string) => { pickSrc(lang); saveLaunch({ src_lang: lang }); };
   const [asrNote, setAsrNote] = useState<string | null>(null);                  // «Parakeet не знает язык → переключили на Whisper»
   // Выбор источника: если язык вне 25 европейских Parakeet — авто-переключаем ASR на Whisper (99 языков)
   // с уведомлением. Текущий движок спрашиваем у бэкенда В МОМЕНТ выбора (не кэш с маунта): юзер мог
@@ -1019,8 +867,13 @@ function DropZone() {
       .then((c) => {
         if (srcReq.current !== lang) return; // юзер уже выбрал другой язык — ответ устарел
         if ((c.selection?.asr_engine ?? "parakeet") === "parakeet") {
-          api.setSelection("asr_engine", "whisper").catch(() => {});
-          setAsrNote(DUB_LANGS.find((l) => l.code === lang)?.name ?? lang);
+          api.setSelection("asr_engine", "whisper").then(
+            () => { if (srcReq.current === lang) setAsrNote(DUB_LANGS.find((l) => l.code === lang)?.name ?? lang); },
+            (e: unknown) => {
+              if (srcReq.current === lang) setAsrNote(null);
+              useStore.getState().pushActivity(t("prefs.saveFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
+            },
+          );
         } else {
           setAsrNote(null);
         }
@@ -1030,65 +883,100 @@ function DropZone() {
   const [file, setFile] = useState<File | null>(null);                          // staged video — analyzed on Start, not on drop
   const [subsFile, setSubsFile] = useState<File | null>(null);                  // опц. готовые субтитры (SRT/ASS) -> текст+тайминг вместо ASR
   const [subsTranslated, setSubsTranslated] = useState(false);                  // сабы уже на языке перевода -> tgt из них, MT пропустить (Даб Студио только озвучивает)
+  const [subsAlign, setSubsAlign] = useState(false);
+  // Видео, скачанное по ссылке, — уже проект на сервере. Ждёт здесь, как выбранный файл: «Начать обработку»
+  // запускает по нему analyze с настройками этого экрана, «Ручной режим» открывает его в редакторе.
+  const [fetched, setFetched] = useState<{ pid: string; title: string; duration: number | null; audioOnly: boolean; subsLang: string | null } | null>(null);
+  const pickFile = (f: File) => { setFile(f); setFetched(null); };
+  const takeFetched = (f: UrlFetch & { pid: string }) => {
+    setFile(null); setSubsFile(null); setSubsTranslated(false); setSubsAlign(false);
+    setFetched({ pid: f.pid, title: f.title ?? f.url, duration: f.duration, audioOnly: f.quality === "audio", subsLang: f.subsImported ? f.subsLang : null });
+  };
   // Композируемые опции обработки (независимы, любые комбинации). audio = аудио-выход; subs = содержимое
   // субтитров; burn = вжигать ли их на видео; funnyOn+funny = шуточный ремикс (сочетается с дубляжом/голосом).
-  const [audio, setAudio] = useState<"nodub" | "dub" | "voiceover" | "transcribe">("dub");
-  const [subs, setSubs] = useState<"none" | "transcribe" | "translate">("translate");
+  const [audio, setAudio] = useState<LaunchDefaults["audio"]>("dub");
+  const [subs, setSubs] = useState<LaunchDefaults["subs"]>("translate");
   const [burn, setBurn] = useState(true);
+  const chooseAudio = (v: LaunchDefaults["audio"]) => { setAudio(v); saveLaunch({ audio: v }); };
+  const chooseSubs = (v: LaunchDefaults["subs"]) => { setSubs(v); saveLaunch({ subs: v }); };
+  const chooseBurn = (v: boolean) => { setBurn(v); saveLaunch({ burn: v }); };
   const [detectText, setDetectText] = useState(false);                          // OCR-детекция вшитого текста (блюр/локализация титров). Дорогая на 4K -> ПО УМОЛЧАНИЮ ВЫКЛ (юзеры жаловались, что дубляж без сабов всё равно сканирует кадры); кто хочет блюр вшитых субтитров — включает галочкой.
+  const chooseDetect = (v: boolean) => { setDetectText(v); saveLaunch({ detect_text: v }); };
   // Кастинг персонажей (#115): доп. проход по кадрам (детект лиц + эмбеддинги + active-speaker) -> база
-  // персонажей с аватарами/голосами. Опционально, дорого на длинном видео -> ПО УМОЛЧАНИЮ ВЫКЛ. Персист.
-  const [castingOn, setCastingOn] = useState<boolean>(() => localStorage.getItem("dub-casting") === "1");
-  const setCastingSaved = (v: boolean) => { setCastingOn(v); localStorage.setItem("dub-casting", v ? "1" : "0"); };
+  // персонажей с аватарами/голосами. Опционально, дорого на длинном видео -> ПО УМОЛЧАНИЮ ВЫКЛ.
+  const [castingOn, setCastingOn] = useState(false);
+  const setCastingSaved = (v: boolean) => { setCastingOn(v); saveLaunch({ casting: v }); };
   // Готовый кастинг из библиотеки (#115): slug профиля -> уходит в analyze(casting_ref=). Пусто = не применять.
-  // Персист как глобальный дефолт (как стиль перевода/громкость) — чтобы серию роликов дубить одним кастингом.
-  const [castingRef, setCastingRef] = useState<string>(() => localStorage.getItem("dub-casting-ref") ?? "");
-  const setCastingRefSaved = (v: string) => { setCastingRef(v); localStorage.setItem("dub-casting-ref", v); };
-  // Тип контента кастинга (#115): real (SCRFD+LVFace) | anime (детектор рисованных лиц + CCIP). Персист.
-  const [contentType, setContentType] = useState<string>(() => localStorage.getItem("dub-content-type") ?? "auto");
-  const setContentTypeSaved = (v: string) => { setContentType(v); localStorage.setItem("dub-content-type", v); };
+  // Глобальный дефолт (как стиль перевода/громкость) — чтобы серию роликов дубить одним кастингом.
+  const [castingRef, setCastingRef] = useState("");
+  const setCastingRefSaved = (v: string) => { setCastingRef(v); saveLaunch({ casting_ref: v }); };
+  const [deletingCast, setDeletingCast] = useState<string | null>(null);       // профиль кастинга в диалоге удаления
+  // Тип контента кастинга (#115): real (SCRFD+LVFace) | anime (детектор рисованных лиц + CCIP).
+  const [contentType, setContentType] = useState<LaunchDefaults["content_type"]>("auto");
+  const setContentTypeSaved = (v: LaunchDefaults["content_type"]) => { setContentType(v); saveLaunch({ content_type: v }); };
   // Список профилей библиотеки — грузим лениво, когда галка кастинга включена (не засорять UI при выкл.).
   const [castLib, setCastLib] = useState<{ slug: string; name: string; char_count: number }[]>([]);
   const refreshCastLib = () => api.castingLibrary().then((r) => setCastLib(r.casts)).catch(() => {});
   useEffect(() => { if (castingOn) refreshCastLib(); }, [castingOn]);
+  useChanged(SETTINGS_CHANGED, () => { if (castingOn) refreshCastLib(); });
   const [funnyOn, setFunnyOn] = useState(false);
   const [funny, setFunny] = useState("");                                       // Gemma rewrite instruction (тема ремикса)
-  // Громкость оригинала под переводом (voiceover), стартовый выбор -> применяется ко всем создаваемым проектам.
-  // Хранится в localStorage как глобальный дефолт для будущих запусков (фолбэк -12 dB, broadcast-практика).
-  const [voGain, setVoGain] = useState<number>(() => {
-    const v = parseFloat(localStorage.getItem("dub-vo-gain") ?? "");
-    return Number.isFinite(v) ? v : -12;
-  });
-  const setVoGainSaved = (v: number) => { setVoGain(v); localStorage.setItem("dub-vo-gain", String(v)); };
-  // Стиль перевода (#112): выбор пресета + свой текст. Персистятся как глобальный дефолт для будущих запусков.
-  const [trStyle, setTrStyle] = useState<string>(() => localStorage.getItem("dub-tr-style-choice") ?? "");
-  const [trStyleCustom, setTrStyleCustom] = useState<string>(() => localStorage.getItem("dub-tr-style-custom") ?? "");
-  const setTrStyleSaved = (v: string) => { setTrStyle(v); localStorage.setItem("dub-tr-style-choice", v); };
-  const setTrStyleCustomSaved = (v: string) => { setTrStyleCustom(v); localStorage.setItem("dub-tr-style-custom", v); };
+  // Громкость оригинала под переводом (voiceover), стартовый выбор -> применяется ко всем создаваемым проектам
+  // (дефолт -12 dB, broadcast-практика).
+  const [voGain, setVoGain] = useState(-12);
+  const setVoGainSaved = (v: number) => { setVoGain(v); saveLaunch({ vo_gain_db: v }); };
+  // Стиль перевода (#112): выбор пресета + свой текст — глобальный дефолт для будущих запусков.
+  const [trStyle, setTrStyle] = useState<LaunchDefaults["tr_style"]>("");
+  const [trStyleCustom, setTrStyleCustom] = useState("");
+  const setTrStyleSaved = (v: LaunchDefaults["tr_style"]) => { setTrStyle(v); saveLaunch({ tr_style: v }); };
+  const setTrStyleCustomSaved = (v: string) => { setTrStyleCustom(v); saveLaunch({ tr_style_custom: v }); };
   // Сохранить оригинальную дорожку (#113): 2-я аудиодорожка + контейнер вывода (mp4|mkv). Персист.
   // Дакинг фона под дубляжом — опция дубляжа (active.json duck_on), ВЫКЛ по умолчанию (не всем нужен).
   const [duckOn, setDuckOn] = useState(false);
   useEffect(() => { api.capabilities().then((c) => setDuckOn(c.selection?.duck_on === "1")).catch(() => {}); }, []);
   const setDuckSaved = (v: boolean) => { setDuckOn(v); api.setSelection("duck_on", v ? "1" : "0").catch(() => {}); };
   // Блюр-подложка под сожжёнными субтитрами — опция (не всем нужна), дефолт ВКЛ; патчится в проект после analyze.
-  const [subBlur, setSubBlur] = useState<boolean>(() => localStorage.getItem("dub-sub-blur") !== "0");
-  const setSubBlurSaved = (v: boolean) => { setSubBlur(v); localStorage.setItem("dub-sub-blur", v ? "1" : "0"); };
-  const [keepOrig, setKeepOrig] = useState<boolean>(() => localStorage.getItem("dub-keep-orig") === "1");
-  const [container, setContainer] = useState<"mp4" | "mkv">(() => (localStorage.getItem("dub-container") === "mkv" ? "mkv" : "mp4"));
-  const setKeepOrigSaved = (v: boolean) => { setKeepOrig(v); localStorage.setItem("dub-keep-orig", v ? "1" : "0"); };
-  const setContainerSaved = (v: "mp4" | "mkv") => { setContainer(v); localStorage.setItem("dub-container", v); };
-  // Голоса из библиотеки (#114): режим клон|library + два списка слотов (порядок = приоритет). Персист.
-  const [voiceSrc, setVoiceSrc] = useState<"clone" | "library">(() => (localStorage.getItem("dub-voice-src") === "library" ? "library" : "clone"));
-  // JSON.parse может вернуть валидный не-массив (число/объект) — фильтруем до string[], иначе .map упадёт.
-  const [slotsM, setSlotsM] = useState<string[]>(() => { try { const p = JSON.parse(localStorage.getItem("dub-voice-slots-m") ?? "[]"); return Array.isArray(p) ? p.filter((x) => typeof x === "string") : []; } catch { return []; } });
-  const [slotsF, setSlotsF] = useState<string[]>(() => { try { const p = JSON.parse(localStorage.getItem("dub-voice-slots-f") ?? "[]"); return Array.isArray(p) ? p.filter((x) => typeof x === "string") : []; } catch { return []; } });
-  const setVoiceSrcSaved = (v: "clone" | "library") => { setVoiceSrc(v); localStorage.setItem("dub-voice-src", v); };
-  const setSlotsMSaved = (v: string[]) => { setSlotsM(v); localStorage.setItem("dub-voice-slots-m", JSON.stringify(v)); };
-  const setSlotsFSaved = (v: string[]) => { setSlotsF(v); localStorage.setItem("dub-voice-slots-f", JSON.stringify(v)); };
+  const [subBlur, setSubBlur] = useState(true);
+  const setSubBlurSaved = (v: boolean) => { setSubBlur(v); saveLaunch({ sub_blur: v }); };
+  const [keepOrig, setKeepOrig] = useState(false);
+  const [container, setContainer] = useState<LaunchDefaults["container"]>("mp4");
+  const setKeepOrigSaved = (v: boolean) => { setKeepOrig(v); saveLaunch({ keep_orig: v }); };
+  const setContainerSaved = (v: LaunchDefaults["container"]) => { setContainer(v); saveLaunch({ container: v }); };
+  // Голоса из библиотеки (#114): режим клон|library + два списка слотов (порядок = приоритет).
+  const [voiceSrc, setVoiceSrc] = useState<LaunchDefaults["voice_src"]>("clone");
+  const [slotsM, setSlotsM] = useState<string[]>([]);
+  const [slotsF, setSlotsF] = useState<string[]>([]);
+  const setVoiceSrcSaved = (v: LaunchDefaults["voice_src"]) => { setVoiceSrc(v); saveLaunch({ voice_src: v }); };
+  const setSlotsMSaved = (v: string[]) => { setSlotsM(v); saveLaunch({ voice_slots_m: v }); };
+  const setSlotsFSaved = (v: string[]) => { setSlotsF(v); saveLaunch({ voice_slots_f: v }); };
+  // Сохранённый выбор с сервера (старый выбор окна переносится туда один раз). Не прочитался — форма
+  // остаётся на встроенных дефолтах, и журнал говорит почему.
+  useEffect(() => {
+    let alive = true;
+    loadWithMigration({ load: api.launchDefaults, save: api.saveLaunchDefaults }, localStorage)
+      .then(({ defaults: d }) => {
+        if (!alive) return;
+        setAudio(d.audio); setSubs(d.subs); setBurn(d.burn); setDetectText(d.detect_text);
+        if (d.tgt_lang) setTgt(d.tgt_lang);
+        pickSrc(d.src_lang);
+        setCastingOn(d.casting); setCastingRef(d.casting_ref); setContentType(d.content_type);
+        setVoGain(d.vo_gain_db); setTrStyle(d.tr_style); setTrStyleCustom(d.tr_style_custom);
+        setSubBlur(d.sub_blur); setKeepOrig(d.keep_orig); setContainer(d.container);
+        setVoiceSrc(d.voice_src); setSlotsM(d.voice_slots_m); setSlotsF(d.voice_slots_f);
+      })
+      .catch((e: unknown) => useStore.getState().pushActivity(t("launch.loadFailed", { error: e instanceof Error ? e.message : String(e) }), "error"));
+    return () => { alive = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [voiceLib, setVoiceLib] = useState<string[]>([]);                        // имена голосов из GET /voices (для селектов слотов)
   useEffect(() => { api.voices().then((r) => setVoiceLib(r.voices)).catch(() => {}); }, []);
+  useChanged(VOICES_CHANGED, () => {
+    api.voices().then((r) => setVoiceLib(r.voices))
+      .catch((err) => useStore.getState().pushActivity(t("bridge.syncFailed", { error: String(err) }), "error"));
+  });
   const [preview, setPreview] = useState<string | null>(null);                  // objectURL превью выбранного видео (первый кадр)
-  const audioOnly = !!file && isAudioFile(file);                                // вход без видео -> режим «только аудио»
+  const audioOnly = file ? isAudioFile(file) : !!fetched?.audioOnly;            // вход без видео -> режим «только аудио»
+  // Субтитры проекта: выбранный вместе с видео файл или субтитры площадки, легшие в проект при загрузке по ссылке.
+  const hasSubs = !audioOnly && (fetched ? !!fetched.subsLang : !!subsFile);
   useEffect(() => {                                                             // создаём/освобождаем objectURL под выбранный файл
     if (!file) { setPreview(null); return; }
     const url = URL.createObjectURL(file);
@@ -1098,15 +986,26 @@ function DropZone() {
 
   // «Недавние проекты»: всё уже автосохранено в workspace/<pid>/ (каждая правка = PATCH). Здесь тянем
   // список и даём открыть прошлый проект в один клик. Автообновление URL (?pid=) — чтобы перезагрузка держала.
-  const [recent, setRecent] = useState<ProjectSummary[]>([]);
-  useEffect(() => { api.listProjects().then((r) => setRecent(r.projects)).catch(() => {}); }, []);
-  // Удалить проект из «Недавних»: подтверждаем, оптимистично убираем из списка, реально стираем на бэке
-  // (DELETE /projects/<pid> -> rm -rf workspace/<pid>). Если бэк не смог — вернётся при следующей загрузке.
-  const deleteRecent = async (e: React.MouseEvent, pid: string, video: string) => {
-    e.stopPropagation();
-    if (!window.confirm(t("recent.deleteConfirm", { video }))) return;
+  const [recent, setRecent] = useState<ProjectListing[]>([]);
+  const [allProjects, setAllProjects] = useState(false);                        // экран «Все проекты»
+  const [deleting, setDeleting] = useState<{ pid: string; video: string } | null>(null);   // проект в диалоге удаления
+  useEffect(() => {
+    api.listProjects().then((r) => setRecent(r.projects))
+      .catch((e: unknown) => useStore.getState().pushActivity(t("projects.loadFailed", { error: e instanceof Error ? e.message : String(e) }), "error"));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useChanged(PROJECTS_CHANGED, () => {
+    api.listProjects().then((r) => setRecent(r.projects))
+      .catch((err: unknown) => useStore.getState().pushActivity(t("bridge.syncFailed", { error: err instanceof Error ? err.message : String(err) }), "error"));
+  });
+  // Удалить проект: DELETE /projects/<pid> стирает workspace/<pid>; из списка убираем только после ответа
+  // сервера, ошибка остаётся в диалоге подтверждения.
+  const deleteProject = async (pid: string) => {
+    await api.deleteProject(pid);
     setRecent((r) => r.filter((x) => x.pid !== pid));
-    try { await api.deleteProject(pid); } catch { api.listProjects().then((r) => setRecent(r.projects)).catch(() => {}); }
+  };
+  const deleteRecent = (e: React.MouseEvent, pid: string, video: string) => {
+    e.stopPropagation();
+    setDeleting({ pid, video });
   };
   const rtf = new Intl.RelativeTimeFormat((i18n.language as string) || "en", { numeric: "auto" });
   function fmtAgo(sec: number) {
@@ -1117,18 +1016,19 @@ function DropZone() {
   }
   async function openProject(pid: string) {
     try {
-      const p = await api.getProject(pid);
-      s.setPid(pid); s.setProject(p); s.setRendered(false);                     // покадровое превью, не старое output-видео
-      s.setStage("editor");                                                     // TranscriptView vs Editor выбирается по projMode при рендере
-      window.history.pushState(null, "", `?pid=${pid}`);                        // перезагрузка/боот вернёт этот проект
+      await openProjectIn(pid);                                                 // покадровое превью; ?pid= в URL — перезагрузка вернёт проект
       playSfx("success");
-    } catch { /* проект удалён на диске — молча пропускаем */ }
+    } catch (e) {
+      useStore.getState().pushActivity(t("projects.openFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
+      playSfx("error");
+    }
   }
 
   async function runManual() {
+    if (fetched) { await openProject(fetched.pid); return; }
     if (!file) return;
     try {
-      useStore.getState().pushActivity("Создание проекта в ручном режиме...", "work");
+      useStore.getState().pushActivity(t("manual.starting"), "work");
       const { project_id } = await api.createProject(file, isAudioFile(file) ? null : subsFile);
       s.setPid(project_id);
       const proj = await api.getProject(project_id);
@@ -1136,7 +1036,7 @@ function DropZone() {
       s.setRendered(false);
       s.setStage("editor");
       window.history.pushState(null, "", `?pid=${project_id}`);
-      useStore.getState().pushActivity("Создан проект в ручном режиме — готово к работе с субтитрами", "done");
+      useStore.getState().pushActivity(t("manual.done"), "done");
       playSfx("success");
     } catch (err) {
       useStore.getState().pushActivity(String(err), "error");
@@ -1145,7 +1045,8 @@ function DropZone() {
   }
 
   async function run() {
-    if (!file) return;
+    const source: { pid: string } | { file: File } | null = fetched ? { pid: fetched.pid } : file ? { file } : null;
+    if (!source) return;
     s.setStage("analyzing");
     s.setAudioOnly(audioOnly);               // «Анализируем аудио» вместо «видео» для аудио-входа
     // Шаги степпера — только те, что реально будут в ЭТОЙ джобе (жалоба: «Находим текст на экране»
@@ -1154,7 +1055,7 @@ function DropZone() {
       // subs здесь — ЭФФЕКТИВНЫЙ (как eSubs ниже): transcribe-режим форсит субтитры оригинала,
       // перевода в нём нет, что бы ни стояло в сыром стейте селектора.
       const effSubs = audioOnly ? "none" : audio === "transcribe" ? "transcribe" : subs;
-      const wantTranslate = audio === "dub" || audio === "voiceover" || effSubs === "translate" || (funnyOn && !!funny.trim());
+      const wantTranslate = audio === "dub" || audio === "voiceover" || effSubs === "translate" || effSubs === "bilingual" || (funnyOn && !!funny.trim());
       const wantVoice = audio === "dub" || audio === "voiceover";
       const steps = ["download", "separating", "diarizing", "recognizing"];
       if (wantTranslate) steps.push("translating");
@@ -1169,8 +1070,10 @@ function DropZone() {
       s.setJobSteps(steps);
     }
     s.setProgress("", "", null);             // fresh stepper for this run
+    s.clearResumed();
     try {
-      const { project_id } = await api.createProject(file, isAudioFile(file) ? null : subsFile);   // сабы — только для видео
+      const project_id = "pid" in source ? source.pid
+        : (await api.createProject(source.file, isAudioFile(source.file) ? null : subsFile)).project_id;   // сабы — только для видео
       s.setPid(project_id);
       // Стиль перевода (#112): передаём ПАРАМЕТРОМ analyze (patch до analyze невозможен — project.json ещё
       // не создан; стиль читается стадией перевода ВНУТРИ analyze).
@@ -1178,7 +1081,6 @@ function DropZone() {
       // subtitles = ОРИГИНАЛ: исходная дорожка + субтитры на языке оригинала (без дубляжа, без перевода);
       // voiceover = закадровый (перевод+TTS, оригинал слышно приглушённым); transcribe = транскрипт+диаризация.
       // Композируемо: аудио-выход, содержимое субтитров, шуточный ремикс — независимы.
-      const audioOnly = isAudioFile(file);                          // вход без видео -> нет субтитров/бёрна/OCR
       const eMode = audio;                                          // nodub | dub | voiceover | transcribe
       const eSubs = audioOnly ? "none" : audio === "transcribe" ? "transcribe" : subs;   // none | transcribe(оригинал) | translate
       const eRewrite = funnyOn && (audio === "dub" || audio === "voiceover") ? funny.trim() : "";
@@ -1192,39 +1094,22 @@ function DropZone() {
       // Готовый кастинг из библиотеки применяем только когда кастинг реально включён (та же видимость, что у галки).
       const effCastingRef = effCasting ? castingRef : "";
       const effContentType = effCasting ? contentType : "real";
-      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, !audioOnly && !!subsFile && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType);
-      await api.watchJob(job_id, (e) => { if (e.type === "progress") s.setProgress(e.stage || "", e.msg || "", e.pct ?? null); });
-      if (audio === "voiceover") await api.patch(project_id, { op: "voiceover_gain", gain_db: voGain });   // громкость оригинала со старта -> рендер ниже подхватит
-      // Блюр-подложка под субтитрами — опция дубляжа/субтитров (дефолт вкл). Патчим, когда сабы вжигаются.
-      if (eBurn && eSubs !== "none" && !audioOnly) await api.patch(project_id, { op: "sub_blur", on: subBlur });
-      // Сохранить оригинальную дорожку (#113): 2-я аудиодорожка при mux рендера. Только dub/voiceover, не аудио-режим.
-      if (keepOrig && !audioOnly && (audio === "dub" || audio === "voiceover"))
-        await api.patch(project_id, { op: "keep_original", keep: true, container });
-      // Голоса из библиотеки (#114): раздать слоты по спикерам ПОСЛЕ analyze и ДО подготовки озвучки.
-      // Ошибка не роняет флоу — продолжаем с дефолтным клонированием.
-      if (voiceSrc === "library" && (audio === "dub" || audio === "voiceover") && (slotsM.length || slotsF.length)) {
-        try {
-          const r = await api.voiceSlots(project_id, { male: slotsM, female: slotsF });
-          // Считаем только реально назначенных из библиотеки (voice != null) — спикеры без слота уйдут в клон.
-          const nAssigned = Object.values(r.speakers || {}).filter((s) => s && s.voice).length;
-          useStore.getState().pushActivity(t("voiceSlots.assigned", { n: nAssigned }), "done");
-        } catch (e) { useStore.getState().pushActivity(String(e), "error"); }
-      }
-      s.setProject(await api.getProject(project_id));
-      // Озвучку готовим ЗДЕСЬ, на экране загрузки (не собирая видео — кадры даёт per-frame preview),
-      // чтобы редактор открылся с готовым дубом (плей сразу играет). Иначе рендер блокировал бы превью
-      // после открытия -> чёрный экран, и слушать дуб можно было бы только после экспорта.
-      if (audio === "dub" || audio === "voiceover") {
-        try {
-          const r = await api.render(project_id);   // полный дубляж на экране ЗАГРУЗКИ (1:1 питон: analyze -> analyzed.mp4): TTS+микс+бёрн+mux -> output.mp4
-          await api.watchJob(r.job_id, (e) => { if (e.type === "progress") s.setProgress(e.stage || "voicing", e.msg || "", e.pct ?? null); });
-          s.setProject(await api.getProject(project_id));
-          // rendered ОСТАЁТСЯ false: покадровое превью <img> (редактирование), а /dub отдаёт готовый дуб
-          // (output.mp4) -> плей играет озвучку и двигает скраб -> кадры следуют (1:1 оригинал).
-        } catch { /* рендер не удался -> редактор откроется на покадровом превью */ }
-      }
+      // Настройки после анализа (громкость оригинала, блюр-подложка, 2-я дорожка #113, голоса из библиотеки
+      // #114) сервер кладёт на проект в конце анализа и хранит в job.json: «Продолжить» повторит их же.
+      const voiced = audio === "dub" || audio === "voiceover";
+      const post: AnalyzePost = {
+        voGain: audio === "voiceover" ? voGain : undefined,
+        subBlur: eBurn && eSubs !== "none" && !audioOnly ? subBlur : undefined,
+        keepOriginal: keepOrig && !audioOnly && voiced ? { container } : undefined,
+        voiceSlots: voiceSrc === "library" && voiced && (slotsM.length || slotsF.length) ? { male: slotsM, female: slotsF } : undefined,
+      };
+      const { job_id } = await api.analyze(project_id, tgt, eMode, src, eSubs, eRewrite, eBurn, audioOnly ? false : detectText, hasSubs && subsTranslated, trStyleText, effCasting, effCastingRef, effContentType, hasSubs && !subsTranslated && subsAlign, post);
+      // Ошибка -> «Продолжить» с места остановки, не сброс. Для dub/voiceover озвучка готовится здесь же, на
+      // экране загрузки (rendered остаётся false: /dub отдаёт готовый дуб, кадры — покадровое превью).
+      await finishAnalyze(project_id, await watchWithResume(project_id, "analyze", job_id));
       s.setStage("editor"); playSfx("success");
     } catch (err) {
+      if (err instanceof JobCancelledError) { s.setProgress("", "", null); s.setStage("empty"); return; }
       s.setProgress("error", String(err), null);  // surface backend failure instead of hanging on "analyzing"
       s.setStage("empty"); playSfx("error");
     }
@@ -1259,7 +1144,7 @@ function DropZone() {
               <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)] mb-2.5">{t("recent.title")}</div>
               <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1 -mr-1">
                 {recent.slice(0, 8).map((p) => (
-                  <div key={p.pid}
+                  <div key={p.pid} data-mcp-context={`project ${p.pid}: ${p.video}`}
                     className="group relative flex items-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-2)] hover:border-[#3a414c] transition-colors">
                     <button onClick={() => openProject(p.pid)}
                       className="min-w-0 flex-1 flex items-center gap-3 p-1.5 text-left">
@@ -1270,17 +1155,23 @@ function DropZone() {
                         <div className="text-[13px] font-medium truncate">{p.video}</div>
                         <div className="mt-0.5 text-[11px] text-[var(--color-muted)] flex items-center gap-1.5">
                           <span className="uppercase font-semibold text-[var(--color-accent-2)]">{p.tgt_lang}</span>
-                          <span>·</span><span className="truncate">{p.mode}</span>
+                          <span>·</span><span className="truncate">{p.mode in MODE_KEYS ? t(MODE_KEYS[p.mode as keyof typeof MODE_KEYS]) : p.mode}</span>
                           <span>·</span><span className="shrink-0">{fmtAgo(p.mtime)}</span>
                           {p.done && <Check size={12} className="text-[var(--color-accent)] shrink-0" />}
+                          <JobStateLabel p={p} />
                         </div>
                       </div>
                     </button>
+                    <ContinueJobButton p={p} onOpen={openProject} />
                     <button onClick={(e) => deleteRecent(e, p.pid, p.video)} title={t("recent.delete")}
                       className="shrink-0 mr-1 p-1.5 rounded-md text-[var(--color-muted)] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] hover:bg-white/5 transition"><Trash2 size={15} /></button>
                   </div>
                 ))}
               </div>
+              <button type="button" onClick={() => setAllProjects(true)}
+                className="mt-2 inline-flex items-center gap-1.5 text-[12px] text-[var(--color-accent-2)] hover:text-[var(--color-accent)] transition-colors">
+                <FolderOpen size={13} />{t("projects.all", { n: recent.length })}
+              </button>
             </div>
           )}
         </div>
@@ -1289,7 +1180,7 @@ function DropZone() {
           <div
             onDragOver={(e) => { e.preventDefault(); setOver(true); }}
             onDragLeave={() => setOver(false)}
-            onDrop={(e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer.files?.[0]; if (f) setFile(f); }}
+            onDrop={(e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer.files?.[0]; if (f) pickFile(f); }}
             onClick={() => inputRef.current?.click()}
             className={`group relative aspect-[4/3] rounded-2xl border grid place-items-center cursor-pointer overflow-hidden transition-all duration-200
               ${over ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_9%,var(--color-surface))] shadow-[0_0_0_4px_color-mix(in_oklab,var(--color-accent)_18%,transparent)]"
@@ -1301,19 +1192,35 @@ function DropZone() {
                 <div className="absolute inset-0 bg-black/45" />
               </>
             )}
+            {fetched && !fetched.audioOnly && (
+              <>
+                <img src={api.originalUrl(fetched.pid, Math.min(1, (fetched.duration || 3) / 3))} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                <div className="absolute inset-0 bg-black/45" />
+              </>
+            )}
             <span className={`${corner} top-3 left-3 border-l border-t`} />
             <span className={`${corner} top-3 right-3 border-r border-t`} />
             <span className={`${corner} bottom-3 left-3 border-l border-b`} />
             <span className={`${corner} bottom-3 right-3 border-r border-b`} />
             <div className="relative z-10 text-center px-6">
               <div className={`mx-auto grid place-items-center w-16 h-16 rounded-2xl border transition-all duration-200
-                ${over ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent" : file && preview ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent shadow-lg" : "bg-[var(--color-surface-2)] text-[var(--color-accent)] border-[var(--color-border)] group-hover:scale-105"}`}>
-                {file ? <Check size={26} strokeWidth={2.5} /> : <Upload size={26} strokeWidth={2} />}
+                ${over ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent" : (file && preview) || fetched ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent shadow-lg" : "bg-[var(--color-surface-2)] text-[var(--color-accent)] border-[var(--color-border)] group-hover:scale-105"}`}>
+                {file || fetched ? <Check size={26} strokeWidth={2.5} /> : <Upload size={26} strokeWidth={2} />}
               </div>
-              {file ? (
+              {fetched ? (
+                <>
+                  <div className={`mt-5 text-lg font-semibold break-words line-clamp-3 px-2 ${fetched.audioOnly ? "" : "text-white drop-shadow"}`}>{fetched.title}</div>
+                  <div className={`mt-1.5 text-sm ${fetched.audioOnly ? "text-[var(--color-muted)]" : "text-white/80"}`}>{t("url.phase.done")} · {t("drop.change")}</div>
+                  {audioOnly && (
+                    <div className="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[color-mix(in_oklab,var(--color-accent)_16%,transparent)] text-[var(--color-accent)] text-[12px] font-medium">
+                      <AudioLines size={13} /> {t("drop.audioMode")}
+                    </div>
+                  )}
+                </>
+              ) : file ? (
                 <>
                   <div className={`mt-5 text-lg font-semibold break-all px-2 ${preview && !audioOnly ? "text-white drop-shadow" : ""}`}>{file.name}</div>
-                  <div className={`mt-1.5 text-sm ${preview && !audioOnly ? "text-white/80" : "text-[var(--color-muted)]"}`}>{(file.size / 1048576).toFixed(1)} MB · {t("drop.change")}</div>
+                  <div className={`mt-1.5 text-sm ${preview && !audioOnly ? "text-white/80" : "text-[var(--color-muted)]"}`}>{(file.size / 1048576).toFixed(1)} {t("units.mb")} · {t("drop.change")}</div>
                   {audioOnly && (
                     <div className="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[color-mix(in_oklab,var(--color-accent)_16%,transparent)] text-[var(--color-accent)] text-[12px] font-medium">
                       <AudioLines size={13} /> {t("drop.audioMode")}
@@ -1330,13 +1237,14 @@ function DropZone() {
               )}
             </div>
           </div>
+          <UrlImport staged={fetched ? fetched.pid : null} onReady={takeFetched} />
           <div className="mt-3.5 flex items-center justify-center gap-2 text-[12px]">
             <Languages size={14} className="text-[var(--color-accent-2)]" />
-            <Combobox value={src} onChange={pickSrc}
-              options={langOptions(DUB_LANGS, i18n.language, [{ value: "auto", label: "auto", search: "auto" }])}
+            <Combobox value={src} onChange={chooseSrc}
+              options={langOptions(DUB_LANGS, i18n.language, [{ value: "auto", label: t("settings.auto"), search: "auto" }])}
               placeholder={t("voice.langSearch")} noResults={t("voice.noMatch")} size="sm" className="w-[130px]" />
             <ArrowRight size={12} className="text-[var(--color-muted)]" />
-            <Combobox value={tgt} onChange={setTgt}
+            <Combobox value={tgt} onChange={chooseTgt}
               options={langOptions(DUB_LANGS, i18n.language)}
               placeholder={t("voice.langSearch")} noResults={t("voice.noMatch")} size="sm" className="w-[130px]" />
           </div>
@@ -1344,32 +1252,49 @@ function DropZone() {
             ? <p className="mt-1 text-center text-[10px] text-[var(--color-accent-2)] leading-tight">{t("comp.asrSwitched", { lang: asrNote })}</p>
             : <p className="mt-1 text-center text-[10px] text-[var(--color-muted)] leading-tight">{t("comp.langHint")}</p>}
           {/* Импорт готовых субтитров (SRT/ASS): точный текст+тайминг вместо авто-распознавания (ASR skip). */}
-          {!(file && isAudioFile(file)) && (
-            <div className="mt-2 flex flex-col items-center gap-0.5">
-              <label className={`inline-flex items-center gap-1.5 text-[11px] cursor-pointer transition-colors ${subsFile ? "text-[var(--color-accent-2)]" : "text-[var(--color-muted)] hover:text-[var(--color-accent-2)]"}`}>
-                <Captions size={13} />
-                {subsFile ? subsFile.name : t("import.subs")}
-                <input type="file" accept=".srt,.ass,.ssa" className="hidden"
-                  onChange={(e) => { const f = e.target.files?.[0] ?? null; setSubsFile(f); e.currentTarget.value = ""; }} />
-              </label>
-              {subsFile
-                ? <div className="flex flex-col items-center gap-1 mt-0.5">
-                    <label className="inline-flex items-center gap-1.5 text-[10px] text-[var(--color-muted)] cursor-pointer" title={t("import.translatedHint")}>
-                      <input type="checkbox" checked={subsTranslated} onChange={(e) => setSubsTranslated(e.target.checked)} className="accent-[var(--color-accent)]" />
-                      {t("import.translated")}
-                    </label>
-                    <button onClick={() => { setSubsFile(null); setSubsTranslated(false); }} className="inline-flex items-center gap-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={10} />{t("import.subsClear")}</button>
-                  </div>
-                : <span className="text-[10px] text-[var(--color-muted)] leading-tight text-center max-w-[300px]">{t("import.subsHint")}</span>}
-            </div>
-          )}
+          {(() => {
+            const subsChoice = (
+              <>
+                <label className="inline-flex items-center gap-1.5 text-[10px] text-[var(--color-muted)] cursor-pointer" title={t("import.translatedHint")}>
+                  <input type="checkbox" checked={subsTranslated} onChange={(e) => setSubsTranslated(e.target.checked)} className="accent-[var(--color-accent)]" />
+                  {t("import.translated")}
+                </label>
+                {!subsTranslated && <SubsAlignToggle checked={subsAlign} onChange={setSubsAlign} />}
+              </>
+            );
+            // Субтитры площадки уже лежат в скачанном проекте: выбрать другой файл к нему нельзя, только как их брать.
+            if (fetched) {
+              return hasSubs && (
+                <div className="mt-2 flex flex-col items-center gap-1">
+                  <span className="inline-flex items-center gap-1.5 text-[11px] text-[var(--color-accent-2)]"><Captions size={13} />{t("url.subs")} · <span className="mono">{fetched.subsLang}</span></span>
+                  {subsChoice}
+                </div>
+              );
+            }
+            return !audioOnly && (
+              <div className="mt-2 flex flex-col items-center gap-0.5">
+                <label className={`inline-flex items-center gap-1.5 text-[11px] cursor-pointer transition-colors ${subsFile ? "text-[var(--color-accent-2)]" : "text-[var(--color-muted)] hover:text-[var(--color-accent-2)]"}`}>
+                  <Captions size={13} />
+                  {subsFile ? subsFile.name : t("import.subs")}
+                  <input type="file" accept=".srt,.ass,.ssa" className="hidden"
+                    onChange={(e) => { const f = e.target.files?.[0] ?? null; setSubsFile(f); e.currentTarget.value = ""; }} />
+                </label>
+                {subsFile
+                  ? <div className="flex flex-col items-center gap-1 mt-0.5">
+                      {subsChoice}
+                      <button onClick={() => { setSubsFile(null); setSubsTranslated(false); setSubsAlign(false); }} className="inline-flex items-center gap-1 text-[10px] text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={10} />{t("import.subsClear")}</button>
+                    </div>
+                  : <span className="text-[10px] text-[var(--color-muted)] leading-tight text-center max-w-[300px]">{t("import.subsHint")}</span>}
+              </div>
+            );
+          })()}
           {/* АУДИО-ВЫХОД (независимо от субтитров) */}
           <div className="mt-3 flex items-center gap-1.5 text-[11px] uppercase tracking-[0.1em] text-[var(--color-muted)] mb-1">{t("comp.audioLabel")}<span title={t("comp.optionsHelp")} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span></div>
           <div className="grid grid-cols-2 gap-1.5">
-            {([["nodub", Captions, "audioNone", "comp.audioNoneHint"], ["dub", AudioLines, "audioDub", "comp.audioDubHint"], ["voiceover", Mic2, "audioVoiceover", "comp.audioVoiceoverHint"], ["transcribe", FileText, "mode.transcribe", "comp.audioTranscribeHint"]] as const).map(([a, Icon, key, hint]) => (
-              <button key={a} onClick={() => setAudio(a)} title={t(hint)}
+            {([["nodub", Captions, "comp.audioNone", "comp.audioNoneHint"], ["dub", AudioLines, "comp.audioDub", "comp.audioDubHint"], ["voiceover", Mic2, "comp.audioVoiceover", "comp.audioVoiceoverHint"], ["transcribe", FileText, "mode.transcribe", "comp.audioTranscribeHint"]] as const).map(([a, Icon, key, hint]) => (
+              <button key={a} onClick={() => chooseAudio(a)} title={t(hint)}
                 className={`flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg border text-[12px] font-medium transition-colors ${audio === a ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_12%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
-                <Icon size={14} />{key.includes(".") ? t(key) : t(`comp.${key}`)}</button>
+                <Icon size={14} />{t(key)}</button>
             ))}
           </div>
           {/* Прогрессивное раскрытие (#118): вторичные опции — в свёрнутых аккордеонах, только релевантные режиму.
@@ -1380,11 +1305,11 @@ function DropZone() {
             // Статусы для свёрнутых заголовков.
             const voicesStatus = voiceSrc === "clone"
               ? t("voiceSlots.clone")
-              : t("accordion.voicesLib", { n: slotsM.length + slotsF.length });
-            const subsStatus = t(`comp.subs${subs === "none" ? "None" : subs === "transcribe" ? "Original" : "Translate"}`);
+              : t("accordion.voicesLib", { count: slotsM.length + slotsF.length });
+            const subsStatus = t(subs === "none" ? "comp.subsNone" : subs === "transcribe" ? "comp.subsOriginal" : subs === "bilingual" ? "comp.subsBilingual" : "comp.subsTranslate");
             // «Дополнительно» показываем только если при текущем режиме внутри есть хоть один пункт.
             // стиль перевода — только там, где перевод реально идёт (не в транскрипт-режиме).
-            const showTrStyle = audio === "dub" || audio === "voiceover" || (subs === "translate" && audio !== "transcribe");
+            const showTrStyle = audio === "dub" || audio === "voiceover" || ((subs === "translate" || subs === "bilingual") && audio !== "transcribe");
             const showKeepOrig = isVoiced && !audioOnly;
             const showDetect = showSubs;
             const showCasting = !audioOnly && isVoiced;   // #115: кастинг имеет смысл только при дубляже видео
@@ -1417,16 +1342,16 @@ function DropZone() {
                 {/* СУБТИТРЫ (независимо от аудио) */}
                 {showSubs && (
                   <Accordion title={t("accordion.subs")} subtitle={subsStatus}>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {([["none", "subsNone", "comp.subsNoneHint"], ["transcribe", "subsOriginal", "comp.subsOriginalHint"], ["translate", "subsTranslate", "comp.subsTranslateHint"]] as const).map(([sv, key, hint]) => (
-                        <button key={sv} onClick={() => setSubs(sv)} title={t(hint)}
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {([["none", "comp.subsNone", "comp.subsNoneHint"], ["transcribe", "comp.subsOriginal", "comp.subsOriginalHint"], ["translate", "comp.subsTranslate", "comp.subsTranslateHint"], ["bilingual", "comp.subsBilingual", "comp.subsBilingualHint"]] as const).map(([sv, key, hint]) => (
+                        <button key={sv} onClick={() => chooseSubs(sv)} title={t(hint)}
                           className={`px-2 py-1.5 rounded-lg border text-[11px] font-medium transition-colors ${subs === sv ? "border-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_12%,transparent)] text-[var(--color-text)]" : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
-                          {t(`comp.${key}`)}</button>
+                          {t(key)}</button>
                       ))}
                     </div>
                     {subs !== "none" && (
                       <label className="mt-1.5 flex items-center gap-2 text-[12px] cursor-pointer select-none w-fit">
-                        <input type="checkbox" checked={burn} onChange={(e) => setBurn(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
+                        <input type="checkbox" checked={burn} onChange={(e) => chooseBurn(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
                         {t("comp.burn")}
                         <span title={t("comp.burnHint")} onClick={(e) => e.preventDefault()} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span>
                       </label>
@@ -1440,7 +1365,7 @@ function DropZone() {
                     {showTrStyle && (
                       <div>
                         <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.1em] text-[var(--color-muted)] mb-1">{t("trStyle.label")}</div>
-                        <select value={trStyle} onChange={(e) => setTrStyleSaved(e.target.value)}
+                        <select value={trStyle} onChange={(e) => { const v = TR_STYLE_IDS.find((id) => id === e.target.value); if (v !== undefined) setTrStyleSaved(v); }}
                           className="w-full bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-lg px-2.5 py-1.5 text-[12px] focus:border-[var(--color-accent)] focus:outline-none">
                           <option value="">{t("trStyle.normal")}</option>
                           <option value="technical">{t("trStyle.technical")}</option>
@@ -1476,26 +1401,26 @@ function DropZone() {
                     {/* ДАКИНГ ФОНА ПОД ДУБЛЯЖОМ — опция дубляжа (не всем нужен), ВЫКЛ по умолч.: вкл = фон
                         тише под голосом, выкл = фон на полной громкости. */}
                     {showDuck && (
-                      <label className="mt-1.5 flex items-center gap-2 text-[12px] cursor-pointer select-none w-fit" title="Приглушать фон под голосом в дубляже. Выкл — фон на полной громкости.">
+                      <label className="mt-1.5 flex items-center gap-2 text-[12px] cursor-pointer select-none w-fit" title={t("duck.tip")}>
                         <input type="checkbox" checked={duckOn} onChange={(e) => setDuckSaved(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
-                        Приглушать фон под голосом
-                        <span title="Дакинг: фон тише под речью дубляжа. Выкл — фон полный." onClick={(e) => e.preventDefault()} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span>
+                        {t("duck.label")}
+                        <span title={t("duck.hint")} onClick={(e) => e.preventDefault()} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span>
                       </label>
                     )}
                     {/* ДЕТЕКЦИЯ ВШИТОГО ТЕКСТА (OCR). */}
                     {showDetect && (
                       <label className="mt-1.5 flex items-center gap-2 text-[12px] cursor-pointer select-none w-fit">
-                        <input type="checkbox" checked={detectText} onChange={(e) => setDetectText(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
+                        <input type="checkbox" checked={detectText} onChange={(e) => chooseDetect(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
                         {t("comp.detect")}
                         <span title={t("comp.detectHint")} onClick={(e) => e.preventDefault()} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span>
                       </label>
                     )}
                     {/* БЛЮР-ПОДЛОЖКА ПОД СУБТИТРАМИ — опция (не всем нужна): выкл = текст без размытой подложки. */}
                     {showBlur && (
-                      <label className="mt-1.5 flex items-center gap-2 text-[12px] cursor-pointer select-none w-fit" title="Размытая подложка под субтитрами для читаемости. Выкл — текст без подложки.">
+                      <label className="mt-1.5 flex items-center gap-2 text-[12px] cursor-pointer select-none w-fit" title={t("blurPlate.tip")}>
                         <input type="checkbox" checked={subBlur} onChange={(e) => setSubBlurSaved(e.target.checked)} className="accent-[var(--color-accent)] w-3.5 h-3.5" />
-                        Блюр-подложка под субтитрами
-                        <span title="Размытая подложка под субтитрами. Выкл — без подложки." onClick={(e) => e.preventDefault()} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span>
+                        {t("blurPlate.label")}
+                        <span title={t("blurPlate.hint")} onClick={(e) => e.preventDefault()} className="cursor-help inline-flex text-[var(--color-muted)] opacity-40 hover:opacity-100 hover:text-[var(--color-accent-2)] transition"><HelpCircle size={12} /></span>
                       </label>
                     )}
                     {/* КАСТИНГ ПЕРСОНАЖЕЙ (#115): доп. проход по кадрам -> база персонажей (аватар/голос). Опц., дефолт ВЫКЛ. */}
@@ -1532,13 +1457,7 @@ function DropZone() {
                           </select>
                           {castingRef && castLib.some((c) => c.slug === castingRef) && (
                             <button type="button" title={t("castingLib.delete")}
-                              onClick={async () => {
-                                if (!window.confirm(t("castingLib.deleteConfirm"))) return;
-                                const slug = castingRef;
-                                setCastingRefSaved("");                       // снять выбор оптимистично
-                                try { await api.deleteCastingLibrary(slug); } catch { /* вернётся при рефреше */ }
-                                refreshCastLib();
-                              }}
+                              onClick={() => setDeletingCast(castingRef)}
                               className="shrink-0 p-1.5 rounded-lg border border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-danger,#ef4444)] hover:border-[var(--color-danger,#ef4444)] transition">
                               <Trash2 size={13} />
                             </button>
@@ -1578,14 +1497,14 @@ function DropZone() {
             );
           })()}
           <div className="mt-2.5 flex items-center gap-2">
-            <button onClick={run} disabled={!file || (funnyOn && (audio === "dub" || audio === "voiceover") && !funny.trim())}
+            <button onClick={run} disabled={(!file && !fetched) || (funnyOn && (audio === "dub" || audio === "voiceover") && !funny.trim())}
               className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-sm font-semibold disabled:opacity-40 hover:brightness-105 transition">
               {t("drop.start")} <ArrowRight size={16} />
             </button>
-            <button onClick={runManual} disabled={!file} title="Создать проект без автогенераций и сразу перейти к субтитрам"
+            <button onClick={runManual} disabled={!file && !fetched} title={t("manual.tip")}
               className="inline-flex flex-col items-center justify-center px-3 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-text)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-40 transition-colors">
-              <span className="text-[12px] font-semibold flex items-center gap-1"><Sliders size={13} /> Ручной режим</span>
-              <span className="text-[9px] text-[var(--color-muted)] font-normal leading-none mt-0.5">к субтитрам</span>
+              <span className="text-[12px] font-semibold flex items-center gap-1"><Sliders size={13} /> {t("manual.label")}</span>
+              <span className="text-[9px] text-[var(--color-muted)] font-normal leading-none mt-0.5">{t("manual.sub")}</span>
             </button>
           </div>
           <button onClick={() => batchRef.current?.click()}
@@ -1596,37 +1515,37 @@ function DropZone() {
           </div>
         </motion.div>
       </motion.div>
+      {allProjects && (
+        <ProjectsList projects={recent} onOpen={(pid) => { setAllProjects(false); void openProject(pid); }}
+          onDelete={deleteProject} onClose={() => setAllProjects(false)} />
+      )}
+      {deleting && (
+        <ConfirmDialog danger title={t("recent.delete")} message={t("recent.deleteConfirm", { video: deleting.video })} confirmLabel={t("projects.deleteConfirm")}
+          onCancel={() => setDeleting(null)}
+          onConfirm={async () => { await deleteProject(deleting.pid); setDeleting(null); }} />
+      )}
+      {deletingCast && (
+        <ConfirmDialog danger title={t("castingLib.delete")} message={t("castingLib.deleteConfirm")} confirmLabel={t("castingLib.delete")}
+          onCancel={() => setDeletingCast(null)}
+          onConfirm={async () => {
+            await api.deleteCastingLibrary(deletingCast);
+            if (castingRef === deletingCast) setCastingRefSaved("");
+            setDeletingCast(null);
+            refreshCastLib();
+          }} />
+      )}
       <input ref={inputRef} type="file" accept={MEDIA_ACCEPT} className="hidden"
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) setFile(f); }} />
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) pickFile(f); }} />
       <input ref={batchRef} type="file" multiple accept={MEDIA_ACCEPT} className="hidden"
         onChange={(e) => { const fs = [...(e.target.files || [])]; if (fs.length) { batchState.files = fs; batchState.tgt = tgt; batchState.src = src; batchState.audio = audio; batchState.subs = subs; batchState.burn = burn; batchState.detectText = detectText; batchState.funnyOn = funnyOn; batchState.funny = funny; batchState.voGain = voGain; batchState.trStyle = resolveTrStyle(trStyle, trStyleCustom); batchState.keepOrig = keepOrig; batchState.container = container; batchState.voiceSrc = voiceSrc; batchState.slotsM = slotsM; batchState.slotsF = slotsF; s.setStage("batch"); } }} />
     </div>
   );
 }
 
-// editor stages mapped to the engine's stage markers (api._run emits `stage` per _timed block + "download").
-const ANALYZE_STEPS: { key: string; stages: string[] }[] = [
-  { key: "download",    stages: ["download"] },
-  { key: "separating",  stages: ["extract_audio", "separate"] },
-  { key: "diarizing",   stages: ["diarize"] },
-  { key: "recognizing", stages: ["asr"] },
-  { key: "translating", stages: ["translate", "translate_ctx", "vision", "rewrite", "rewrite_ctx"] },   // "vision" = ctx-проход (vision layout + перевод транскрипта)
-  { key: "voicing",     stages: ["tts", "mix"] },        // TTS synthesis + mix — runs BETWEEN translate and OCR; without this the stepper blanks (cur=-1) during voice gen
-  // «Находим текст на экране» = ТОЛЬКО OCR-стадии: юзер с выключенной детекцией не должен видеть этот
-  // шаг вовсе (жалоба). Сборка выходного файла (build/burn/mux) — отдельный честный шаг.
-  { key: "locating",    stages: ["ocr_detect", "translate_titles", "translate_tagline"] },
-  { key: "casting",     stages: ["cast_detect", "cast_embed", "cast_speaker"] },   // #115: лица (SCRFD) + эмбеддинги (LVFace) + active-speaker (LR-ASD)
-  { key: "assembling",  stages: ["build", "burn", "mux"] },
-];
-// стадия -> переведённая метка шага (бэкенд шлёт детальный msg по-русски; в UI показываем локализованный
-// ярлык стадии вместо сырого текста, чтобы статус был на языке интерфейса). Неизвестная стадия -> null.
-const STAGE_TO_STEPKEY: Record<string, string> = Object.fromEntries(
-  ANALYZE_STEPS.flatMap((s) => s.stages.map((st) => [st, s.key])),
-);
 // `allowed` — ключи шагов ТЕКУЩЕЙ джобы: стадия отфильтрованного шага (напр. ocr_detect при
 // выключенной детекции) не должна подписываться его ярлыком в статус-строке — вернём null, и
 // строка покажет сырое сообщение бэкенда («детекция вшитого текста отключена»), а не фантомный шаг.
-function stageLabel(stage: string | undefined, t: (k: string) => string, allowed?: string[] | null): string | null {
+function stageLabel(stage: string | undefined, t: TFunction<"t">, allowed?: string[] | null): string | null {
   if (!stage) return null;
   const k = STAGE_TO_STEPKEY[stage];
   if (!k) return null;
@@ -1636,7 +1555,7 @@ function stageLabel(stage: string | undefined, t: (k: string) => string, allowed
 
 function AnalyzeProgress() {
   const { t } = useTranslation();
-  const { progress, audioOnly, jobSteps } = useStore();
+  const { progress, audioOnly, jobSteps, resumedStages, queuedAhead } = useStore();
   // Показываем только шаги текущей джобы (jobSteps из run()); null (открытие по ?pid и т.п.) = все.
   const STEPS = jobSteps ? ANALYZE_STEPS.filter((stp) => jobSteps.includes(stp.key)) : ANALYZE_STEPS;
   const matched = STEPS.findIndex((stp) => stp.stages.includes(progress.stage));
@@ -1661,6 +1580,7 @@ function AnalyzeProgress() {
                   {done ? <Check size={12} /> : active ? <Loader2 size={14} className="animate-spin" /> : <span className="w-1.5 h-1.5 rounded-full bg-current" />}
                 </span>
                 <span className={`text-sm ${active ? "text-[var(--color-text)] font-medium" : done ? "text-[var(--color-muted)]" : "text-[var(--color-muted)]/45"}`}>{t(`analyze.${stp.key}`)}</span>
+                {stp.stages.some((st) => resumedStages.includes(st)) && <span className="ml-auto text-[10px] uppercase tracking-wider text-[var(--color-accent-2)]">{t("jobs.fromCache")}</span>}
                 {active && dl && pct != null && <span className="ml-auto mono text-[11px] text-[var(--color-accent)]">{Math.round(pct)}%</span>}
               </div>
             );
@@ -1671,7 +1591,9 @@ function AnalyzeProgress() {
             ? <div className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-300" style={{ width: `${Math.max(2, Math.min(100, pct))}%` }} />
             : <div className="h-full w-1/3 rounded-full bg-[var(--color-accent)] animate-pulse" />}
         </div>
-        <div className="mt-2 min-h-4 text-center mono text-[12px] text-[var(--color-muted)] break-words">{stageLabel(progress.stage, t, jobSteps) || progress.msg}</div>
+        <div className="mt-2 min-h-4 text-center mono text-[12px] text-[var(--color-muted)] break-words">{queuedAhead != null ? t("jobs.queuedAhead", { n: queuedAhead }) : stageLabel(progress.stage, t, jobSteps) || progress.msg}</div>
+        <JobFailurePanel />
+        <CancelJobButton />
       </div>
     </div>
   );
@@ -1689,7 +1611,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 function Toggle({ label, on, onClick }: { label: string; on: boolean; onClick: () => void }) {
   return (
-    <button onClick={onClick} className="flex items-center justify-between w-full">
+    <button onClick={onClick} role="switch" aria-checked={on} aria-label={label || undefined} className="flex items-center justify-between w-full">
       <span className="text-[var(--color-muted)]">{label}</span>
       <span className={`w-9 h-5 rounded-full p-0.5 transition-colors ${on ? "bg-[var(--color-accent)]" : "bg-[var(--color-surface-2)]"}`}>
         <span className={`block w-4 h-4 rounded-full bg-white transition-transform ${on ? "translate-x-4" : ""}`} />
@@ -1734,6 +1656,7 @@ function WaveformTimeline({ pid, duration, scrub, segments, onSeek, gainDb = 0 }
 }
 
 function CommandPalette({ commands }: { commands: { label: string; run: () => void }[] }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   useEffect(() => {
@@ -1747,8 +1670,8 @@ function CommandPalette({ commands }: { commands: { label: string; run: () => vo
   const filtered = commands.filter((c) => c.label.toLowerCase().includes(q.toLowerCase()));
   return (
     <div className="fixed inset-0 z-50 grid place-items-start justify-center pt-[14vh] glass-scrim anim-fade" onClick={() => setOpen(false)}>
-      <div className="w-[min(92vw,520px)] rounded-xl glass-panel anim-pop overflow-hidden" onClick={(e) => e.stopPropagation()}>
-        <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="⌘K  —  команды…"
+      <div role="dialog" aria-modal="true" aria-label={t("palette.placeholder")} className="w-[min(92vw,520px)] rounded-xl glass-panel anim-pop overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("palette.placeholder")} aria-label={t("palette.placeholder")}
           className="w-full bg-transparent px-4 py-3 text-[15px] border-b border-[var(--color-border)] focus:outline-none" />
         <div className="max-h-[50vh] overflow-y-auto p-1.5">
           {filtered.map((c, i) => (
@@ -1883,11 +1806,11 @@ function ShortcutsHelp({ onClose }: { onClose: () => void }) {
   ];
   return (
     <div className="fixed inset-0 z-[60] grid place-items-center glass-scrim anim-fade" onClick={onClose}>
-      <div className="w-[min(92vw,480px)] rounded-xl glass-panel anim-pop overflow-hidden" onClick={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="hotkeys-title" className="w-[min(92vw,480px)] rounded-xl glass-panel anim-pop overflow-hidden" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border)]">
           <Keyboard size={16} className="text-[var(--color-accent)]" />
-          <span className="text-[14px] font-semibold">{t("hotkeys.title")}</span>
-          <button onClick={onClose} className="ml-auto text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={16} /></button>
+          <span id="hotkeys-title" className="text-[14px] font-semibold">{t("hotkeys.title")}</span>
+          <button onClick={onClose} {...named(t("a11y.close"))} className="ml-auto text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={16} /></button>
         </div>
         <div className="p-2">
           {rows.map(([key, act]) => (
@@ -1936,7 +1859,7 @@ function CastingPanel({ pid, characters, voices, onChange }: {
     api.capabilities().then((cap) => {
       const on = (cap.selection?.or_tts_on ?? "") === "1";
       setCloudOn(on);
-      const model = cap.selection?.or_tts_model ?? "";
+      const model = slot(cap.selection, "or_tts_model") ?? "";
       if (on && model) api.openrouterVoices(model).then((r) => setCloudVoices(r.voices.map((v) => ({ name: v.name, gender: v.gender })))).catch(() => {});
     }).catch(() => {});
   }, []);
@@ -2015,7 +1938,7 @@ function CastingPanel({ pid, characters, voices, onChange }: {
       <div className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-b border-[var(--color-border)]">
         <Users size={16} className="text-[var(--color-accent)]" />
         <span className="text-[13px] font-semibold">{t("casting.title")}</span>
-        <span className="text-[11px] text-[var(--color-muted)]">{t("casting.count", { n: characters.length })}</span>
+        <span className="text-[11px] text-[var(--color-muted)]">{t("casting.count", { count: characters.length })}</span>
         <div className="flex-1" />
         {/* СОХРАНИТЬ КАСТИНГ В БИБЛИОТЕКУ (#115): инлайн-ввод имени (DS-паттерн), затем POST. */}
         {naming ? (
@@ -2054,7 +1977,7 @@ function CastingPanel({ pid, characters, voices, onChange }: {
             // Есть кадр (URL не null) и он не сломался -> картинка; иначе заглушка-инициал.
             const showImg = !!c.sample_frame_url && !imgFail[c.id];
             return (
-              <div key={c.id} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] overflow-hidden flex flex-col">
+              <div key={c.id} data-mcp-context={`character ${c.id}: ${d.name}`} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] overflow-hidden flex flex-col">
                 {/* Аватар: кадр из видео (2:3 постер как на Кинопоиске). Нет кадра/битая ссылка -> инициал. */}
                 <div className="relative aspect-[2/3] bg-[var(--color-surface)] overflow-hidden">
                   {showImg ? (
@@ -2070,7 +1993,7 @@ function CastingPanel({ pid, characters, voices, onChange }: {
                   {/* Пол — бейдж поверх аватара. */}
                   {c.gender && (
                     <span className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-[color-mix(in_oklab,var(--color-surface)_75%,transparent)] backdrop-blur text-[var(--color-text)]">
-                      {t(`casting.gender.${c.gender}`, c.gender)}
+                      {t(GENDER_LABEL_KEY[genderKey(c.gender)])}
                     </span>
                   )}
                   {/* Образец голоса (#115): играть/стоп wav. Кнопка только если бэк отдал voice_sample_url. */}
@@ -2089,7 +2012,7 @@ function CastingPanel({ pid, characters, voices, onChange }: {
                     className="w-full bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg px-2 py-1.5 text-[13px] font-semibold focus:border-[var(--color-accent)] focus:outline-none" />
                   {/* Кол-во реплик. */}
                   <div className="flex items-center gap-1.5 text-[11px] text-[var(--color-muted)]">
-                    <FileText size={12} />{t("casting.lines", { n: c.line_count })}
+                    <FileText size={12} />{t("casting.lines", { count: c.line_count })}
                   </div>
                   {/* Характер речи — уходит в Гемму. */}
                   <div>
@@ -2105,7 +2028,7 @@ function CastingPanel({ pid, characters, voices, onChange }: {
                         текст «clone» (иначе значение не из списка и автокомплит выглядит сломанным). */}
                     <Combobox value={d.voice && d.voice.toLowerCase() !== "clone" ? d.voice : ""}
                       onChange={(v) => setField(c.id, { voice: v || null })} options={voiceOpts}
-                      placeholder={cloudOn ? "— автокастинг по полу —" : t("casting.voiceClone")} noResults={t("voice.noMatch")} allowClear size="sm" className="w-full" />
+                      placeholder={cloudOn ? t("casting.autoByGender") : t("casting.voiceClone")} noResults={t("voice.noMatch")} allowClear size="sm" className="w-full" />
                   </div>
                 </div>
               </div>
@@ -2137,6 +2060,7 @@ function InteractiveTimeline({
   onPlaySeg: (seg: Project["segments"][number]) => void;
   setProject: (p: Project) => void;
 }) {
+  const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(60); // pixels per second
@@ -2295,12 +2219,12 @@ function InteractiveTimeline({
       <div className="flex items-center justify-between px-1 text-[11px] text-[var(--color-muted)]">
         <span className="font-semibold flex items-center gap-1.5">
           <AudioLines size={13} className="text-[var(--color-accent)]" />
-          Таймлайн аудио и субтитров
+          {t("timeline.title")}
         </span>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setZoom((z) => Math.max(20, z - 15))}
-            title="Отдалить (Zoom Out)"
+            title={t("timeline.zoomOut")}
             className="p-1 rounded bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:border-[var(--color-accent)]"
           >
             <ZoomOut size={13} />
@@ -2308,7 +2232,7 @@ function InteractiveTimeline({
           <span className="mono text-[10px] w-12 text-center">{zoom} px/s</span>
           <button
             onClick={() => setZoom((z) => Math.min(300, z + 15))}
-            title="Приблизить (Zoom In)"
+            title={t("timeline.zoomIn")}
             className="p-1 rounded bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:border-[var(--color-accent)]"
           >
             <ZoomIn size={13} />
@@ -2335,6 +2259,7 @@ function InteractiveTimeline({
             return (
               <div
                 key={seg.id}
+                data-timeline-seg={seg.id}
                 style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
                 onPointerDown={(e) => handlePointerDown(e, seg, "move")}
                 onPointerMove={handlePointerMove}
@@ -2349,7 +2274,7 @@ function InteractiveTimeline({
                 <div
                   onPointerDown={(e) => handlePointerDown(e, seg, "resize-left")}
                   className="w-2 h-full bg-white/20 hover:bg-[var(--color-accent)] cursor-col-resize shrink-0 rounded-l-md flex items-center justify-center text-[8px] opacity-60 hover:opacity-100"
-                  title="Изменить начало"
+                  title={t("timeline.editStart")}
                 >
                   │
                 </div>
@@ -2362,7 +2287,7 @@ function InteractiveTimeline({
                       e.stopPropagation();
                       onPlaySeg(seg);
                     }}
-                    title="Прослушать фразу"
+                    title={t("timeline.listen")}
                     className="p-1 rounded-md bg-[var(--color-accent)] text-[var(--color-on-accent)] shrink-0 hover:scale-105 transition-transform"
                   >
                     <Play size={11} />
@@ -2381,7 +2306,7 @@ function InteractiveTimeline({
                 <div
                   onPointerDown={(e) => handlePointerDown(e, seg, "resize-right")}
                   className="w-2 h-full bg-white/20 hover:bg-[var(--color-accent)] cursor-col-resize shrink-0 rounded-r-md flex items-center justify-center text-[8px] opacity-60 hover:opacity-100"
-                  title="Изменить конец"
+                  title={t("timeline.editEnd")}
                 >
                   │
                 </div>
@@ -2475,6 +2400,13 @@ function parseSrtAssText(content: string): { start: number; end: number; speaker
   return results.sort((a, b) => a.start - b.start);
 }
 
+// Что пользователь печатает прямо сейчас (burst-снимок undo): не затирается, когда проект перечитывается под ним.
+function draftOf(burst: string | null): Draft {
+  if (burst?.startsWith("seg:")) return { segment: burst.slice(4) };
+  if (burst?.startsWith("title:")) return { title: Number(burst.slice(6)) };
+  return null;
+}
+
 function Editor() {
   const { t, i18n } = useTranslation();
   const p = useStore((s) => s.project) as Project;
@@ -2561,7 +2493,8 @@ function Editor() {
   const [vol, setVol] = useState<number>(() => { const s = localStorage.getItem("dub-vol"); return s ? parseFloat(s) : 1; });
 
   const playEndRef = useRef<number>(Infinity);                        // stop time for single-phrase playback (Infinity = full)
-  const [dubRev, setDubRev] = useState(0);                            // dub-audio cache-buster — bumped ONLY when the dub track is re-rendered (regen/export), NOT on every edit, so live edits don't reload <audio> mid-playback
+  const dubRev = useStore((s) => s.dubRev);
+  const bumpDub = useStore((s) => s.bumpDub);
   useEffect(() => {
     if (audioRef.current) {
       audioRef.current.volume = vol;
@@ -2583,6 +2516,9 @@ function Editor() {
     return () => window.clearInterval(id);
   }, [play]);   // eslint-disable-line react-hooks/exhaustive-deps
   const [regenId, setRegenId] = useState<string | null>(null);        // segment whose TTS is being re-generated
+  const [shortening, setShortening] = useState<string | null>(null);  // строка (или "__all__"), чей перевод сокращается под слот
+  const [onlyOver, setOnlyOver] = useState(false);                    // фильтр списка: только не влезающие в слот
+  const [takesOpen, setTakesOpen] = useState<string | null>(null);    // строка с раскрытой историей дублей
   const [remixText, setRemixText] = useState("");                     // funny-remix theme/instruction for Gemma
   const [remixing, setRemixing] = useState(false);
   const defaultSubStyle = {
@@ -2608,19 +2544,26 @@ function Editor() {
         const ms = Math.max(0, Math.round(s * 1000)), z = (n: number, w = 2) => String(n).padStart(w, "0");
         return `${z(Math.floor(ms / 3600000))}:${z(Math.floor((ms % 3600000) / 60000))}:${z(Math.floor((ms % 60000) / 1000))},${z(ms % 1000, 3)}`;
       };
-      const content = p.segments.map((s, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${(s.tgt_text || s.src_text || "").trim()}\n`).join("\n");
+      const isDub = p.mode === "dub" || p.mode === "voiceover";
+      const originalTop = p.subs.bilingual.order === "original_top";
+      const own = new Map(p.captions.overrides.flatMap((o) => (o.text != null ? [[o.seg_id, o.text] as const] : [])));
+      const content = p.segments
+        .filter((s) => !s.hidden && !s.keep_original)
+        .map((s) => ({ s, text: subtitleText({ src_text: s.src_text, tgt_text: own.get(s.id) ?? s.tgt_text }, p.subs.mode, isDub, originalTop) }))
+        .filter(({ text }) => text)
+        .map(({ s, text }, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${text}\n`).join("\n");
       await api.putProject(pid, p);
 
       if ("showSaveFilePicker" in window) {
         try {
           const handle = await (window as unknown as { showSaveFilePicker: (opts: unknown) => Promise<FileSystemFileHandle> }).showSaveFilePicker({
             suggestedName: "subtitles.srt",
-            types: [{ description: "Subtitles (.srt)", accept: { "text/plain": [".srt"] } }],
+            types: [{ description: t("subs.saveTypeDesc"), accept: { "text/plain": [".srt"] } }],
           });
           const writable = await handle.createWritable();
           await writable.write(content);
           await writable.close();
-          pushActivity("Файл субтитров успешно сохранён!", "done");
+          pushActivity(t("subs.saved"), "done");
           playSfx("success");
           return;
         } catch (e: unknown) {
@@ -2629,7 +2572,7 @@ function Editor() {
       }
 
       await api.saveText(pid, "subtitles.srt", content);
-      pushActivity("Все изменения субтитров успешно сохранены!", "done");
+      pushActivity(t("subs.savedAll"), "done");
       playSfx("success");
     } catch (err) {
       await surfaceErr(err);
@@ -2641,7 +2584,7 @@ function Editor() {
       const text = await file.text();
       const parsed = parseSrtAssText(text);
       if (parsed.length === 0) {
-        pushActivity("Файл субтитров пуст или не удалось распознать формат (.srt/.ass)", "error");
+        pushActivity(t("subs.empty"), "error");
         playSfx("error");
         return;
       }
@@ -2664,7 +2607,7 @@ function Editor() {
       const saved = await api.putProject(pid, updatedProj);
       setProject(saved);
       bump();
-      pushActivity(`Загружены субтитры: ${parsed.length} фраз из ${file.name}`, "done");
+      pushActivity(t("subs.loaded", { count: parsed.length, file: file.name }), "done");
       playSfx("success");
     } catch (err) {
       await surfaceErr(err);
@@ -2690,13 +2633,28 @@ function Editor() {
   // a patch/PUT rejected (4xx/5xx/offline) -> surface it in the Files panel (like doExport) and re-sync from
   // the server so the optimistic local echo can't silently diverge from persisted truth
   async function surfaceErr(err: unknown) {
-    pushActivity(String(err), "error"); playSfx("error");
-    addExport({ id: `err-${Date.now()}`, name: t("common.error"), status: "error", msg: String(err) });
+    // PUT снимка (undo, импорт субтитров) на проект, который после него сохранили агент или другое окно: сервер
+    // его не принял — показываем актуальный проект, а старые снимки undo больше не годятся.
+    const changed = err instanceof ApiError && err.code === "project_changed";
+    pushActivity(changed ? t("bridge.undoRefused") : String(err), changed ? "agent" : "error"); playSfx("error");
+    if (changed) useStore.getState().resetHistory();
+    else addExport({ id: `err-${Date.now()}`, name: t("common.error"), status: "error", msg: String(err) });
     try { setProject(await api.getProject(pid)); } catch { /* offline -> keep optimistic state */ }
+  }
+  // Джобу отменили кнопкой в полосе джоб: не ошибка — строка в журнале и проект в том виде, в каком его оставила джоба.
+  async function jobCancelled(kind: JobKind) {
+    pushActivity(t("jobs.cancelledKind", { kind: t(`jobs.kind.${kind}`) }), "done");
+    try { setProject(await api.getProject(pid)); bump(); }
+    catch (err) { pushActivity(String(err), "error"); }
   }
   async function persistSeg(id: string, tgt: string) {               // on blur -> persist to backend + refresh frame
     setRendered(false);
-    try { setProject(await api.patch(pid, { op: "segment", id, tgt_text: tgt })); bump(); }
+    const wasPinned = p.segments.find((x) => x.id === id)?.takes?.pinned != null;
+    try {
+      const fresh = await api.patch(pid, { op: "segment", id, tgt_text: tgt });
+      setProject(fresh); bump();
+      if (wasPinned && fresh.segments.find((x) => x.id === id)?.takes?.pinned == null) pushActivity(t("takes.unpinnedByEdit", { count: 1 }), "work");
+    }
     catch (err) { await surfaceErr(err); }
   }
   async function branch(op: string, extra: Record<string, unknown> = {}) {
@@ -2714,7 +2672,9 @@ function Editor() {
     try { setProject(await api.patch(pid, { op: "add_segment", id: `u${Date.now().toString(36)}`, start, end: start + 2, speaker })); bump(); }
     catch (e) { await surfaceErr(e); }
   }
-  const watchDub = (jobId: string) => api.watchJob(jobId, (e) => {
+  // По проекту уже идёт озвучка или экспорт: новая джоба ждёт её конца (журнал говорит, чего ждём).
+  const waitNote = (kind: JobKind) => pushActivity(t("jobs.waitingFor", { kind: t(`jobs.kind.${kind}`) }), "work");
+  const watchDub = (jobId: string) => watchLocal(pid, "dub_audio", jobId, (e) => {
     if (e.type === "progress") {
       if (e.msg) useStore.getState().pushActivity(e.msg, "work");
       useStore.getState().setProgress(e.stage || "tts", e.msg || "", e.pct ?? null);
@@ -2725,11 +2685,58 @@ function Editor() {
     setRegenId(segId); pushActivity(t("seg.regen"));
     try {
       await api.patch(pid, { op: "regen", id: segId });
-      const { job_id } = await api.dubAudio(pid);                     // ре-TTS ТОЛЬКО dirty-сегмент -> свежая озвучка (без сборки видео; финал — на Экспорте)
+      const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);   // ре-TTS ТОЛЬКО dirty-сегмент -> свежая озвучка (без сборки видео; финал — на Экспорте)
       await watchDub(job_id);
-      setProject(await api.getProject(pid)); setRendered(false); bump(); setDubRev(Date.now()); playSfx("notify");   // refresh preview + reload the re-rendered dub audio
-    } catch (e) { await surfaceErr(e); }
+      setProject(await api.getProject(pid)); setRendered(false); bump(); bumpDub(); playSfx("notify");   // refresh preview + reload the re-rendered dub audio
+    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
     finally { setRegenId(null); }
+  }
+  // Сократить перевод под слот (джоба shorten): одной строки или всех, что не влезают. Новый текст — dirty,
+  // озвучивается кнопкой/экспортом; снапшот до джобы — undo возвращает прежний текст.
+  async function doShorten(target: { ids: string[] } | { all_over: true }, tag: string) {
+    if (regenId || shortening) return;
+    pushHistory(p); setShortening(tag); pushActivity(t("fit.shortening"));
+    try {
+      const { job_id } = await enqueueWhenFree(() => api.shorten(pid, target), waitNote);
+      const res = await watchLocal(pid, "shorten", job_id, (e) => { if (e.type === "progress" && e.msg) useStore.getState().pushActivity(e.msg, "work"); }) as ShortenResult;
+      setProject(await api.getProject(pid)); setRendered(false); bump();
+      pushActivity(t("fit.shortened", { count: res.shortened.length }), "done");
+      if (res.rejected.length) pushActivity(t("fit.rejected", { count: res.rejected.length }), "work");
+      if (res.failed.length) pushActivity(t("fit.failed", { count: res.failed.length, error: res.failed[0].error }), "error");
+      if (res.unpinned.length) pushActivity(t("takes.unpinnedByEdit", { count: res.unpinned.length }), "work");
+      playSfx("notify");
+    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("shorten"); else await surfaceErr(e); }
+    finally { setShortening(null); }
+  }
+  // Выбрать дубль из истории фразы: без переозвучки, только пересборка микса. Дубль другого текста возвращает текст (undo — снапшот).
+  // Отказ выбора получает вызвавший; пересборка микса идёт следом.
+  async function selectTake(segId: string, n: number): Promise<Project> {
+    pushHistory(p); setRegenId(segId); setRendered(false); pushActivity(t("takes.selecting"));
+    let fresh: Project;
+    try { fresh = await api.patch(pid, { op: "take_select", id: segId, take: n }); }
+    catch (e) { setRegenId(null); throw e; }
+    setProject(fresh); bump();
+    void (async () => {
+      try {
+        const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);
+        await watchDub(job_id);
+        setProject(await api.getProject(pid)); bumpDub(); playSfx("notify");
+      } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
+      finally { setRegenId(null); }
+    })();
+    return fresh;
+  }
+  async function doTakeSelect(segId: string, n: number) {
+    if (regenId) return;
+    try { await selectTake(segId, n); } catch (e) { await surfaceErr(e); }
+  }
+  async function pinTake(segId: string, pinned: boolean): Promise<Project> {
+    const fresh = await api.patch(pid, { op: "take_pin", id: segId, pinned });
+    setProject(fresh);
+    return fresh;
+  }
+  async function doTakePin(segId: string, pinned: boolean) {
+    try { await pinTake(segId, pinned); } catch (e) { await surfaceErr(e); }
   }
   // hide/del/keep одной строки: патч проекта (без авто-ре-озвучки; рендер — по кнопке)
   async function segOp(segId: string, op: string) {
@@ -2744,6 +2751,24 @@ function Editor() {
   async function doHideSeg(segId: string) { return segOp(segId, "hide_segment"); }   // toggle a line off/on
   async function doDelSeg(segId: string) { return segOp(segId, "del_segment"); }     // delete a line entirely (undoable)
   async function doKeepSeg(segId: string) { return segOp(segId, "keep_segment"); }   // toggle 'keep original audio'
+  // Как branch(), но ошибку не показывает, а отдаёт вызвавшему: агент получает её ответом инструмента.
+  async function applyEdit(op: string, fields: Record<string, unknown>): Promise<Project> {
+    const cur = useStore.getState().project;
+    if (cur) pushHistory(cur);
+    setRendered(false);
+    const fresh = await api.patch(pid, { op, ...fields });
+    setProject(fresh); bump();
+    return fresh;
+  }
+  async function doSplit(seg: Project["segments"][number]) {
+    if (regenId) return;
+    try { await applyEdit("split_segment", { id: seg.id, at: scrub }); } catch (err) { await surfaceErr(err); }
+  }
+  async function doMergeNext(seg: Project["segments"][number]) {
+    const next = p.segments[p.segments.findIndex((x) => x.id === seg.id) + 1];
+    if (regenId || !next) return;
+    try { await applyEdit("merge_segments", { ids: [seg.id, next.id] }); } catch (err) { await surfaceErr(err); }
+  }
   async function bulkDelIdx(op: "del_titles" | "del_blurs", idxs: Set<number>, clear: () => void) {
     if (!idxs.size) return;                                           // bulk-delete several titles / mask boxes by index
     pushHistory(p); setRendered(false);
@@ -2807,10 +2832,10 @@ function Editor() {
     setRegenId("__all__"); pushActivity(t("voice.regenAll"));       // sentinel: disables per-seg regen buttons, no per-seg spinner
     try {
       await api.patch(pid, { op: "regen_all" });                    // mark every segment dirty
-      const { job_id } = await api.dubAudio(pid);                   // ре-TTS всех сегментов -> свежая озвучка (видео на Экспорте)
+      const { job_id } = await enqueueWhenFree(() => api.dubAudio(pid), waitNote);   // ре-TTS всех сегментов -> свежая озвучка (видео на Экспорте)
       await watchDub(job_id);
-      setProject(await api.getProject(pid)); setRendered(false); bump(); setDubRev(Date.now()); playSfx("notify");   // покадровое превью; /dub обновлён -> плей играет новый дуб
-    } catch (e) { await surfaceErr(e); }
+      setProject(await api.getProject(pid)); setRendered(false); bump(); bumpDub(); playSfx("notify");   // покадровое превью; /dub обновлён -> плей играет новый дуб
+    } catch (e) { if (e instanceof JobCancelledError) await jobCancelled("dub_audio"); else await surfaceErr(e); }
     finally { setRegenId(null); }
   }
   function playFull() {                                               // bottom-bar Play: play the whole dub from the playhead
@@ -2832,8 +2857,8 @@ function Editor() {
     togglePlay: playFull, previewRef, setHelp: setShowHelp, vol, setVol: setVolK,
     blocked: () => document.querySelector(".glass-scrim") != null,   // открыта палитра/модалка -> не перехватывать
   });
-  async function doUndo() { const prev = undo(); if (prev) { setSelBlur(null); setSelTitle(null); setRendered(false); await api.putProject(pid, prev); bump(); } }
-  async function doRedo() { const next = redo(); if (next) { setSelBlur(null); setSelTitle(null); setRendered(false); await api.putProject(pid, next); bump(); } }
+  async function doUndo() { const prev = undo(); if (prev) { setSelBlur(null); setSelTitle(null); setRendered(false); try { await api.putProject(pid, prev.project, prev.rev); } catch (err) { await surfaceErr(err); } bump(); } }
+  async function doRedo() { const next = redo(); if (next) { setSelBlur(null); setSelTitle(null); setRendered(false); try { await api.putProject(pid, next.project, next.rev); } catch (err) { await surfaceErr(err); } bump(); } }
   useEffect(() => {                                                  // Cmd/Ctrl+Z / Shift+Z / Y (not while typing in a field)
     const h = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
@@ -2852,18 +2877,25 @@ function Editor() {
     addExport({ id: exId, name, status: "rendering", msg: t("common.rendering"), pid });   // queue entry -> Files panel (no screen block)
     setRendering(true); pushActivity(`${t("export.proceed")}: ${name}`);
     try {
-      const { job_id } = await api.render(pid);
-      await api.watchJob(job_id, (e) => { if (e.type === "progress") { updateExport(exId, { msg: e.msg || "" }); pushActivity(e.msg || "", "work"); } });
+      const { job_id } = await enqueueWhenFree(() => api.render(pid), (kind) => { updateExport(exId, { msg: t("jobs.waitingFor", { kind: t(`jobs.kind.${kind}`) }) }); waitNote(kind); });
+      await watchLocal(pid, "render", job_id, (e) => { if (e.type === "progress") { updateExport(exId, { msg: e.msg || "" }); pushActivity(e.msg || "", "work"); } });
       updateExport(exId, { status: "done", msg: "", url: `${api.outputUrl(pid)}?rev=${Date.now()}` });   // bust cache on re-export
+      // рендер мог сократить не влезшие фразы и записал отчёт укладки: окно берёт проект с сервера
+      api.getProject(pid).then(setProject, (e: unknown) => pushActivity(String(e), "error"));
       // Раскрыть реальный выход в проводнике: контейнер может быть output.mkv (#113, сохранена ориг. дорожка) —
       // не хардкодим .mp4. Расширение из project.json (keep_original_track + container), иначе .mp4.
       const outName = p.audio.keep_original_track && p.audio.container === "mkv" ? "output.mkv" : "output.mp4";
       // Если имя всё же не совпало (редкий рассинхрон настроек), бэкенд сам резолвит выход через find_output — не гадаем здесь.
       api.reveal(pid, outName).catch(() => {});   // открыть проводник с выделенным готовым файлом — юзер видит, куда сохранилось
       pushActivity(`${t("compare.result")}: ${name}`, "done"); playSfx("success");
-      setRendered(true); setDubRev(Date.now());   // /dub now serves the freshly rendered output.mp4 -> reload <audio>
+      setRendered(true); bumpDub();   // /dub now serves the freshly rendered output.mp4 -> reload <audio>
     } catch (err) {
-      updateExport(exId, { status: "error", msg: String(err) }); pushActivity(String(err), "error"); playSfx("error");
+      if (err instanceof JobCancelledError) {
+        updateExport(exId, { status: "error", msg: t("jobs.state.cancelled") });
+        pushActivity(t("jobs.cancelledKind", { kind: t("jobs.kind.render") }), "done");
+      } else {
+        updateExport(exId, { status: "error", msg: String(err) }); pushActivity(String(err), "error"); playSfx("error");
+      }
     } finally { setRendering(false); }
   }
   async function doRemix() {                                            // Gemma rewrites the WHOLE script on a theme
@@ -2872,12 +2904,12 @@ function Editor() {
     try {
       pushHistory(p);
       const { job_id } = await api.remix(pid, remixText.trim());
-      await api.watchJob(job_id, (e) => { if (e.type === "progress") useStore.getState().setProgress(e.stage || "remix", e.msg || t("remix.apply"), e.pct ?? null); });
+      await watchLocal(pid, "remix", job_id, (e) => { if (e.type === "progress") useStore.getState().setProgress(e.stage || "remix", e.msg || t("remix.apply"), e.pct ?? null); });
       setRendered(false);
       setProject(await api.getProject(pid));                            // rewritten transcript -> shows in the lane
       bump(); setLane("subs");                                          // показать переписанный текст сразу
       useStore.getState().setProgress("done", t("remix.apply"), null); // done-строка в журнале
-    } catch (err) { await surfaceErr(err); }                           // было: тихий console.error -> провал не был виден
+    } catch (err) { if (err instanceof JobCancelledError) await jobCancelled("remix"); else await surfaceErr(err); }
     finally { setRemixing(false); }
   }
 
@@ -2901,15 +2933,35 @@ function Editor() {
   ];
   const activeRef = useRef<HTMLDivElement>(null);
   useEffect(() => { activeRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }, [activeId]);
+  // editor_* агента идут через те же функции, что и кнопки редактора.
+  useEditorBridge({
+    pid, mode, scrub, playing: play, lane, compare, castView, audioOnly, selSegs, busy: regenId !== null,
+    seek: onSeek, playLine: playSeg,
+    playFrom: (at) => { playEndRef.current = Infinity; if (audioRef.current) audioRef.current.currentTime = at; setScrub(at); setRendered(false); setPlay(true); },
+    pause: () => setPlay(false),
+    setLane: (next) => { setLane(next); setCastView(false); setCompare(false); },
+    selectLines: setSelSegs, selectBlur: setSelBlur, selectTitle: setSelTitle,
+    edit: applyEdit, undo: doUndo, redo: doRedo, exportVideo: doExport,
+    openTakes: setTakesOpen, selectTake, pinTake, shortening: shortening !== null,
+    shorten: (target) => { void doShorten(target, "ids" in target && target.ids.length === 1 ? target.ids[0] : "__all__"); },
+  });
+  useProjectSync(pid, () => draftOf(burstRef.current));
+  useChanged(VOICES_CHANGED, () => {
+    api.voices().then((r) => setVoiceList(r.voices)).catch((err) => pushActivity(t("bridge.syncFailed", { error: String(err) }), "error"));
+  });
+  useChanged(CASTING_CHANGED, (notice) => {
+    if (notice.pid !== pid) return;
+    api.casting(pid).then((r) => setCharacters(r.characters)).catch((err) => pushActivity(t("bridge.syncFailed", { error: String(err) }), "error"));
+  });
   return (
     <div className="flex-1 grid grid-cols-[380px_1fr_300px] min-h-0">
       <aside className="border-r border-[var(--color-border)] flex flex-col min-h-0 overflow-hidden bg-[var(--color-surface)]">
         {/* Фикс-шапка: вкладки лейнов всегда видны (не скроллятся). */}
         <div className="shrink-0 px-4 pt-4 pb-2.5 border-b border-[var(--color-border)]">
-        <div className="inline-flex rounded-lg bg-[var(--color-surface-2)] p-0.5 border border-[var(--color-border)] text-[12px]">
+        <div role="tablist" aria-label={t("a11y.lanes")} className="inline-flex rounded-lg bg-[var(--color-surface-2)] p-0.5 border border-[var(--color-border)] text-[12px]">
           {([["subs", t("mode.subtitles")], ["blur", `${t("blur.title")} ${(p.captions.blur_boxes || []).length}`],
             ["titles", `${t("titles.tab")} ${(p.captions.titles || []).length}`]] as const).map(([k, lbl]) => (
-            <button key={k} onClick={() => setLane(k as typeof lane)}
+            <button key={k} onClick={() => setLane(k as typeof lane)} role="tab" aria-selected={lane === k}
               className={`px-2.5 py-1 rounded-md transition-colors ${lane === k ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold" : "text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
               {lbl}
             </button>
@@ -2937,36 +2989,41 @@ function Editor() {
                   {spks.length > 1 && spks.map((spk) => <button key={spk} onClick={() => toggleMany(idsOf(spk))} className={chip}>SPK {spk}</button>)}
 
                   <div className="ml-auto inline-flex items-center gap-1.5 shrink-0">
-                    <button onClick={handleSaveSubtitles} title="Сохранить субтитры в файл (.srt)"
+                    <GlossaryButton pid={pid} project={p} />
+                    <button onClick={handleSaveSubtitles} title={t("subs.saveTip")}
                       className="inline-flex items-center justify-center p-1 rounded-md bg-[var(--color-surface-2)] border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors shrink-0">
                       <Save size={14} />
                     </button>
-                    <label title="Импортировать файл субтитров (.srt, .ass, .vtt)" className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold cursor-pointer hover:brightness-110 transition shrink-0">
+                    <label title={t("subs.importTip")} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold cursor-pointer hover:brightness-110 transition shrink-0">
                       <Upload size={12} />
-                      <span>Импорт .srt/.ass</span>
+                      <span>{t("subs.importShort")}</span>
                       <input type="file" accept=".srt,.ass,.vtt,.sub,.txt" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImportSubtitles(f); e.target.value = ""; }} className="hidden" />
                     </label>
                   </div>
                 </div>
+                <FitToolbar segments={p.segments} onlyOver={onlyOver} onToggle={() => setOnlyOver((v) => !v)}
+                  onShortenAll={() => doShorten({ all_over: true }, "__all__")} busy={shortening === "__all__"} disabled={regenId !== null || shortening !== null} />
                 {selSegs.size > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/50 bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)] px-2 py-1.5">
-                    <span className="text-[12px] font-medium mr-auto">{selSegs.size} {t("sel.count")}</span>
+                    <span className="text-[12px] font-medium mr-auto">{t("sel.count", { count: selSegs.size })}</span>
                     <button onClick={() => bulkSeg("keep_segments", { keep: true })} disabled={regenId !== null}
                       className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--color-surface-2)] text-[12px] hover:text-[var(--color-accent)] disabled:opacity-40 transition-colors"><Music size={13} />{t("sel.keep")}</button>
                     <button onClick={() => bulkSeg("hide_segments", { hidden: true })} disabled={regenId !== null}
                       className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--color-surface-2)] text-[12px] hover:text-[var(--color-accent)] disabled:opacity-40 transition-colors"><EyeOff size={13} />{t("sel.hide")}</button>
                     <button onClick={() => bulkSeg("del_segments")} disabled={regenId !== null}
                       className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--color-surface-2)] text-[12px] hover:text-[#ef4444] disabled:opacity-40 transition-colors"><Trash2 size={13} />{t("sel.del")}</button>
-                    <button onClick={() => setSelSegs(new Set())} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={14} /></button>
+                    <button onClick={() => setSelSegs(new Set())} {...named(t("a11y.clearSelection"))} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={14} /></button>
                   </div>
                 )}
               </div>
             );
           })()}
           {p.segments.map((seg, idx) => {
+            if (onlyOver && !fitOver(seg.fit)) return null;
             const on = isActive(seg);
             return (
-              <div key={seg.id} ref={on ? activeRef : undefined}
+              <div key={seg.id} ref={on ? activeRef : undefined} data-seg-id={seg.id}
+                data-mcp-context={`segment ${seg.id} ${fmtT(seg.start)}→${fmtT(seg.end)} SPK ${seg.speaker ?? "-"}${seg.hidden ? " hidden" : ""}${seg.keep_original ? " original voice" : ""}${seg.dirty ? " dirty" : ""}: ${(seg.tgt_text || seg.src_text).slice(0, 60)}`}
                 onDragOver={(e) => { e.preventDefault(); }}
                 onDrop={(e) => { e.preventDefault(); dropSeg(seg.id); }}
                 onClick={() => { setRendered(false); setScrub(seg.start); }}   // click a phrase -> seek the playhead to it
@@ -2976,24 +3033,40 @@ function Editor() {
                     <button type="button" draggable
                       onDragStart={(e) => { e.dataTransfer.setData("text/plain", seg.id); setDragSegId(seg.id); }}
                       onClick={(e) => e.stopPropagation()}
-                      title="Перетащить фразу (Drag & Drop)"
+                      title={t("seg.drag")}
                       className="cursor-grab active:cursor-grabbing text-[var(--color-muted)] hover:text-[var(--color-accent)] p-0.5 rounded shrink-0">
                       <GripVertical size={13} />
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); moveSeg(seg.id, "up"); }} disabled={idx === 0} title="Переместить вверх"
+                    <button onClick={(e) => { e.stopPropagation(); moveSeg(seg.id, "up"); }} disabled={idx === 0} title={t("seg.moveUp")}
                       className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] disabled:opacity-20 transition-colors shrink-0"><ChevronUp size={13} /></button>
-                    <button onClick={(e) => { e.stopPropagation(); moveSeg(seg.id, "down"); }} disabled={idx === p.segments.length - 1} title="Переместить вниз"
+                    <button onClick={(e) => { e.stopPropagation(); moveSeg(seg.id, "down"); }} disabled={idx === p.segments.length - 1} title={t("seg.moveDown")}
                       className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] disabled:opacity-20 transition-colors shrink-0"><ChevronDown size={13} /></button>
                     <button onClick={(e) => { e.stopPropagation(); setSelSegs((prev) => { const n = new Set(prev); n.has(seg.id) ? n.delete(seg.id) : n.add(seg.id); return n; }); }}
+                      role="checkbox" aria-checked={selSegs.has(seg.id)} {...named(t("a11y.selectLine"))}
                       className={`grid place-items-center w-3.5 h-3.5 rounded shrink-0 border transition-colors ${selSegs.has(seg.id) ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-[var(--color-on-accent)]" : "border-[var(--color-border)] hover:border-[var(--color-accent)]"}`}>
                       {selSegs.has(seg.id) && <Check size={10} />}</button>
                     {seg.speaker != null && <span className="mono px-1 py-0.5 rounded bg-[var(--color-overlay)] text-[9px] font-semibold text-[var(--color-muted)] shrink-0">SPK {seg.speaker}</span>}
                     <span className={`mono text-[9.5px] px-1 py-0.5 rounded tabnum shrink-0 ${on ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold" : "bg-[var(--color-overlay)] text-[var(--color-muted)]"}`}>{fmtT(seg.start)} → {fmtT(seg.end)}</span>
+                    <FitBadge fit={seg.fit} />
                   </div>
                   <div className="flex items-center gap-0.5 shrink-0 bg-[var(--color-surface)] px-1 py-0.5 rounded-md border border-[var(--color-border)]/60">
-                    {seg.dirty && <span className="text-[var(--color-accent)] text-[10px] mx-0.5" title="edited">●</span>}
+                    {seg.dirty && <span className="text-[var(--color-accent)] text-[10px] mx-0.5" title={t("seg.edited")}>●</span>}
                     <button onClick={(e) => { e.stopPropagation(); playSeg(seg); }} title={t("seg.play")}
                       className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] transition-colors"><Play size={13} /></button>
+                    {seg.fit && (
+                      <button onClick={(e) => { e.stopPropagation(); doShorten({ ids: [seg.id] }, seg.id); }} title={t("fit.shortenTip")}
+                        disabled={regenId !== null || shortening !== null || (!seg.fit.over && seg.fit.verdict === "fits")}
+                        className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] disabled:opacity-40 transition-colors">
+                        {shortening === seg.id ? <Loader2 size={13} className="animate-spin" /> : <Scissors size={13} />}
+                      </button>
+                    )}
+                    {(seg.takes?.count ?? 0) > 0 && (
+                      <button onClick={(e) => { e.stopPropagation(); setTakesOpen((cur) => (cur === seg.id ? null : seg.id)); }}
+                        title={t("takes.toggle", { count: seg.takes?.count ?? 0 })} aria-pressed={takesOpen === seg.id}
+                        className={`p-0.5 inline-flex items-center gap-0.5 transition-colors ${takesOpen === seg.id || seg.takes?.pinned != null ? "text-[var(--color-accent)]" : "text-[var(--color-muted)] hover:text-[var(--color-accent)]"}`}>
+                        {seg.takes?.pinned != null ? <Pin size={12} /> : <History size={13} />}<span className="mono text-[9.5px] tabnum">{seg.takes?.count}</span>
+                      </button>
+                    )}
                     <button onClick={(e) => { e.stopPropagation(); doRegen(seg.id); }} disabled={regenId !== null} title={t("seg.regen")}
                       className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] disabled:opacity-40 transition-colors">
                       {regenId === seg.id ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
@@ -3007,11 +3080,16 @@ function Editor() {
                       className="p-0.5 text-[var(--color-muted)] hover:text-[#ef4444] disabled:opacity-40 transition-colors"><Trash2 size={13} /></button>
                   </div>
                 </div>
-                <div className="text-[11px] text-[var(--color-muted)]/80 mt-1.5 leading-snug">{seg.src_text}</div>
+                <SourceText pid={pid} seg={seg} />
                 <AutoGrowTextarea value={seg.tgt_text} onChange={(e) => patchSeg(seg.id, e.target.value)}
                   onClick={(e) => e.stopPropagation()}                       // editing text must not re-seek on every click
                   onBlur={(e) => { burstRef.current = null; persistSeg(seg.id, e.target.value); }}   // end the edit burst
                   className="w-full mt-1.5 bg-[var(--color-bg)]/60 border border-[var(--color-border)] rounded-lg p-1.5 text-[13px] leading-snug resize-none overflow-hidden focus:border-[var(--color-accent)] focus:outline-none transition-colors" />
+                {takesOpen === seg.id && (
+                  <TakesPanel pid={pid} seg={seg} disabled={regenId !== null}
+                    onSelect={(n) => doTakeSelect(seg.id, n)} onPin={(pinned) => doTakePin(seg.id, pinned)} />
+                )}
+                {seg.tts_skip && <TtsSkipNote reason={seg.tts_skip} />}
                 {on && (
                   <div className="flex items-center gap-1.5 mt-1.5" onClick={(e) => e.stopPropagation()} title={t("seg.timingHint")}>
                     <Clock size={11} className="text-[var(--color-muted)] shrink-0" />
@@ -3023,6 +3101,11 @@ function Editor() {
                       onBlur={async (e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && Math.abs(v - seg.end) > 0.001) { setRendered(false); try { setProject(await api.patch(pid, { op: "segment", id: seg.id, end: v })); bump(); } catch (err) { await surfaceErr(err); } } }}
                       className="w-[62px] bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded px-1.5 py-0.5 text-[11px] mono tabnum focus:border-[var(--color-accent)] focus:outline-none" />
                     <span className="text-[10px] text-[var(--color-muted)]">{t("seg.seconds")}</span>
+                    <span className="flex-1" />
+                    <button onClick={() => doSplit(seg)} disabled={regenId !== null || scrub <= seg.start + 0.1 || scrub >= seg.end - 0.1} {...named(t("montage.split"))}
+                      className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] disabled:opacity-30 transition-colors"><Scissors size={13} /></button>
+                    <button onClick={() => doMergeNext(seg)} disabled={regenId !== null || idx === p.segments.length - 1} {...named(t("montage.mergeNext"))}
+                      className="p-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] disabled:opacity-30 transition-colors"><Merge size={13} /></button>
                   </div>
                 )}
                 {(on || selSegs.has(seg.id)) && !seg.keep_original && (
@@ -3052,9 +3135,9 @@ function Editor() {
             className="w-full mt-1 inline-flex items-center justify-center gap-1.5 py-2 rounded-xl border border-dashed border-[var(--color-border)] text-[12px] text-[var(--color-muted)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)] disabled:opacity-40 transition-colors">
             <Plus size={14} />{t("seg.add")}
           </button>
-          <label title="Загрузить готовые субтитры из файла (.srt, .ass)"
+          <label title={t("subs.loadTip")}
             className="w-full mt-1.5 inline-flex items-center justify-center gap-1.5 py-2 rounded-xl border border-dashed border-[var(--color-border)] text-[12px] text-[var(--color-muted)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)] cursor-pointer transition-colors">
-            <Upload size={14} /> Импортировать субтитры (.srt, .ass)
+            <Upload size={14} /> {t("subs.importList")}
             <input type="file" accept=".srt,.ass,.vtt,.sub,.txt" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImportSubtitles(f); e.target.value = ""; }} className="hidden" />
           </label>
         </div>
@@ -3074,7 +3157,7 @@ function Editor() {
                   <button onClick={() => setSelBlurs((prev) => prev.size === (p.captions.blur_boxes || []).length ? new Set() : new Set((p.captions.blur_boxes || []).map((_, i) => i)))}
                     className="px-2 py-0.5 rounded-md text-[11px] border border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:text-[var(--color-text)] hover:border-[var(--color-accent)] transition-colors">{t("sel.all")}</button>
                   {selBlurs.size > 0 && (<>
-                    <span className="text-[11px] text-[var(--color-muted)]">{selBlurs.size} {t("sel.count")}</span>
+                    <span className="text-[11px] text-[var(--color-muted)]">{t("sel.count", { count: selBlurs.size })}</span>
                     <button onClick={() => bulkDelIdx("del_blurs", selBlurs, () => setSelBlurs(new Set()))}
                       className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-[var(--color-surface-2)] hover:text-[#ef4444] transition-colors"><Trash2 size={12} />{t("sel.del")}</button>
                   </>)}
@@ -3084,9 +3167,11 @@ function Editor() {
                 {(p.captions.blur_boxes || []).map((b, i) => ({ b, i }))
                   .filter(({ b }) => blurAll || (scrub >= b.t0 - 0.6 && scrub <= b.t1 + 0.4))
                   .map(({ b, i }) => (
-                    <div key={i} onClick={() => { setSelBlur(i); setRendered(false); setScrub(Math.max(b.t0, 0)); }}
+                    <div key={i} onClick={() => { setSelBlur(i); setRendered(false); setScrub(Math.max(b.t0, 0)); }} data-blur-idx={i}
+                      data-mcp-context={`blur ${i} ${b.w}x${b.h} at ${b.x},${b.y} ${fmtT(b.t0)}→${fmtT(b.t1)}${b.hidden ? " hidden" : ""}${b.fill ? ` fill ${b.fill}` : ""}`}
                       className={`flex items-center gap-2 mono text-[10px] rounded px-2 py-1 cursor-pointer transition-colors ${selBlur === i ? "bg-[color-mix(in_oklab,var(--color-accent)_18%,transparent)] text-[var(--color-text)] ring-1 ring-[var(--color-accent)]" : "text-[var(--color-muted)] bg-[var(--color-surface-2)]/40 hover:text-[var(--color-text)]"} ${b.hidden ? "opacity-50" : ""} ${selBlurs.has(i) ? "ring-1 ring-[var(--color-accent)]" : ""}`}>
                       <button onClick={(e) => { e.stopPropagation(); setSelBlurs((prev) => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; }); }}
+                        role="checkbox" aria-checked={selBlurs.has(i)} {...named(t("a11y.selectBlur"))}
                         className={`grid place-items-center w-3.5 h-3.5 rounded-sm shrink-0 border transition-colors ${selBlurs.has(i) ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-[var(--color-on-accent)]" : "border-[var(--color-border)] hover:border-[var(--color-accent)]"}`}>{selBlurs.has(i) && <Check size={9} />}</button>
                       <button onClick={(e) => { e.stopPropagation(); branch("blur", { idx: i, hidden: !b.hidden }); }}
                         title={b.hidden ? t("blur.show") : t("blur.hide")}
@@ -3106,7 +3191,7 @@ function Editor() {
                         <button onClick={(e) => { e.stopPropagation(); branch("blur", { idx: i, t0: 0 }); }} title={t("edit.startVideo")} className="px-1.5 py-1 text-[var(--color-muted)] hover:text-[var(--color-accent)] transition-colors"><ArrowLeftToLine size={13} /></button>
                         <button onClick={(e) => { e.stopPropagation(); branch("blur", { idx: i, t1: p.meta.duration || 0 }); }} title={t("edit.endVideo")} className="px-1.5 py-1 text-[var(--color-muted)] hover:text-[var(--color-accent)] transition-colors"><ArrowRightToLine size={13} /></button>
                       </span>
-                      <button onClick={(e) => { e.stopPropagation(); branch("blur_del", { idx: i }); setSelBlur(null); }} className="shrink-0 hover:text-[var(--color-warn)] transition-colors"><Trash2 size={12} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); branch("blur_del", { idx: i }); setSelBlur(null); }} {...named(t("a11y.deleteBlur"))} className="shrink-0 hover:text-[var(--color-warn)] transition-colors"><Trash2 size={12} /></button>
                     </div>
                   ))}
                 {!(p.captions.blur_boxes || []).some((b) => blurAll || (scrub >= b.t0 - 0.6 && scrub <= b.t1 + 0.4)) &&
@@ -3127,20 +3212,22 @@ function Editor() {
                 <button onClick={() => setSelTitles((prev) => prev.size === (p.captions.titles || []).length ? new Set() : new Set((p.captions.titles || []).map((_, i) => i)))}
                   className="px-2 py-0.5 rounded-md text-[11px] border border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:text-[var(--color-text)] hover:border-[var(--color-accent)] transition-colors">{t("sel.all")}</button>
                 {selTitles.size > 0 && (<>
-                  <span className="text-[11px] text-[var(--color-muted)]">{selTitles.size} {t("sel.count")}</span>
+                  <span className="text-[11px] text-[var(--color-muted)]">{t("sel.count", { count: selTitles.size })}</span>
                   <button onClick={() => bulkDelIdx("del_titles", selTitles, () => setSelTitles(new Set()))}
                     className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-[var(--color-surface-2)] hover:text-[#ef4444] transition-colors"><Trash2 size={12} />{t("sel.del")}</button>
                 </>)}
               </div>
             )}
             {(p.captions.titles || []).map((ti, i) => (
-              <div key={`${ti.start}_${ti.end}_${i}`} onClick={() => { setSelTitle(i); setRendered(false); setScrub(Math.max(ti.start, 0)); }}
+              <div key={`${ti.start}_${ti.end}_${i}`} onClick={() => { setSelTitle(i); setRendered(false); setScrub(Math.max(ti.start, 0)); }} data-title-idx={i}
+                data-mcp-context={`title ${i} ${fmtT(ti.start)}→${fmtT(ti.end)}: ${(ti.tgt || ti.text).slice(0, 60)}`}
                 className={`rounded-xl p-2.5 bg-[var(--color-surface-2)]/50 cursor-pointer transition-shadow ${selTitle === i ? "ring-1 ring-[var(--color-accent)]" : ""}`}>
                 <div className="flex items-center gap-2 mono text-[10px] text-[var(--color-muted)] mb-1.5">
                   <button onClick={() => setSelTitles((prev) => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; })}
+                    role="checkbox" aria-checked={selTitles.has(i)} {...named(t("a11y.selectTitle"))}
                     className={`grid place-items-center w-3.5 h-3.5 rounded-sm shrink-0 border transition-colors ${selTitles.has(i) ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-[var(--color-on-accent)]" : "border-[var(--color-border)] hover:border-[var(--color-accent)]"}`}>{selTitles.has(i) && <Check size={9} />}</button>
                   <span className="tabnum">{fmtT(ti.start)} → {fmtT(ti.end)}</span>
-                  <button onClick={(e) => { e.stopPropagation(); branch("title_del", { idx: i }); setSelTitle(null); }} className="ml-auto hover:text-[var(--color-warn)] transition-colors" title="delete"><Trash2 size={12} /></button>
+                  <button onClick={(e) => { e.stopPropagation(); branch("title_del", { idx: i }); setSelTitle(null); }} className="ml-auto hover:text-[var(--color-warn)] transition-colors" title={t("titles.delete")}><Trash2 size={12} /></button>
                 </div>
                 <input value={ti.tgt || ti.text} onChange={(e) => titleText(i, e.target.value)} onClick={(e) => e.stopPropagation()}
                   onBlur={async (e) => { burstRef.current = null; setRendered(false); try { setProject(await api.patch(pid, { op: "title", idx: i, text: e.target.value, tgt: e.target.value })); bump(); } catch (err) { await surfaceErr(err); } }}
@@ -3187,7 +3274,7 @@ function Editor() {
                 </div>
               </div>
             ))}
-            <button onClick={async () => { const fresh = await branch("title_add", { text: "Title", x: Math.round((p.meta.width || 0) * 0.15), y: Math.round((p.meta.height || 0) * 0.4), w: Math.round((p.meta.width || 0) * 0.7), h: Math.round((p.meta.height || 0) * 0.1), t0: Math.max(0, scrub - 0.5), t1: scrub + 3 }); if (fresh) setSelTitle((fresh.captions.titles || []).length - 1); }}
+            <button onClick={async () => { const fresh = await branch("title_add", { text: t("titles.defaultText"), x: Math.round((p.meta.width || 0) * 0.15), y: Math.round((p.meta.height || 0) * 0.4), w: Math.round((p.meta.width || 0) * 0.7), h: Math.round((p.meta.height || 0) * 0.1), t0: Math.max(0, scrub - 0.5), t1: scrub + 3 }); if (fresh) setSelTitle((fresh.captions.titles || []).length - 1); }}
               className="w-full inline-flex items-center justify-center gap-1.5 text-[12px] py-1.5 rounded-lg border border-dashed border-[var(--color-border)] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] transition-colors">
               <Plus size={13} /> {t("titles.add")}
             </button>
@@ -3201,7 +3288,7 @@ function Editor() {
           {(() => { const s = document.getElementById("editor-modes-slot"); return s ? createPortal(
           <div className="inline-flex rounded-lg bg-[var(--color-surface-2)] p-0.5 border border-[var(--color-border)] shrink-0">
             {MODES.map(([k, Ic]) => (
-              <button key={k} onClick={() => branch("mode", { value: k })} title={t(`mode.${k}_desc`)}
+              <button key={k} onClick={() => branch("mode", { value: k })} title={t(`mode.${k}_desc`)} data-mode={k} aria-pressed={mode === k}
                 className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[13px] transition-colors ${mode === k ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold" : "text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
                 <Ic size={15} /> <span className="hidden xl:inline">{t(`mode.${k}`)}</span>
               </button>
@@ -3224,22 +3311,17 @@ function Editor() {
           )}
           {!audioOnly && (
           <div className="flex items-center gap-1.5 shrink-0" title={t("comp.hint")}>
-            <select value={p.subs.mode} onChange={(e) => branch("subs_content", { value: e.target.value })}
-              className="bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-md px-2 py-1 text-[12px] text-[var(--color-text)] focus:border-[var(--color-accent)] focus:outline-none">
-              <option value="none">{t("comp.subsNone")}</option>
-              <option value="transcribe">{t("comp.subsOriginal")}</option>
-              <option value="translate">{t("comp.subsTranslate")}</option>
-            </select>
-            <button onClick={() => branch("subs_burn", { on: p.subs.burn === false })} title={t("comp.burnHint")}
+            <SubsContentControl subs={p.subs} primaryColor={ss.color || "#FFFFFF"} onPatch={branch} />
+            <button onClick={() => branch("subs_burn", { on: p.subs.burn === false })} title={t("comp.burnHint")} aria-pressed={p.subs.burn !== false}
               className={`px-2.5 py-1 rounded-md text-[12px] border transition-colors ${p.subs.burn !== false ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] border-transparent font-medium" : "border-[var(--color-border)] text-[var(--color-muted)]"}`}>
               {t("comp.burn")}
             </button>
           </div>
           )}
           <div className="flex-1" />
-          <button onClick={doUndo} disabled={!canUndo} title="Ctrl+Z"
+          <button onClick={doUndo} disabled={!canUndo} title={`${t("common.undo")} (Ctrl+Z)`}
             className="p-1.5 rounded-md text-[var(--color-muted)] hover:text-[var(--color-text)] disabled:opacity-30 transition-colors"><Undo2 size={16} /></button>
-          <button onClick={doRedo} disabled={!canRedo} title="Ctrl+Shift+Z"
+          <button onClick={doRedo} disabled={!canRedo} title={`${t("common.redo")} (Ctrl+Shift+Z)`}
             className="p-1.5 rounded-md text-[var(--color-muted)] hover:text-[var(--color-text)] disabled:opacity-30 transition-colors"><Redo2 size={16} /></button>
           {/* Экспорт-сплит: телепорт в TopBar (#editor-actions-slot). Основная кнопка — экспорт текущего; ▾ — «ещё языки». */}
           {(() => { const s = document.getElementById("editor-actions-slot"); return s ? createPortal(
@@ -3264,7 +3346,7 @@ function Editor() {
                     {exportLangs.map((code) => (
                       <span key={code} className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md bg-[color-mix(in_oklab,var(--color-accent)_16%,transparent)] text-[var(--color-accent)] text-[11px]">
                         {DUB_LANGS.find((l) => l.code === code)?.name ?? code}
-                        <button onClick={() => setExportLangs((xs) => xs.filter((x) => x !== code))} className="hover:text-[var(--color-text)]"><X size={11} /></button>
+                        <button onClick={() => setExportLangs((xs) => xs.filter((x) => x !== code))} {...named(t("a11y.removeLang"))} className="hover:text-[var(--color-text)]"><X size={11} /></button>
                       </span>
                     ))}
                   </div>
@@ -3328,7 +3410,7 @@ function Editor() {
           )}
         </div>
         <div className="flex items-center gap-3 px-4 py-2.5 border-t border-[var(--color-border)] bg-[var(--color-surface)]">
-          <button onClick={playFull} title={t("play.dub")}
+          <button onClick={playFull} title={t("play.dub")} aria-pressed={play}
             className={`shrink-0 p-1.5 rounded-md transition-colors ${play ? "bg-[var(--color-accent)] text-[var(--color-on-accent)]" : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
             {play ? <Pause size={15} /> : <Play size={15} />}
           </button>
@@ -3340,7 +3422,7 @@ function Editor() {
               onChange={(e) => { const v = parseFloat(e.target.value); setVol(v); if (audioRef.current) audioRef.current.volume = v; localStorage.setItem("dub-vol", String(v)); }}
               className="w-16 accent-[var(--color-accent)]" />
           </div>
-          <button onClick={() => setCompare((c) => !c)} title={t("compare.toggle")}
+          <button onClick={() => setCompare((c) => !c)} title={t("compare.toggle")} aria-pressed={compare}
             className={`shrink-0 p-1.5 rounded-md transition-colors ${compare ? "bg-[var(--color-accent)] text-[var(--color-on-accent)]" : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
             <Columns2 size={15} />
           </button>
@@ -3349,15 +3431,15 @@ function Editor() {
         </div>
       </main>
 
-      <aside data-kb-scroll className="border-l border-[var(--color-border)] overflow-y-auto p-4 bg-[var(--color-surface)] text-sm">
+      <aside data-kb-scroll data-style-panel="" className="border-l border-[var(--color-border)] overflow-y-auto p-4 bg-[var(--color-surface)] text-sm">
         <SectionLabel>{t("preset.title")}</SectionLabel>
         <div className="grid grid-cols-2 gap-1.5 mb-5 max-h-52 overflow-y-auto pr-1">
-          <button onClick={() => branch("preset", { name: "" })}
+          <button onClick={() => branch("preset", { name: "" })} data-preset="" aria-pressed={!p.captions.preset?.name}
             className={`text-[11px] px-2 py-1.5 rounded-lg border transition-colors ${!p.captions.preset?.name ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
             {t("preset.original")}
           </button>
           {Object.keys(presets).map((name) => (
-            <button key={name} onClick={() => branch("preset", { name })}
+            <button key={name} onClick={() => branch("preset", { name })} data-preset={name} aria-pressed={p.captions.preset?.name === name}
               className={`text-[11px] px-2 py-1.5 rounded-lg border truncate transition-colors ${p.captions.preset?.name === name ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)]" : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
               {name}
             </button>
@@ -3424,12 +3506,12 @@ function Editor() {
           </Row>
 
           {/* Подложка (плашка) */}
-          <Row label="Подложка">
+          <Row label={t("style.plate")}>
             <div className="flex items-center gap-2">
               <Toggle label="" on={!!ss.plate} onClick={() => branch("caption", { plate: !ss.plate })} />
               {ss.plate && (
                 <input type="color" value={ss.plate_color || "#000000"} onChange={(e) => branch("caption", { plate_color: e.target.value })}
-                  title="Цвет подложки" className="bg-transparent w-7 h-5 rounded cursor-pointer border border-[var(--color-border)]" />
+                  title={t("style.plateColor")} className="bg-transparent w-7 h-5 rounded cursor-pointer border border-[var(--color-border)]" />
               )}
             </div>
           </Row>
@@ -3463,7 +3545,7 @@ function Editor() {
           <div className="pt-3 border-t border-[var(--color-border)]/50 mt-4">
             <label className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[12px] font-semibold cursor-pointer hover:brightness-105 transition shadow-sm">
               <Upload size={14} />
-              <span>Импорт субтитров (.srt / .ass)</span>
+              <span>{t("subs.importPanel")}</span>
               <input type="file" accept=".srt,.ass,.vtt,.sub,.txt" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImportSubtitles(f); e.target.value = ""; }} className="hidden" />
             </label>
           </div>
@@ -3503,7 +3585,7 @@ function Editor() {
                       <button key={spk} disabled={spkVoiceBusy !== null}
                         onClick={async () => {
                           setSpkVoiceBusy(spk);
-                          try { const r = await api.speakerVoice(pid!, spk, `Спикер ${spk}`); if (r.ok) { setVoiceList(r.voices); branch("recast", { voice_mode: "voice", voice_name: r.name }); } } catch { /* ignore */ } finally { setSpkVoiceBusy(null); }
+                          try { const r = await makeSpeakerVoice(pid!, spk, t("voice.speakerName", { spk })); if (r) { setVoiceList(r.voices); branch("recast", { voice_mode: "voice", voice_name: r.name }); } else playSfx("error"); } finally { setSpkVoiceBusy(null); }
                         }}
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--color-border)] text-[12px] hover:border-[var(--color-accent)] disabled:opacity-40">
                         {spkVoiceBusy === spk ? <Loader2 size={12} className="animate-spin" /> : <AudioLines size={12} className="text-[var(--color-accent)]" />}SPK {spk}
@@ -3525,7 +3607,7 @@ function Editor() {
                 let fresh = p;
                 for (const id of targets) fresh = await api.patch(pid, { op: "segment", id, speaker: nid });
                 setProject(fresh); bump(); setSelSegs(new Set());
-                pushActivity(t("voice.addSpeakerDone", { spk: nid, n: targets.length }), "work");
+                pushActivity(t("voice.addSpeakerDone", { spk: nid, count: targets.length }), "work");
               } catch (err) { await surfaceErr(err); }
             }}
               title={t("voice.addSpeakerHint")}
@@ -3544,7 +3626,7 @@ function Editor() {
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
                   <Combobox value={cur} onChange={on}
                     options={voiceList.map((v) => ({ value: v, label: v }))}
-                    placeholder={voiceList.length ? t("voice.search") : "(пак не найден)"}
+                    placeholder={voiceList.length ? t("voice.search") : t("voice.packMissing")}
                     noResults={t("voice.noMatch")} allowClear className="flex-1 min-w-0" />
                   <button type="button" disabled={!cur} onClick={() => toggleVoicePreview(cur)} title={t("voice.preview")}
                     className="shrink-0 w-8 h-8 inline-flex items-center justify-center rounded-lg border border-[var(--color-border)] hover:border-[var(--color-accent)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
@@ -3615,7 +3697,11 @@ function VoicePackModal({ have, onVoices, onClose }: { have: string[]; onVoices:
   const [playing, setPlaying] = useState<string | null>(null);
   const [getting, setGetting] = useState<string | null>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
-  useEffect(() => { api.voicesCatalog().then((r) => setAll(r.voices)).catch(() => setAll([])); }, []);
+  const [problem, setProblem] = useState<string | null>(null);
+  const reason = (e: unknown) => (e instanceof ApiError ? e.detail || e.code : e instanceof Error ? e.message : String(e));
+  useEffect(() => {
+    api.voicesCatalog().then((r) => setAll(r.voices), (e: unknown) => { setAll([]); setProblem(t("voice.catalogFailed", { error: reason(e) })); });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => { audio.current?.pause(); }, []);
 
   const play = (url: string, name: string) => {
@@ -3626,7 +3712,14 @@ function VoicePackModal({ have, onVoices, onClose }: { have: string[]; onVoices:
   };
   const get = async (name: string) => {
     setGetting(name);
-    try { const r = await api.voicesGet(name); if (r.ok && r.voices) onVoices(r.voices); } catch { /* ignore */ } finally { setGetting(null); }
+    setProblem(null);
+    try {
+      const r = await api.voicesGet(name);
+      if (r.ok && r.voices) onVoices(r.voices);
+      else setProblem(t("voice.getFailed", { name, error: r.error ?? "" }));
+    } catch (e) {
+      setProblem(t("voice.getFailed", { name, error: reason(e) }));
+    } finally { setGetting(null); }
   };
   const pretty = (n: string) => n.replace(/^RU_(Female|Male)_/, "").replace(/_/g, " ");
   const filtered = (all || []).filter((v) =>
@@ -3636,10 +3729,10 @@ function VoicePackModal({ have, onVoices, onClose }: { have: string[]; onVoices:
 
   return (
     <div className="fixed inset-0 z-[60] grid place-items-center glass-scrim anim-fade" onClick={onClose}>
-      <div className="w-[min(94vw,560px)] h-[min(82vh,640px)] flex flex-col rounded-xl glass-panel anim-pop p-5" onClick={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="voicepack-title" className="w-[min(94vw,560px)] h-[min(82vh,640px)] flex flex-col rounded-xl glass-panel anim-pop p-5" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-3">
-          <span className="font-semibold">{t("voice.packTitle")} {all && <span className="mono text-[11px] text-[var(--color-muted)]">{filtered.length}/{all.length}</span>}</span>
-          <button onClick={onClose} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={16} /></button>
+          <span id="voicepack-title" className="font-semibold">{t("voice.packTitle")} {all && <span className="mono text-[11px] text-[var(--color-muted)]">{filtered.length}/{all.length}</span>}</span>
+          <button onClick={onClose} {...named(t("a11y.close"))} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><X size={16} /></button>
         </div>
         <div className="flex items-center gap-2 mb-3">
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("voice.search")} autoFocus
@@ -3651,6 +3744,7 @@ function VoicePackModal({ have, onVoices, onClose }: { have: string[]; onVoices:
             ))}
           </div>
         </div>
+        {problem && <div role="alert" className="mb-2 text-[12px] text-[var(--color-warn)] break-words">{problem}</div>}
         <div className="flex-1 overflow-y-auto -mr-2 pr-2 space-y-1">
           {all === null ? <div className="mono text-[11px] text-[var(--color-muted)]">…</div> :
            filtered.slice(0, 300).map((v) => {
@@ -3755,7 +3849,7 @@ function VoiceRecorder({ voiceList, onVoices, onDone }: { voiceList: string[]; o
   const lvlTimer = useRef<number | null>(null);
 
   const start = async () => {
-    const auto = `Голос ${voiceList.length + 1}`; // авто-имя, переименовать можно после
+    const auto = t("voice.autoName", { n: voiceList.length + 1 }); // авто-имя, переименовать можно после
     const r = await api.recordStart(auto).catch(() => null);
     if (!r || !r.ok) return;
     setRec(true);
@@ -3853,11 +3947,11 @@ function FilesPanel() {
           <div onPointerDown={fl.onDragStart}
             className={`flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] ${fl.dragging ? "cursor-grabbing" : "cursor-grab"}`}>
             <span className="flex items-center gap-1.5 mono text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted)]"><Move size={12} />{t("files.title")}</span>
-            <button onClick={fl.dock} title="Вернуть в шапку" className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><Minimize2 size={14} /></button>
+            <button onClick={fl.dock} title={t("float.dock")} className="text-[var(--color-muted)] hover:text-[var(--color-text)]"><Minimize2 size={14} /></button>
           </div>
           <div className="max-h-[52vh] overflow-y-auto p-2 space-y-1.5">
             {exports.map((e) => (
-              <div key={e.id} className="rounded-lg bg-[var(--color-surface-2)]/60 p-2.5">
+              <div key={e.id} data-mcp-context={`export ${e.name}: ${e.status}`} className="rounded-lg bg-[var(--color-surface-2)]/60 p-2.5">
                 <div className="flex items-center gap-2">
                   {e.status === "rendering" ? <Loader2 size={14} className="animate-spin text-[var(--color-accent)] shrink-0" />
                     : e.status === "error" ? <span className="text-[var(--color-warn)] shrink-0 font-bold">!</span>
@@ -3893,70 +3987,61 @@ function FilesPanel() {
   );
 }
 
-// human byte size (GB/MB) for the setup component list
-function fmtBytes(n: number) {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(0)} MB`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
-  return `${n} B`;
-}
-
 // Семейства квантов: разные варианты ОДНОЙ модели (выбор одного, «ИЛИ»). Явная карта по id — надёжнее
 // префикса (higgs — квант TTS, higgs-engine — движок, это РАЗНЫЕ вещи). Остальные компоненты — одиночные.
 const QUANT_GROUP: Record<string, string> = {
   higgs: "higgs", "higgs-q6_k": "higgs", "higgs-q4_k_m": "higgs",
   gemma: "gemma", "gemma-q5_0": "gemma", "gemma-q6_k": "gemma", "gemma-q8_0": "gemma",
-  parakeet: "parakeet", "parakeet-fp32": "parakeet",
+  parakeet: "parakeet", "parakeet-fp32": "parakeet", "parakeet-ultra": "parakeet",
   roformer: "roformer", "roformer-q5": "roformer", "roformer-q4": "roformer",
 };
 
 // ── «Первый запуск»: панель автозакачки компонентов (модели/движки/системные библиотеки) ──
+// По умолчанию отмечено всё недостающее скачиваемое, кроме опциональных квантов (их качают вручную).
+const preselect = (s: SetupStatus) =>
+  new Set(s.components.filter((c) => c.delivery === "download" && !c.installed && c.requirement !== "optional").map((c) => c.id));
+
 function FirstRun() {
   const { t } = useTranslation();
+  const errText = useDownloadErrorText();
   const setStage = useStore((s) => s.setStage);
-  const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [sel, setSel] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-  const [prog, setProg] = useState<{ pct: Record<string, number>; overall: number; msg: string } | null>(null); // pct[componentId] -> % (параллельные бары)
+  // Выбор пользователя; null — ещё не трогал, берём преселект из текущего статуса (опрос его не сбрасывает).
+  const [picked, setPicked] = useState<Set<string> | null>(null);
   const [err, setErr] = useState<string | null>(null);
-
-  const refresh = async () => {
-    const s = await api.setupStatus();
-    setStatus(s);
-    // preselect every missing downloadable component (кроме опциональных квантов — их качают вручную)
-    setSel(new Set(s.components.filter((c) => c.delivery === "download" && !c.installed && c.requirement !== "optional").map((c) => c.id)));
-    return s;
+  // Закачка идёт фоном на сервере: прогресс — опросом статуса, переживает перезагрузку окна и приложения.
+  const onSettled = (job: DownloadJob, s: SetupStatus) => {
+    if (job.status === "completed") useStore.getState().pushActivity(t(s.ready ? "setup.ready" : "setup.done"), "done");
+    if (job.status === "completed" && s.ready) { setStage("empty"); playSfx("success"); }   // всё скачано -> сразу на стартовый экран
+    else if (job.status === "failed") useStore.getState().pushActivity(`${errText(job.errorCode)} · ${job.error ?? ""}`, "error");
   };
-  useEffect(() => { refresh().catch((e) => setErr(String(e))); }, []);
+  const { status, error: statusErr, refresh, adopt, downloading: busy } = useSetupStatus(onSettled);
+  const sel = picked ?? (status ? preselect(status) : new Set<string>());
+  const setSel = (f: (prev: Set<string>) => Set<string>) => setPicked(f(sel));
+  const active = status?.active ?? null;
+  const partPct = (id: string): number | null => {
+    if (!busy || !active) return null;
+    const p = active.parts.find((x) => x.id === id);
+    return p && p.total > 0 ? (p.done / p.total) * 100 : active.ids.includes(id) ? 0 : null;
+  };
 
   async function download(ids: string[]) {
     if (ids.length === 0 || busy) return;
-    setBusy(true); setErr(null); setProg({ pct: {}, overall: 0, msg: "" });
+    setErr(null);
     try {
-      const { job_id } = await api.setupDownload(ids);
-      await api.watchJob(job_id, (e) => {
-        if (e.type === "progress") {
-          const m: Record<string, number> = {};
-          (e.parts || []).forEach((p) => { m[p.component] = p.pct; });   // бар на каждый компонент
-          setProg({ pct: m, overall: e.pct ?? 0, msg: e.msg || "" });
-          useStore.getState().pushActivity(e.msg || "", "work");         // в общий журнал шапки
-        }
-      });
-      const s = await refresh();
-      if (s.ready) { setStage("empty"); playSfx("success"); }   // всё скачано -> сразу на стартовый экран, без ручного «Продолжить»
+      await api.setupDownload(ids);
+      await refresh();
     } catch (e) {
-      // SSE-стрим мог оборваться на длинной (часы, десятки ГБ) скачке, хотя джоба ЗАВЕРШИЛАСЬ и всё встало
-      // на диск -> перепроверяем реальный статус: если готово, всё равно уходим на стартовый экран (иначе
-      // экран «Первого запуска» завис бы на 100%, хотя всё скачано — баг-репорт).
-      try { const s = await refresh(); if (s.ready) { setStage("empty"); playSfx("success"); return; } } catch { /* refresh тоже упал */ }
-      setErr(String(e)); useStore.getState().pushActivity(String(e), "error");
-    } finally {
-      setBusy(false); setProg(null);
+      const msg = e instanceof SetupError ? `${errText(e.code)} · ${e.detail}` : String(e);
+      setErr(msg); useStore.getState().pushActivity(msg, "error");
     }
   }
+  const pause = () => { api.setupCancel().then(() => refresh()).catch((e) => setErr(String(e))); };
 
-  const toggle = (id: string) => setSel((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const selectedBytes = status ? status.components.filter((c) => sel.has(c.id)).reduce((a, c) => a + Math.max(0, c.size - c.bytesOnDisk), 0) : 0;
+  const toggle = (id: string) => setSel((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const selectedComps = status ? status.components.filter((c) => sel.has(c.id)) : [];
+  const selectedBytes = selectedComps.reduce((a, c) => a + Math.max(0, c.size - c.bytesOnDisk), 0);
+  const selectedSpace = selectedComps.reduce((a, c) => a + c.spaceNeeded, 0);
+  const noSpace = status?.freeBytes != null && selectedSpace > status.freeBytes;
 
   const reqLabel = (r: string) => (r === "required" ? t("setup.required") : t("setup.recommended"));
   const deliveryNote = (c: SetupComponent) =>
@@ -3995,6 +4080,18 @@ function FirstRun() {
           </div>
         )}
 
+        {statusErr && (
+          <div className="mt-4 rounded-lg border border-[var(--color-warn)]/40 px-3 py-2 mono text-[11px] text-[var(--color-warn)] break-words">{statusErr}</div>
+        )}
+
+        {status && (
+          <div className="mt-4 space-y-2">
+            <GpuNotice gpu={status.gpu} driverUrl={status.components.find((c) => c.delivery === "external")?.externalUrl} />
+            {active && active.status !== "completed" && <DownloadProgress job={active} onPause={pause} onResume={(ids) => { download(ids); }} />}
+            <ModelsFolder status={status} need={selectedSpace} />
+          </div>
+        )}
+
         <div className="mt-4 rounded-lg border border-[var(--color-accent)]/30 bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)] px-3.5 py-2.5 text-[12.5px] leading-snug text-[var(--color-text)]">
           <span className="font-semibold text-[var(--color-accent)]">{t("setup.pickNoteTitle")}</span> {t("setup.pickNote")}
         </div>
@@ -4002,9 +4099,9 @@ function FirstRun() {
         {/* Пресет под железо + ключ OpenRouter: выбрал «Облако» → облачные движки, локальные модели ниже
             становятся необязательными (не тянешь лишние гигабайты). Refresh обновляет чеклист под выбор. */}
         <div className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 py-3 space-y-2">
-          <PresetsSection onApplied={() => { refresh().catch(() => {}); }} />
-          <OpenRouterKey onSaved={() => { refresh().catch(() => {}); }} />
-          <div className="text-[11px] text-[var(--color-muted)] leading-snug">Выбрал <span className="text-[var(--color-text)]">Облако</span> и ввёл ключ? Тяжёлые локальные модели ниже можно не качать — перевод и озвучка пойдут через OpenRouter.</div>
+          <PresetsSection onApplied={() => { setPicked(null); refresh().catch(() => {}); }} />
+          <OpenRouterKey onSaved={() => { setPicked(null); refresh().catch(() => {}); }} />
+          <div className="text-[11px] text-[var(--color-muted)] leading-snug"><Trans i18nKey="setup.cloudHint" components={{ b: <span className="text-[var(--color-text)]" /> }} /></div>
         </div>
 
         <div className="mt-4 space-y-2">
@@ -4021,7 +4118,7 @@ function FirstRun() {
                     {members.map((c) => {
                       const isDefault = c.requirement !== "optional";
                       const checked = sel.has(c.id);
-                      const active = !!prog && prog.pct[c.id] != null;
+                      const pct = partPct(c.id);
                       return (
                         <label key={c.id} className={`flex items-center gap-2.5 rounded-lg px-2 py-1.5 ${c.installed ? "" : "cursor-pointer hover:bg-[var(--color-surface-2)]"} ${checked && !c.installed ? "bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)]" : ""}`}>
                           {c.installed
@@ -4035,7 +4132,8 @@ function FirstRun() {
                                 : <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-surface-2)] text-[var(--color-muted)] uppercase tracking-wide shrink-0">{t("setup.alt")}</span>}
                               {c.installed && <span className="text-[10px] text-[var(--color-accent)] shrink-0">{t("setup.installed")}</span>}
                             </div>
-                            {active && <div className="mt-1 h-1 rounded-full bg-[var(--color-surface-2)] overflow-hidden"><div className="h-full bg-[var(--color-accent)]" style={{ width: `${prog!.pct[c.id] ?? 0}%` }} /></div>}
+                            {ASR_VARIANT_I18N[c.id] && <div className="text-[11px] leading-snug text-[var(--color-muted)]">{t(ASR_VARIANT_I18N[c.id].hint)}</div>}
+                            {pct != null && <div className="mt-1 h-1 rounded-full bg-[var(--color-surface-2)] overflow-hidden"><div className="h-full bg-[var(--color-accent)]" style={{ width: `${pct}%` }} /></div>}
                           </div>
                           <span className="mono text-[11px] text-[var(--color-muted)] shrink-0">{fmtBytes(c.size)}{c.vram ? ` · ${fmtBytes(c.vram)} VRAM` : ""}</span>
                         </label>
@@ -4047,7 +4145,7 @@ function FirstRun() {
               );
             }
             const c = row.c;
-            const active = !!prog && prog.pct[c.id] != null;
+            const pct = partPct(c.id);
             const canPick = c.delivery === "download" && !c.installed;
             return (
               <div key={c.id} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 py-3">
@@ -4066,9 +4164,10 @@ function FirstRun() {
                       <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide ${c.requirement === "required" ? "bg-[color-mix(in_oklab,var(--color-accent)_16%,transparent)] text-[var(--color-accent)]" : "bg-[var(--color-surface-2)] text-[var(--color-muted)]"}`}>{reqLabel(c.requirement)}</span>
                     </div>
                     <div className="text-[12px] text-[var(--color-muted)] truncate">{c.purpose}</div>
-                    {active && (
+                    {c.delivery === "external" && c.detail && <div className="mono text-[10.5px] text-[var(--color-muted)] truncate">{c.detail}</div>}
+                    {pct != null && (
                       <div className="mt-1.5 h-1.5 rounded-full bg-[var(--color-surface-2)] overflow-hidden">
-                        <div className="h-full bg-[var(--color-accent)] transition-[width] duration-200" style={{ width: `${prog!.pct[c.id] ?? 0}%` }} />
+                        <div className="h-full bg-[var(--color-accent)] transition-[width] duration-200" style={{ width: `${pct}%` }} />
                       </div>
                     )}
                   </div>
@@ -4098,19 +4197,20 @@ function FirstRun() {
 
         <div className="mt-6 flex items-center gap-3">
           {status && !status.ready && (
-            <button onClick={() => download([...sel])} disabled={busy || sel.size === 0}
+            <button onClick={() => download(selectedComps.filter((c) => c.delivery === "download" && !c.installed).map((c) => c.id))} disabled={busy || sel.size === 0 || noSpace} title={noSpace ? t("downloads.noSpace", { need: fmtBytes(selectedSpace), free: fmtBytes(status.freeBytes ?? 0) }) : undefined}
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-sm font-semibold disabled:opacity-40 hover:brightness-105">
               {busy ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
               {t("setup.download")} {selectedBytes > 0 && <span className="opacity-80">· {fmtBytes(selectedBytes)}</span>}
             </button>
           )}
-          {busy && (
-            <button onClick={() => api.setupCancel().catch(() => {})}
-              className="inline-flex items-center gap-1.5 px-3 py-2.5 rounded-lg border border-[var(--color-border)] text-sm text-[var(--color-muted)] hover:text-[var(--color-text)]">
-              <Square size={14} />{t("setup.cancel")}</button>
-          )}
           {!busy && (
-            <button onClick={async () => { try { const r = await api.setupBrowse(); if (r.picked) { setStatus(r.status); setSel(new Set(r.status.components.filter((c) => c.delivery === "download" && !c.installed && c.requirement !== "optional").map((c) => c.id))); } } catch { /* ignore */ } }}
+            <button onClick={async () => {
+                try {
+                  const r = await api.setupBrowse();
+                  if (r.picked) { adopt(r.status); setPicked(null); }
+                  if (r.errors.length > 0) setErr(`${t("downloads.importErrors")} · ${r.errors.join("; ")}`);
+                } catch (e) { setErr(e instanceof SetupError ? `${errText(e.code)} · ${e.detail}` : String(e)); }
+              }}
               className="inline-flex items-center gap-1.5 px-3 py-2.5 rounded-lg border border-dashed border-[var(--color-border)] text-sm text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] transition-colors">
               <FolderDown size={14} />{t("settings.browseFolder")}</button>
           )}
@@ -4119,7 +4219,6 @@ function FirstRun() {
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-sm font-semibold hover:brightness-105">
               <Check size={16} />{t("setup.continue")}</button>
           )}
-          {busy && prog && <span className="mono text-[11px] text-[var(--color-muted)] truncate">{prog.msg} · {prog.overall.toFixed(0)}%</span>}
         </div>
       </motion.div>
     </div>
@@ -4164,15 +4263,16 @@ function BatchView() {
         const fSubs = ao ? "none" : eSubs;
         const fBurn = ao ? false : audio === "transcribe" ? true : burn;
         // Стиль перевода (#112) — параметром analyze (patch до analyze невозможен: project.json ещё нет).
-        const { job_id } = await api.analyze(project_id, tgt, eMode, src, fSubs, eRewrite, fBurn, ao ? false : detectText, false, trStyle);
-        await api.watchJob(job_id, (e) => { if (e.type === "progress") upd({ pct: e.pct ?? 0, detail: e.msg || undefined }); });
-        if (audio === "voiceover") await api.patch(project_id, { op: "voiceover_gain", gain_db: voGain });   // громкость оригинала со старта -> общий для всех проектов батча
-        // Сохранить оригинальную дорожку (#113): 2-я дорожка при mux. Только dub/voiceover, не аудио-файл.
-        if (keepOrig && !ao && doRender) await api.patch(project_id, { op: "keep_original", keep: true, container });
-        // Голоса из библиотеки (#114): раздать слоты ПЕРЕД render каждого проекта. Ошибка не роняет батч (клон-фолбэк).
-        if (voiceSrc === "library" && doRender && (slotsM.length || slotsF.length)) {
-          try { await api.voiceSlots(project_id, { male: slotsM, female: slotsF }); } catch { /* фолбэк на клон */ }
-        }
+        // Громкость оригинала, 2-я дорожка (#113) и голоса из библиотеки (#114) сервер кладёт на проект в
+        // конце анализа (и повторяет при «Продолжить»); ненайденные голоса — строкой в журнале, спикеры на клоне.
+        const post: AnalyzePost = {
+          voGain: audio === "voiceover" ? voGain : undefined,
+          keepOriginal: keepOrig && !ao && doRender ? { container } : undefined,
+          voiceSlots: voiceSrc === "library" && doRender && (slotsM.length || slotsF.length) ? { male: slotsM, female: slotsF } : undefined,
+        };
+        const { job_id } = await api.analyze(project_id, tgt, eMode, src, fSubs, eRewrite, fBurn, ao ? false : detectText, false, trStyle, false, "", "auto", false, post);
+        const res = await api.watchJob(job_id, (e) => { if (e.type === "progress") upd({ pct: e.pct ?? 0, detail: e.msg || undefined }); });
+        reportVoiceSlots((res as AnalyzeResult).post.voice_slots);
         if (doRender) {
           upd({ status: "rendering", pct: 0 });
           const r = await api.render(project_id);
@@ -4214,7 +4314,7 @@ function BatchView() {
             <button onClick={() => setStage("empty")} className="text-[13px] text-[var(--color-muted)] hover:text-[var(--color-text)] inline-flex items-center gap-1"><ArrowRight size={14} className="rotate-180" />{t("batch.back")}</button>
             <span className="text-[15px] font-semibold flex items-center gap-2"><FolderDown size={16} className="text-[var(--color-accent)]" />{t("batch.title")}</span>
           </div>
-          <span className="text-[12px] text-[var(--color-muted)]">{doneN}/{items.length} · {items.length} {t("batch.files")}</span>
+          <span className="text-[12px] text-[var(--color-muted)]">{doneN}/{items.length} · {t("batch.filesCount", { count: items.length })}</span>
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] divide-y divide-[var(--color-border)]">
@@ -4328,9 +4428,9 @@ function MultiLangView() {
             <button onClick={() => setStage(srcPid ? "editor" : "empty")} className="text-[13px] text-[var(--color-muted)] hover:text-[var(--color-text)] inline-flex items-center gap-1"><ArrowRight size={14} className="rotate-180" />{t("batch.back")}</button>
             <span className="text-[15px] font-semibold flex items-center gap-2"><Languages size={16} className="text-[var(--color-accent)]" />{t("multilang.title")}</span>
           </div>
-          <span className="text-[12px] text-[var(--color-muted)]">{doneN}/{items.length} · {items.length} {t("multilang.langsWord")}</span>
+          <span className="text-[12px] text-[var(--color-muted)]">{doneN}/{items.length} · {t("multilang.langsCount", { count: items.length })}</span>
         </div>
-        <div className="text-[12px] text-[var(--color-muted)] mb-2 truncate">{sourceName} → {items.length} {t("multilang.langsWord")}</div>
+        <div className="text-[12px] text-[var(--color-muted)] mb-2 truncate">{sourceName} → {t("multilang.langsCount", { count: items.length })}</div>
 
         <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] divide-y divide-[var(--color-border)]">
           {items.map((it, i) => (
@@ -4368,7 +4468,8 @@ function MultiLangView() {
 
 // Режим «Транскрипт»: диаризованный транскрипт (analyze mode=transcribe) + создание голосов из спикеров
 // (speaker-voice, ref-текст авто-транскрибируется на рендере) + экспорт .srt/.txt. Отдельный экран, не Editor.
-const SPK_PALETTE = ["#7fb3ff", "#f79bd3", "#c6f24e", "#ffb454"];   // до 4 спикеров
+// Цвет на каждого из 8 спикеров, которых различает диаризация (Nemotron 3 Diarization).
+const SPK_PALETTE = ["#7fb3ff", "#f79bd3", "#c6f24e", "#ffb454", "#b79cff", "#5fe0c8", "#ff8a7a", "#f2e15c"];
 
 function TranscriptView() {
   const { t, i18n } = useTranslation();
@@ -4401,12 +4502,7 @@ function TranscriptView() {
     setStage("analyzing");
     try {
       const { job_id } = await api.retranslate(pid, tgt, mode);
-      await api.watchJob(job_id, (e) => {
-        if (e.type === "progress") {
-          if (e.msg) useStore.getState().pushActivity(e.msg, "work");
-          setProgress(e.stage || "", e.msg || "", e.pct ?? null);
-        }
-      });
+      await watchTracked(pid, "retranslate", job_id);
       const updated = await api.getProject(pid);
       if (updated.mode === "transcribe") {
         const patched = await api.patch(pid, { mode });
@@ -4415,13 +4511,17 @@ function TranscriptView() {
         setProject(updated);
       }
       setStage("editor");
-    } catch {
-      try {
-        const patched = await api.patch(pid, { mode });
-        setProject(patched);
-      } catch {
-        setProject({ ...p, mode });
+    } catch (err) {
+      if (err instanceof JobCancelledError) {                        // перевод отменили на экране анализа: транскрипт остаётся транскриптом
+        useStore.getState().pushActivity(t("jobs.cancelledKind", { kind: t("jobs.kind.retranslate") }), "done");
+        try { setProject(await api.getProject(pid)); }
+        catch (e) { useStore.getState().pushActivity(String(e), "error"); }
+        setStage("editor");
+        return;
       }
+      useStore.getState().pushActivity(err instanceof Error ? err.message : String(err), "error");
+      try { setProject(await api.getProject(pid)); }
+      catch (e) { useStore.getState().pushActivity(String(e), "error"); }
       setStage("editor");
     } finally { setReanalyzing(false); }
   }
@@ -4449,6 +4549,8 @@ function TranscriptView() {
     togglePlay: () => setPlay((x) => !x), previewRef, setHelp: setShowHelp,
     blocked: () => document.querySelector(".glass-scrim") != null,
   });
+  useTranscriptBridge({ pid, scrub, playing: play, seek, play: () => setPlay(true), pause: () => setPlay(false), switchMode: (k) => void switchMode(k), switching: reanalyzing });
+  useProjectSync(pid, () => null);
   // пословные тайминги ASR (лежат в extra.words) — для караоке внутри активной фразы
   const wordsOf = (s: Project["segments"][number]) =>
     (((s as unknown as { extra?: { words?: Array<{ word: string; start: number; end: number }> } }).extra?.words) || []);
@@ -4465,13 +4567,18 @@ function TranscriptView() {
 
   async function makeVoice(spk: string) {
     setBusy(spk);
-    try { const r = await api.speakerVoice(pid, spk, `${t("transcribe.speaker")} ${spk}`); if (r.ok) setMade((m) => ({ ...m, [spk]: r.name })); }
-    catch { /* ignore */ } finally { setBusy(null); }
+    try { const r = await makeSpeakerVoice(pid, spk, `${t("transcribe.speaker")} ${spk}`); if (r) setMade((m) => ({ ...m, [spk]: r.name })); }
+    finally { setBusy(null); }
   }
   async function makeAll() {
     setBusy("__all__");
-    try { for (const spk of speakers) { const r = await api.speakerVoice(pid, spk, `${t("transcribe.speaker")} ${spk}`); if (r.ok) setMade((m) => ({ ...m, [spk]: r.name })); } }
-    catch { /* ignore */ } finally { setBusy(null); }
+    try {
+      for (const spk of speakers) {
+        const r = await makeSpeakerVoice(pid, spk, `${t("transcribe.speaker")} ${spk}`);
+        if (!r) break;
+        setMade((m) => ({ ...m, [spk]: r.name }));
+      }
+    } finally { setBusy(null); }
   }
 
   async function dl(name: string, text: string) {
@@ -4497,7 +4604,7 @@ function TranscriptView() {
       {(() => { const el = document.getElementById("editor-modes-slot"); return el ? createPortal(
         <div className="inline-flex rounded-lg bg-[var(--color-surface-2)] p-0.5 border border-[var(--color-border)] shrink-0">
           {TR_MODES.map(([k, Ic]) => (
-            <button key={k} onClick={() => switchMode(k)} title={t(`mode.${k}_desc`)} disabled={reanalyzing}
+            <button key={k} onClick={() => switchMode(k)} title={t(`mode.${k}_desc`)} disabled={reanalyzing} data-mode={k} aria-pressed={k === "transcribe"}
               className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[13px] transition-colors disabled:opacity-50 disabled:cursor-default ${k === "transcribe" ? "bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold" : "text-[var(--color-muted)] hover:text-[var(--color-text)]"}`}>
               <Ic size={15} /> <span className="hidden xl:inline">{t(`mode.${k}`)}</span>
             </button>
@@ -4509,7 +4616,7 @@ function TranscriptView() {
             <button onClick={() => setStage("empty")} title={t("batch.back")} className="shrink-0 text-[var(--color-muted)] hover:text-[var(--color-text)] inline-flex items-center gap-1"><ArrowRight size={14} className="rotate-180" /><span className="hidden sm:inline text-[12px]">{t("batch.back")}</span></button>
             <FileText size={15} className="text-[var(--color-accent)] shrink-0" /><span className="truncate">{p.meta.video ? baseName(p.meta.video) : t("transcribe.title")}</span>
           </span>
-          <span className="text-[11px] text-[var(--color-muted)] shrink-0">{speakers.length} {t("transcribe.speakersN")}</span>
+          <span className="text-[11px] text-[var(--color-muted)] shrink-0">{t("transcribe.speakersCount", { count: speakers.length })}</span>
         </div>
         <div className="px-3 pt-2 space-y-2">
           <div ref={previewRef} className="fs-preview relative rounded-lg overflow-hidden bg-black/50 border border-[var(--color-border)] grid place-items-center max-h-[34vh]">
@@ -4529,10 +4636,12 @@ function TranscriptView() {
             const active = s.id === activeId;
             const words = active ? wordsOf(s) : [];
             return (
-              <div key={s.id} ref={active ? activeRef : undefined} onClick={() => seek(s.start)}
+              <div key={s.id} ref={active ? activeRef : undefined} onClick={() => seek(s.start)} data-seg-id={s.id}
+                data-mcp-context={`segment ${s.id} ${fmt(s.start)} SPK ${spk}: ${(s.src_text || "").trim().slice(0, 60)}`}
                 className={`flex gap-2 items-start cursor-pointer rounded px-1.5 -mx-1.5 py-0.5 transition-colors ${active ? "bg-[color-mix(in_oklab,var(--color-accent)_16%,transparent)]" : "hover:bg-[var(--color-surface-2)]"}`}>
                 <span className="mono text-[9px] px-1.5 py-px rounded shrink-0" style={{ background: colorOf(spk), color: "#0b0c0e" }}>SPK {spk}</span>
                 <span className="mono text-[9px] text-[var(--color-muted)] pt-0.5 shrink-0 w-8">{fmt(s.start)}</span>
+                <FitBadge fit={s.fit} />
                 <span className="text-[13px] leading-snug">
                   {active && words.length > 0
                     ? words.map((w, i) => (
@@ -4575,6 +4684,7 @@ function TranscriptView() {
           {busy === "__all__" ? <Loader2 size={15} className="animate-spin" /> : <Users size={15} />}{t("transcribe.makeAll")}
         </button>
         <div className="flex gap-2">
+          <GlossaryButton pid={pid} project={p} wide />
           <button onClick={exportSrt} className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[#37414d] text-[12px] hover:border-[var(--color-accent)]"><Download size={13} />{t("transcribe.exportSrt")}</button>
           <button onClick={exportTxt} className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[#37414d] text-[12px] hover:border-[var(--color-accent)]"><FileText size={13} />{t("transcribe.exportTxt")}</button>
         </div>
@@ -4585,46 +4695,55 @@ function TranscriptView() {
 }
 
 export default function App() {
+  const { t } = useTranslation();
   const stage = useStore((s) => s.stage);                 // only re-route on stage change (not on every store write)
   const projMode = useStore((s) => (s.project as Project | null)?.mode);   // transcribe -> отдельный экран
   const setPid = useStore((s) => s.setPid);
   const setProject = useStore((s) => s.setProject);
   const setStage = useStore((s) => s.setStage);
+  const pid = useStore((s) => s.pid);
   const [cap, setCap] = useState("");
+  const [capOffline, setCapOffline] = useState(false);
   useEffect(() => { api.capabilities().then((c) => {
     const base = (p?: string) => p ? (p.split(/[\\/]/).pop() || p).replace(/\.(gguf|onnx|bin|pt|safetensors)$/i, "") : "";
     // ASR в футере — из ФАКТИЧЕСКОГО выбора (active.json), не из статичного имени Parakeet-модели:
     // юзер переключил движок в «Моделях» -> строка обязана показать то, чем реально пойдёт прогон.
     const sel = (c as { selection?: Record<string, string> }).selection ?? {};
-    const asrLabel = sel.asr_engine === "whisper" ? `whisper ${sel.whisper_model || "auto"}` : c.asr_model;
+    const asrLabel = sel.asr_engine === "whisper" ? `whisper ${sel.whisper_model || "auto"}` : `${c.asr_model}${sel.asr ? ` ${sel.asr}` : ""}`;
     const parts = [c.device, `ASR ${asrLabel}`];
     if (c.models?.llm) parts.push(`MT+vision ${base(c.models.llm)}`);
     if (c.models?.tts) parts.push(`TTS ${c.models.tts}${c.tts_quant ? ` ${c.tts_quant}` : ""}`);
-    parts.push("sep BSRoformer", "diar Sortformer", "OCR PP-OCR");   // фикс-движки пайплайна
+    parts.push("sep BSRoformer", "diar Nemotron 3", "OCR PP-OCR");   // фикс-движки пайплайна
     setCap(parts.join(" · "));
-  }).catch(() => setCap("backend offline")); }, []);
+  }).catch(() => setCapOffline(true)); }, []);
   // boot: resume ?pid=… project, else gate on /setup/status — missing required components -> «first run».
+  // Сетевая ошибка (fetch отклонён TypeError) = сервиса нет на порту -> экран «сервер не отвечает»; HTTP-ошибка
+  // значит, что сервис ответил, и ведёт на главный экран.
   useEffect(() => {
+    const unreachable = (e: unknown) => e instanceof TypeError;
     const pid = new URLSearchParams(location.search).get("pid");
-    if (pid) { api.getProject(pid).then((p) => { setPid(pid); setProject(p); setStage("editor"); }).catch(() => setStage("empty")); return; }
+    if (pid) { api.getProject(pid).then((p) => { setPid(pid); setProject(p); setStage("editor"); }).catch((e: unknown) => setStage(unreachable(e) ? "offline" : "empty")); return; }
     api.setupStatus()
       .then((s) => setStage(s.ready ? "empty" : "setup"))
-      .catch(() => setStage("empty"));   // backend offline / older server without /setup -> fall through to hero
+      .catch((e: unknown) => setStage(unreachable(e) ? "offline" : "empty"));   // older server without /setup -> fall through to hero
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="h-full flex flex-col">
       <TopBar />
       {stage === "boot" && <div className="flex-1 grid place-items-center"><Loader2 size={22} className="animate-spin text-[var(--color-muted)]" /></div>}
+      {stage === "offline" && <ServerOffline />}
       {stage === "setup" && <FirstRun />}
       {stage === "empty" && <DropZone />}
       {stage === "analyzing" && <AnalyzeProgress />}
       {stage === "batch" && <BatchView />}
       {stage === "multilang" && <MultiLangView />}
       {stage === "editor" && (projMode === "transcribe" ? <TranscriptView /> : <Editor />)}
+      {stage === "editor" && pid && <ProjectJobBar key={pid} pid={pid} />}
       <footer className="mono h-6 px-4 flex items-center gap-2 text-[10px] text-[var(--color-muted)] border-t border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] shrink-0" /><span className="truncate" title={cap}>{cap}</span>
+        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] shrink-0" /><span className="truncate" title={capOffline ? t("status.backendOffline") : cap}>{capOffline ? t("status.backendOffline") : cap}</span>
       </footer>
       <FilesPanel />
+      <BridgeHost />
       {(stage === "editor" || stage === "analyzing" || stage === "multilang" || stage === "batch") && <ResourceMonitor />}
     </div>
   );

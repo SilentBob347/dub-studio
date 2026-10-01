@@ -13,6 +13,8 @@ python/
 node/
 ffmpeg/
 models/
+# хранилище секретов портативной раскладки (ключ OpenRouter, пароль прокси) — никогда в репозиторий
+secrets/
 voices/
 downloads/
 temp/
@@ -24,7 +26,6 @@ run-dev.bat
 # Rust-порт (crates/): артефакты сборки; веса/бинари движков не коммитим
 /target/
 target/
-Cargo.lock
 *.dll
 
 # llama.cpp prebuilt-бинари (сайдкар llama-server) — негитуемо, кладёт раунд 3
@@ -34,7 +35,7 @@ tools/
 # Tauri auto-generated schemas
 desktop/src-tauri/gen/
 
-# Tauri bundle staging — генерируется перед `npx tauri build` (dub-server.exe, frontend/dist,
+# Tauri bundle staging — генерируется перед `npm run bundle` (dub-server.exe, frontend/dist,
 # fonts, bundled VC++/OCR); см. desktop/src-tauri/STAGING.md. Артефакт сборки, не коммитим.
 desktop/src-tauri/staging/
 target2/
@@ -47,3 +48,12 @@ frontend/public/*.mp4
 
 # тестовые видео — не в репо (>100МБ лимит GitHub)
 test_media/
+
+# Собранные установщики и портативные архивы — во вложения GitHub-релиза, не в репо
+release/
+
+# Локальные агентские правила и пароли ключей не публикуются
+.claude/
+HANDOFF.md
+NEXT_SESSION_PROMPT.md
+*.password

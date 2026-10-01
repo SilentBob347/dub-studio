@@ -1,0 +1,14 @@
+{
+  "build": {
+    "beforeBundleCommand": ""
+  },
+  "bundle": {
+    "active": true,
+    "resources": {
+      "staging/frontend/dist": "frontend/dist",
+      "staging/fonts": "fonts",
+      "staging/models/higgs-engine": "models/higgs-engine",
+      "staging/models/ocr": "models/ocr"
+    }
+  }
+}

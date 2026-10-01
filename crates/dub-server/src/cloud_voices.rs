@@ -119,8 +119,7 @@ mod tests {
         assert_eq!(voice_meta("google/gemini-3.1-flash-tts-preview", "Puck").unwrap().gender, "male");
         // voxtral русский не тянет
         assert_eq!(model_supports_russian("mistralai/voxtral-mini-tts-2603"), Some(false));
-        // gemini/minimax тянут
         assert_eq!(model_supports_russian("google/gemini-3.1-flash-tts-preview"), Some(true));
-        assert_eq!(model_supports_russian("minimax/speech-2.8-hd"), Some(true));
+        assert_eq!(model_supports_russian("openai/gpt-audio"), Some(true));
     }
 }

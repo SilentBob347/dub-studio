@@ -60,6 +60,23 @@ fn seg_by_id<'a>(p: &'a mut Project, edit: &Value) -> Result<&'a mut dub_core::S
         .ok_or((404, format!("segment {sid:?} not found")))
 }
 
+/// Id новой фразы: файлы фразы (seg-wav, ключ синтеза, дубли) зовутся по render::seg_file_id, а он
+/// отбрасывает всё, кроме [A-Za-z0-9_], поэтому `s1.2` и `s12` — один файл. Занят id, чьё имя файла
+/// уже у другой фразы; id без имени файла не годится.
+fn free_id(p: &Project, wanted: Option<String>, fallback: impl Fn(usize) -> String) -> Result<String, (u16, String)> {
+    let file_of = crate::render::seg_file_id;
+    let taken = |id: &str| {
+        let file = file_of(id);
+        p.segments.iter().any(|x| x.id == id || (file.is_some() && file_of(&x.id) == file))
+    };
+    match wanted.filter(|x| !x.is_empty()) {
+        Some(id) if file_of(&id).is_none() => Err((400, format!("segment id {id:?} has no letters or digits"))),
+        Some(id) if taken(&id) => Err((409, format!("segment id {id:?} is taken"))),
+        Some(id) => Ok(id),
+        None => Ok((1..).map(fallback).find(|id| !taken(id)).unwrap_or_default()),
+    }
+}
+
 /// Удалить элементы вектора по индексам edit["idxs"] (high->low, вне диапазона пропускаются).
 fn del_by_idxs<T>(v: &mut Vec<T>, edit: &Value) {
     for idx in idxs_desc(edit) {
@@ -137,7 +154,10 @@ fn op_subpos(p: &mut Project, edit: &Value) -> PatchResult {
 }
 
 /// mode — верхнеуровневый режим вывода. Порт api.set_mode:
-///   subtitles -> nodub + subs.translate; dub -> dub + subs.translate; funny -> dub + subs.translate + rewrite.
+///   subtitles -> nodub + subs.transcribe; dub, voiceover -> свой аудио-выход + subs.translate;
+///   transcribe -> transcribe + subs.transcribe; funny -> dub + subs.translate + rewrite.
+/// Язык субтитров, выбранный отдельно (subs_content), пресет не перебивает: «нет» — ни один пресет,
+/// «оба» и «оригинал» под дубляжем или закадром — dub, voiceover и funny.
 /// Помечает все сегменты dirty. ValueError (неизвестное значение) -> 400.
 fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
     let value = edit.get("value").and_then(|x| x.as_str()).unwrap_or_default();
@@ -146,9 +166,18 @@ fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
     // «subs=none всё равно прожигает субтитры» — через редактор). subs.mode остаётся под управлением
     // независимого subs_content-контрола, пресет задаёт лишь его дефолт, когда он НЕ «none».
     let keep_no_subs = p.subs.mode == "none";
+    // «Оригинал» в nodub/transcribe — собственный дефолт пресетов subtitles/transcribe, а не выбор под
+    // дубляж: при переходе к дубляжу он становится переводом. «Оба» ни один пресет не ставит.
+    let keep_dub_subs = p.subs.mode == "bilingual"
+        || (p.subs.mode == "transcribe" && matches!(p.mode.as_str(), "dub" | "voiceover"));
     let set_subs = |p: &mut Project, m: &str| {
         if !keep_no_subs {
             p.subs.mode = m.into();
+        }
+    };
+    let set_dub_subs = |p: &mut Project| {
+        if !keep_no_subs && !keep_dub_subs {
+            p.subs.mode = "translate".into();
         }
     };
     match value {
@@ -159,13 +188,13 @@ fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
         }
         "dub" => {
             p.mode = "dub".into();
-            set_subs(p, "translate");
+            set_dub_subs(p);
             p.audio.rewrite = None;
         }
         "voiceover" => {
             // закадровый: перевод+TTS поверх приглушённого оригинала (громкость — audio.voiceover_gain_db)
             p.mode = "voiceover".into();
-            set_subs(p, "translate");
+            set_dub_subs(p);
             p.audio.rewrite = None;
         }
         "transcribe" => {
@@ -176,7 +205,7 @@ fn op_mode(p: &mut Project, edit: &Value) -> PatchResult {
         }
         "funny" => {
             p.mode = "dub".into();
-            set_subs(p, "translate");
+            set_dub_subs(p);
             if p.audio.rewrite.is_none() {
                 p.audio.rewrite = Some("make it a funny, playful dub".into());
             }
@@ -214,17 +243,70 @@ fn op_subs_burn(p: &mut Project, edit: &Value) -> PatchResult {
 }
 
 /// subs_content — независимо задать содержимое субтитров: none (нет) | transcribe (язык оригинала) |
-/// translate (перевод). Развязывает субтитры от аудио-режима (перевод сабов без дубляжа и наоборот).
+/// translate (перевод) | bilingual (перевод и оригинал второй строкой). Развязывает субтитры от
+/// аудио-режима (перевод сабов без дубляжа, оригинал под дубляжем). Для двуязычных — order
+/// (translation_top | original_top) и secondary {size_pct 40..=100, color #RRGGBB, opacity 10..=100;
+/// null — как у основной строки}. Поля, которых нет, не меняются; всё проверяется до записи.
 fn op_subs_content(p: &mut Project, edit: &Value) -> PatchResult {
-    let v = s(edit, "value").unwrap_or_default();
-    match v.as_str() {
-        "none" | "transcribe" | "translate" => p.subs.mode = v,
-        other => return Err((400, format!("unknown subs content {other:?}"))),
+    let mode = match edit.get("value") {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(m @ ("none" | "transcribe" | "translate" | "bilingual")) => Some(m.to_string()),
+            _ => return Err((400, format!("unknown subs content {v}"))),
+        },
+    };
+    let mut bilingual = p.subs.bilingual.clone();
+    if let Some(v) = edit.get("order") {
+        match v.as_str() {
+            Some(o @ (dub_core::ORDER_TRANSLATION_TOP | dub_core::ORDER_ORIGINAL_TOP)) => bilingual.order = o.to_string(),
+            _ => return Err((400, format!("order is translation_top or original_top, not {v}"))),
+        }
     }
+    if let Some(sec) = edit.get("secondary") {
+        let sec = sec.as_object().ok_or((400, "secondary is an object {size_pct, color, opacity}".to_string()))?;
+        for key in sec.keys() {
+            if !matches!(key.as_str(), "size_pct" | "color" | "opacity") {
+                return Err((400, format!("secondary has no field {key:?}")));
+            }
+        }
+        if let Some(v) = sec.get("size_pct") {
+            match v.as_i64() {
+                Some(n) if (40..=100).contains(&n) => bilingual.secondary.size_pct = n,
+                _ => return Err((400, format!("secondary.size_pct is 40..100, not {v}"))),
+            }
+        }
+        if let Some(v) = sec.get("color") {
+            bilingual.secondary.color = match v {
+                Value::Null => None,
+                Value::String(c) if is_hex_rgb(c) => Some(c.to_uppercase()),
+                _ => return Err((400, format!("secondary.color is #RRGGBB or null, not {v}"))),
+            };
+        }
+        if let Some(v) = sec.get("opacity") {
+            bilingual.secondary.opacity = match (v, v.as_i64()) {
+                (Value::Null, _) => None,
+                (_, Some(n)) if (10..=100).contains(&n) => Some(n),
+                _ => return Err((400, format!("secondary.opacity is 10..100 or null, not {v}"))),
+            };
+        }
+    }
+    if mode.is_none() && edit.get("order").is_none() && edit.get("secondary").is_none() {
+        return Err((400, "subs_content needs value, order or secondary".into()));
+    }
+    if let Some(m) = mode {
+        p.subs.mode = m;
+    }
+    p.subs.bilingual = bilingual;
     Ok(())
 }
 
+/// #RRGGBB.
+fn is_hex_rgb(c: &str) -> bool {
+    c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
 /// translate — сменить целевой язык (+режим subs=translate; funny -> rewrite). Порт api.translate.
+/// Двуязычные субтитры остаются двуязычными: перевод в них и так основная строка.
 /// Помечает все сегменты dirty (перевод/дубляж перегенерятся на следующем analyze/render). Смена языка
 /// требует ре-перевода, но analyze здесь не запускаем — это GPU-джоба; PATCH лишь фиксирует намерение.
 fn op_translate(p: &mut Project, edit: &Value) -> PatchResult {
@@ -232,7 +314,13 @@ fn op_translate(p: &mut Project, edit: &Value) -> PatchResult {
     if let Some(lang) = s(edit, "lang") {
         p.tgt_lang = lang;
     }
-    p.subs.mode = "translate".into();
+    // Как в op_mode: выключенные субтитры остаются выключенными, «оба» и «оригинал» под дубляжем или
+    // закадром остаются; транскрипт проекта субтитров становится переводом.
+    let keep = matches!(p.subs.mode.as_str(), "none" | "bilingual")
+        || (p.subs.mode == "transcribe" && matches!(p.mode.as_str(), "dub" | "voiceover"));
+    if !keep {
+        p.subs.mode = "translate".into();
+    }
     if s(edit, "mode").as_deref() == Some("funny") {
         p.audio.rewrite = Some("make it a funny, playful dub".into());
     }
@@ -278,13 +366,21 @@ fn op_recast(p: &mut Project, edit: &Value) -> PatchResult {
     Ok(())
 }
 
+/// Новый нонс «перегенерировать»: входит в ключ синтеза сегмента, поэтому рендер синтезирует
+/// сегмент заново, даже если текст и голос не менялись (новый дубль вместо кэша).
+fn mark_regen(seg: &mut dub_core::Segment) {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    seg.extra.insert(crate::render::REGEN_NONCE.into(), Value::String(nonce));
+    seg.dirty = true;
+}
+
 /// regen — пометить ОДИН сегмент dirty, а ВСЕ ДРУГИЕ сегменты — NOT dirty (ре-TTS только его на /render).
 fn op_regen(p: &mut Project, edit: &Value) -> PatchResult {
     let target_id = s(edit, "id").ok_or((400, "missing segment id".into()))?;
     let mut found = false;
     for s in &mut p.segments {
         if s.id == target_id {
-            s.dirty = true;
+            mark_regen(s);
             found = true;
         } else {
             s.dirty = false;
@@ -296,9 +392,11 @@ fn op_regen(p: &mut Project, edit: &Value) -> PatchResult {
     Ok(())
 }
 
-/// regen_all — пометить ВСЕ сегменты dirty (ре-TTS всего дубляжа). Порт app.py op=="regen_all".
+/// regen_all — ре-TTS всего дубляжа (новый нонс у каждого сегмента). Порт app.py op=="regen_all".
 fn op_regen_all(p: &mut Project, _edit: &Value) -> PatchResult {
-    mark_all_dirty(p);
+    for seg in &mut p.segments {
+        mark_regen(seg);
+    }
     Ok(())
 }
 
@@ -311,9 +409,7 @@ fn op_add_segment(p: &mut Project, edit: &Value) -> PatchResult {
     let end = f(edit, "end").unwrap_or(start + 2.0).max(start + 0.2);
     // speaker: явный из запроса, иначе первый существующий (чтобы клон-голос был знакомым).
     let speaker = s(edit, "speaker").or_else(|| p.segments.first().and_then(|x| x.speaker.clone()));
-    let id = s(edit, "id")
-        .filter(|x| !x.is_empty())
-        .unwrap_or_else(|| format!("u{}", p.segments.len() + 1));
+    let id = free_id(p, s(edit, "id"), |n| format!("u{}", p.segments.len() + n))?;
     // Строим Segment через JSON — #[serde(flatten)] extra заполняется пустым объектом сам.
     let seg: dub_core::Segment = serde_json::from_value(serde_json::json!({
         "id": id, "start": start, "end": end, "speaker": speaker,
@@ -713,8 +809,191 @@ pub fn apply(p: &mut Project, edit: &Value) -> PatchResult {
         "sub_blur" => op_sub_blur(p, edit),
         "keep_original" => op_keep_original(p, edit),
         "reorder_segments" => op_reorder_segments(p, edit),
+        "split_segment" => op_split_segment(p, edit),
+        "merge_segments" => op_merge_segments(p, edit),
+        "take_select" => op_take_select(p, edit),
+        "take_pin" => op_take_pin(p, edit),
         other => Err((400, format!("unknown op {other:?}"))),
     }
+}
+
+/// Самая короткая часть, которая остаётся от фразы при разрезе, в секундах.
+const MIN_PART: f64 = 0.1;
+
+/// Делит текст в доле `fraction`: по словам, а для письма без пробелов (китайский, японский) — по символам.
+/// Обе части непустые, пока в тексте есть хотя бы два слова или символа.
+fn split_text(text: &str, fraction: f64) -> (String, String) {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() >= 2 {
+        let cut = ((fraction * words.len() as f64).round() as usize).clamp(1, words.len() - 1);
+        return (words[..cut].join(" "), words[cut..].join(" "));
+    }
+    let chars: Vec<char> = text.trim().chars().collect();
+    if chars.len() >= 2 {
+        let cut = ((fraction * chars.len() as f64).round() as usize).clamp(1, chars.len() - 1);
+        let (head, tail): (String, String) = (chars[..cut].iter().collect(), chars[cut..].iter().collect());
+        return (head.trim().to_string(), tail.trim().to_string());
+    }
+    (text.trim().to_string(), String::new())
+}
+
+/// split_segment — разрезать фразу id в момент at (сек) на две, как ножницы монтажа. Пословные тайминги
+/// ASR делятся по времени; исходный текст — по ним, когда их столько же, сколько слов текста, иначе в той же
+/// доле, что время. Перевод берётся из tgt_text/tgt_text_2, если их прислали, иначе делится в доле исходного
+/// текста. Вторая часть получает new_id или свободный id вида `<id>_2`. Обе части dirty. Оверрайд субтитра
+/// фразы (captions.overrides) переходит к обеим частям: место и стиль те же, свой текст делится в доле
+/// исходного текста.
+fn op_split_segment(p: &mut Project, edit: &Value) -> PatchResult {
+    let sid = s(edit, "id").ok_or((400, "missing segment id".into()))?;
+    let at = f(edit, "at").ok_or((400, "missing split time 'at' (seconds)".into()))?;
+    let idx = p.segments.iter().position(|x| x.id == sid).ok_or((404, format!("segment {sid:?} not found")))?;
+    let (start, end) = (p.segments[idx].start, p.segments[idx].end);
+    if at < start + MIN_PART || at > end - MIN_PART {
+        return Err((400, format!("split time {at} is not inside segment {sid:?} ({start:.2}..{end:.2}) by {MIN_PART} s")));
+    }
+    let new_id = free_id(p, s(edit, "new_id"), |n| format!("{sid}_{}", n + 1))?;
+    let first = &p.segments[idx];
+    let words = first.extra.get("words").and_then(Value::as_array).cloned();
+    let (words_1, words_2): (Option<Vec<Value>>, Option<Vec<Value>>) = match &words {
+        Some(all) => {
+            let (head, tail): (Vec<Value>, Vec<Value>) = all.iter().cloned().partition(|word| word.get("start").and_then(Value::as_f64).is_some_and(|w| w < at));
+            (Some(head), Some(tail))
+        }
+        None => (None, None),
+    };
+    let src_words: Vec<&str> = first.src_text.split_whitespace().collect();
+    let time_fraction = (at - start) / (end - start);
+    let src_fraction = match (&words, &words_1) {
+        (Some(all), Some(head)) if !src_words.is_empty() && all.len() == src_words.len() => head.len() as f64 / all.len() as f64,
+        _ => time_fraction,
+    };
+    let divide = |text: &str| match src_fraction {
+        share if share <= 0.0 => (String::new(), text.trim().to_string()),
+        share if share >= 1.0 => (text.trim().to_string(), String::new()),
+        share => split_text(text, share),
+    };
+    let (src_1, src_2) = divide(&first.src_text);
+    let (auto_1, auto_2) = divide(&first.tgt_text);
+    let tgt_1 = s(edit, "tgt_text").unwrap_or(auto_1);
+    let tgt_2 = s(edit, "tgt_text_2").unwrap_or(auto_2);
+    // build_ass рисует override.text вместо tgt_text: целый текст на первой части задвоил бы вторую.
+    // Оверрайд удалённой фразы с тем же id (del_segment их не чистит) к новой части не относится.
+    p.captions.overrides.retain(|o| o.seg_id != new_id);
+    let caption_2 = p.captions.overrides.iter_mut().find(|o| o.seg_id == sid).map(|own| {
+        let mut copy = own.clone();
+        copy.seg_id = new_id.clone();
+        if let Some(text) = own.text.take() {
+            let (head, tail) = divide(&text);
+            own.text = Some(head);
+            copy.text = Some(tail);
+        }
+        copy
+    });
+
+    let mut second = p.segments[idx].clone();
+    second.id = new_id;
+    second.start = at;
+    second.src_text = src_2;
+    second.tgt_text = tgt_2;
+    second.dirty = true;
+    second.ckpt = None;
+    let first = &mut p.segments[idx];
+    first.end = at;
+    first.src_text = src_1;
+    first.tgt_text = tgt_1;
+    first.dirty = true;
+    first.ckpt = None;
+    for (segment, part) in [(&mut *first, words_1), (&mut second, words_2)] {
+        if let Some(part) = part {
+            segment.extra.insert("words".into(), Value::Array(part));
+        }
+    }
+    p.segments.insert(idx + 1, second);
+    p.captions.overrides.extend(caption_2);
+    Ok(())
+}
+
+/// merge_segments — склеить фразы ids в одну. Они должны стоять подряд в списке фраз; остаётся id первой
+/// по списку, её спикер и голос; время — от самого раннего начала до самого позднего конца, тексты и
+/// пословные тайминги — друг за другом. Результат dirty. Оверрайды субтитров частей сводятся в один на id
+/// склеенной фразы: место и стиль — первого по порядку, а если хоть у одной части свой текст, текст
+/// субтитра — тексты частей подряд (свой текст части или её перевод).
+fn op_merge_segments(p: &mut Project, edit: &Value) -> PatchResult {
+    let wanted = ids(edit);
+    if wanted.len() < 2 {
+        return Err((400, "merge_segments needs at least two segment ids".into()));
+    }
+    let mut places: Vec<usize> = Vec::with_capacity(wanted.len());
+    for id in &wanted {
+        let at = p.segments.iter().position(|x| &x.id == id).ok_or((404, format!("segment {id:?} not found")))?;
+        if !places.contains(&at) {
+            places.push(at);
+        }
+    }
+    places.sort_unstable();
+    if places.len() < 2 {
+        return Err((400, "merge_segments needs at least two different segments".into()));
+    }
+    if places.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+        return Err((400, "segments to merge must follow one another in the list".into()));
+    }
+    let parts: Vec<dub_core::Segment> = p.segments.drain(places[0]..=places[places.len() - 1]).collect();
+    let join = |text: fn(&dub_core::Segment) -> &str| parts.iter().map(text).map(str::trim).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ");
+    let mut merged = parts[0].clone();
+    merged.start = parts.iter().map(|x| x.start).fold(f64::INFINITY, f64::min);
+    merged.end = parts.iter().map(|x| x.end).fold(f64::NEG_INFINITY, f64::max);
+    merged.src_text = join(|x| x.src_text.as_str());
+    merged.tgt_text = join(|x| x.tgt_text.as_str());
+    merged.dirty = true;
+    merged.ckpt = None;
+    let words: Vec<Value> = parts.iter().filter_map(|x| x.extra.get("words").and_then(Value::as_array)).flatten().cloned().collect();
+    if words.is_empty() {
+        merged.extra.remove("words");
+    } else {
+        merged.extra.insert("words".into(), Value::Array(words));
+    }
+    let captions: Vec<Option<CaptionOverride>> = parts.iter().map(|part| p.captions.overrides.iter().find(|o| o.seg_id == part.id).cloned()).collect();
+    if let Some(first) = captions.iter().flatten().next() {
+        let mut kept = first.clone();
+        kept.seg_id = merged.id.clone();
+        if captions.iter().flatten().any(|o| o.text.is_some()) {
+            let texts = parts.iter().zip(&captions).map(|(part, own)| own.as_ref().and_then(|o| o.text.as_deref()).unwrap_or(&part.tgt_text));
+            kept.text = Some(texts.map(str::trim).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" "));
+        }
+        p.captions.overrides.retain(|o| !parts.iter().any(|part| part.id == o.seg_id));
+        p.captions.overrides.push(kept);
+    }
+    p.segments.insert(places[0], merged);
+    Ok(())
+}
+
+/// take_select — сделать дубль из истории фразы активным (takes.rs кладёт его файл в сегмент). Правка
+/// приходит дополненной обработчиком PATCH: take_text/take_nonce/take_key выбранного дубля. Другой текст
+/// дубля возвращает и текст реплики; нонс и ключ — те, с которыми дубль озвучен, чтобы рендер взял его
+/// без нового синтеза.
+fn op_take_select(p: &mut Project, edit: &Value) -> PatchResult {
+    let text = s(edit, "take_text").ok_or((400, "take_select is resolved by PATCH /projects/{pid}: no take_text".to_string()))?;
+    let key = s(edit, "take_key").ok_or((400, "take_select is resolved by PATCH /projects/{pid}: no take_key".to_string()))?;
+    let nonce = edit.get("take_nonce").cloned().unwrap_or(Value::Null);
+    let seg = seg_by_id(p, edit)?;
+    if seg.tgt_text.trim() != text {
+        seg.tgt_text = text;
+    }
+    if nonce.is_null() {
+        seg.extra.remove(crate::render::REGEN_NONCE);
+    } else {
+        seg.extra.insert(crate::render::REGEN_NONCE.into(), nonce);
+    }
+    seg.ckpt = Some(key);
+    seg.dirty = true;
+    Ok(())
+}
+
+/// take_pin — закрепить активный дубль фразы или снять закрепление (история на диске, takes.rs).
+fn op_take_pin(p: &mut Project, edit: &Value) -> PatchResult {
+    b(edit, "pinned").ok_or((400, "take_pin needs pinned (true or false)".to_string()))?;
+    seg_by_id(p, edit)?;
+    Ok(())
 }
 
 /// reorder_segments — изменить порядок сегментов согласно списку id в edit["ids"].
@@ -787,8 +1066,52 @@ mod tests {
     }
 
     #[test]
+    fn a_dub_mode_keeps_the_subtitle_language_chosen_for_the_dub() {
+        let mut p = proj_with_seg();
+        p.mode = "dub".into();
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"mode","value":"voiceover"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("voiceover", "bilingual"));
+
+        p.mode = "dub".into();
+        p.subs.mode = "transcribe".into();
+        apply(&mut p, &json!({"op":"mode","value":"funny"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("dub", "transcribe"));
+        apply(&mut p, &json!({"op":"mode","value":"voiceover"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe");
+
+        p.mode = "nodub".into();
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"mode","value":"dub"})).unwrap();
+        assert_eq!(p.subs.mode, "bilingual");
+
+        p.subs.mode = "none".into();
+        apply(&mut p, &json!({"op":"mode","value":"funny"})).unwrap();
+        assert_eq!(p.subs.mode, "none");
+    }
+
+    #[test]
+    fn a_dub_mode_after_the_subtitles_preset_shows_the_translation() {
+        let mut p = proj_with_seg();
+        p.subs.mode = "translate".into();
+        apply(&mut p, &json!({"op":"mode","value":"subtitles"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("nodub", "transcribe"));
+        apply(&mut p, &json!({"op":"mode","value":"dub"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("dub", "translate"));
+        apply(&mut p, &json!({"op":"mode","value":"transcribe"})).unwrap();
+        apply(&mut p, &json!({"op":"mode","value":"voiceover"})).unwrap();
+        assert_eq!((p.mode.as_str(), p.subs.mode.as_str()), ("voiceover", "translate"));
+
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"mode","value":"subtitles"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe", "пресет «Субтитры» — субтитры оригинала");
+    }
+
+    #[test]
     fn translate_sets_lang_and_dirty() {
         let mut p = proj_with_seg();
+        p.mode = "nodub".into();
+        p.subs.mode = "transcribe".into();
         apply(&mut p, &json!({"op":"translate","lang":"de"})).unwrap();
         assert_eq!(p.tgt_lang, "de");
         assert_eq!(p.subs.mode, "translate");
@@ -941,6 +1264,64 @@ mod tests {
     }
 
     #[test]
+    fn subs_content_sets_bilingual_and_its_second_line() {
+        let mut p = Project::default();
+        apply(&mut p, &json!({"op":"subs_content","value":"bilingual"})).unwrap();
+        assert_eq!(p.subs.mode, "bilingual");
+        assert_eq!(p.subs.bilingual, dub_core::Bilingual::default());
+        apply(&mut p, &json!({"op":"subs_content","order":"original_top","secondary":{"size_pct":60,"color":"#ffd400","opacity":80}})).unwrap();
+        assert_eq!(p.subs.mode, "bilingual", "без value режим не меняется");
+        assert_eq!(p.subs.bilingual.order, "original_top");
+        assert_eq!(p.subs.bilingual.secondary.size_pct, 60);
+        assert_eq!(p.subs.bilingual.secondary.color.as_deref(), Some("#FFD400"));
+        assert_eq!(p.subs.bilingual.secondary.opacity, Some(80));
+        apply(&mut p, &json!({"op":"subs_content","secondary":{"color":null,"opacity":null}})).unwrap();
+        assert_eq!((p.subs.bilingual.secondary.color.clone(), p.subs.bilingual.secondary.opacity), (None, None));
+        assert_eq!(p.subs.bilingual.secondary.size_pct, 60, "поле, которого нет, не меняется");
+        apply(&mut p, &json!({"op":"subs_content","value":"transcribe"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe");
+        assert_eq!(p.subs.bilingual.order, "original_top", "настройки двуязычных сохраняются");
+    }
+
+    #[test]
+    fn a_new_target_language_keeps_bilingual_subtitles() {
+        let mut p = Project::default();
+        p.subs.mode = "bilingual".into();
+        apply(&mut p, &json!({"op":"translate","lang":"de"})).unwrap();
+        assert_eq!((p.tgt_lang.as_str(), p.subs.mode.as_str()), ("de", "bilingual"));
+        p.mode = "nodub".into();
+        p.subs.mode = "transcribe".into();
+        apply(&mut p, &json!({"op":"translate","lang":"fr"})).unwrap();
+        assert_eq!(p.subs.mode, "translate", "the transcript of a subtitles project becomes the translation");
+        p.mode = "dub".into();
+        p.subs.mode = "transcribe".into();
+        apply(&mut p, &json!({"op":"translate","lang":"es"})).unwrap();
+        assert_eq!(p.subs.mode, "transcribe", "the original's language chosen under a dub stays");
+        p.subs.mode = "none".into();
+        apply(&mut p, &json!({"op":"translate","lang":"it"})).unwrap();
+        assert_eq!(p.subs.mode, "none", "subtitles switched off stay off");
+    }
+
+    #[test]
+    fn subs_content_refuses_bad_values_without_changing_anything() {
+        let mut p = Project::default();
+        for bad in [
+            json!({"op":"subs_content","value":"both"}),
+            json!({"op":"subs_content","value":"bilingual","order":"left"}),
+            json!({"op":"subs_content","value":"bilingual","secondary":{"size_pct":10}}),
+            json!({"op":"subs_content","value":"bilingual","secondary":{"color":"yellow"}}),
+            json!({"op":"subs_content","value":"bilingual","secondary":{"opacity":0}}),
+            json!({"op":"subs_content","value":"bilingual","secondary":{"font":"Arial"}}),
+            json!({"op":"subs_content"}),
+        ] {
+            let e = apply(&mut p, &bad).unwrap_err();
+            assert_eq!(e.0, 400, "{bad}");
+        }
+        assert_eq!(p.subs.mode, "none");
+        assert_eq!(p.subs.bilingual, dub_core::Bilingual::default());
+    }
+
+    #[test]
     fn keep_original_toggles_and_validates_container() {
         let mut p = proj_with_seg();
         // дефолты: выключено, mp4.
@@ -962,6 +1343,24 @@ mod tests {
     }
 
     #[test]
+    fn take_select_restores_the_take_text_nonce_and_key() {
+        let mut p = proj_with_seg();
+        p.segments[0].tgt_text = "Новый".into();
+        p.segments[0].extra.insert(crate::render::REGEN_NONCE.into(), json!("n2"));
+        let e = apply(&mut p, &json!({"op":"take_select","id":"s0","take":0})).unwrap_err();
+        assert_eq!(e.0, 400, "an unresolved take_select is refused");
+        apply(&mut p, &json!({"op":"take_select","id":"s0","take":0,"take_text":"Старый","take_nonce":null,"take_key":"k0"})).unwrap();
+        let s = &p.segments[0];
+        assert_eq!(s.tgt_text, "Старый");
+        assert!(s.extra.get(crate::render::REGEN_NONCE).is_none());
+        assert_eq!(s.ckpt.as_deref(), Some("k0"));
+        assert!(s.dirty);
+        assert_eq!(apply(&mut p, &json!({"op":"take_pin","id":"s0"})).unwrap_err().0, 400);
+        assert_eq!(apply(&mut p, &json!({"op":"take_pin","id":"nope","pinned":true})).unwrap_err().0, 404);
+        apply(&mut p, &json!({"op":"take_pin","id":"s0","pinned":true})).unwrap();
+    }
+
+    #[test]
     fn del_titles_and_del_blurs_high_to_low() {
         let mut p = proj_with_seg();
         for _ in 0..3 {
@@ -972,5 +1371,137 @@ mod tests {
         assert_eq!(p.captions.titles.len(), 1);
         apply(&mut p, &json!({"op":"del_blurs","idxs":[1]})).unwrap();
         assert_eq!(p.captions.blur_boxes.len(), 2);
+    }
+
+    fn line(id: &str, start: f64, end: f64, src: &str, tgt: &str) -> dub_core::Segment {
+        dub_core::Segment { id: id.into(), start, end, src_text: src.into(), tgt_text: tgt.into(), speaker: Some("1".into()), ..Default::default() }
+    }
+
+    #[test]
+    fn split_cuts_a_line_at_a_moment_by_its_words() {
+        let mut p = Project::default();
+        let mut s1 = line("s1", 1.0, 5.0, "one two three four", "раз два три четыре");
+        s1.ckpt = Some("k".into());
+        s1.extra.insert("words".into(), json!([
+            { "word": "one", "start": 1.0, "end": 1.5 }, { "word": "two", "start": 1.6, "end": 2.0 },
+            { "word": "three", "start": 3.1, "end": 3.6 }, { "word": "four", "start": 4.0, "end": 4.8 },
+        ]));
+        p.segments.push(s1);
+        p.segments.push(line("s2", 6.0, 7.0, "five", "пять"));
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":3.0})).unwrap();
+        let ids: Vec<&str> = p.segments.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, ["s1", "s1_2", "s2"]);
+        let (a, b) = (&p.segments[0], &p.segments[1]);
+        assert_eq!((a.start, a.end, b.start, b.end), (1.0, 3.0, 3.0, 5.0));
+        assert_eq!((a.src_text.as_str(), b.src_text.as_str()), ("one two", "three four"));
+        assert_eq!((a.tgt_text.as_str(), b.tgt_text.as_str()), ("раз два", "три четыре"));
+        assert_eq!(a.extra["words"].as_array().unwrap().len(), 2);
+        assert_eq!(b.extra["words"][0]["word"], "three");
+        assert!(a.dirty && b.dirty && a.ckpt.is_none() && b.ckpt.is_none());
+        assert_eq!(b.speaker.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn split_takes_the_translation_it_is_given_and_refuses_a_moment_outside() {
+        let mut p = Project::default();
+        p.segments.push(line("s1", 0.0, 4.0, "a b c d", "один два три четыре"));
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":1.0,"new_id":"x","tgt_text":"первая","tgt_text_2":"вторая"})).unwrap();
+        assert_eq!(p.segments[1].id, "x");
+        assert_eq!((p.segments[0].src_text.as_str(), p.segments[1].src_text.as_str()), ("a", "b c d"));
+        assert_eq!((p.segments[0].tgt_text.as_str(), p.segments[1].tgt_text.as_str()), ("первая", "вторая"));
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"x","at":1.05})).unwrap_err().0, 400, "too close to the start");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"x","at":9.0})).unwrap_err().0, 400, "after the end");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"s1","at":0.5,"new_id":"x"})).unwrap_err().0, 409, "an id in use");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"nope","at":0.5})).unwrap_err().0, 404);
+        assert_eq!(split_text("你好世界", 0.5), ("你好".to_string(), "世界".to_string()), "text without spaces is cut by characters");
+    }
+
+    #[test]
+    fn a_new_line_never_shares_another_line_s_files() {
+        let mut p = Project::default();
+        p.segments.extend([line("s1", 0.0, 4.0, "a b", "раз два"), line("s12", 5.0, 6.0, "c", "три"), line("s1_2", 7.0, 8.0, "d", "четыре")]);
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
+        assert_eq!(p.segments[1].id, "s1_3", "s1_2 is taken");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"s1","at":1.0,"new_id":"s1.2"})).unwrap_err().0, 409, "s1.2 is the file of s12");
+        assert_eq!(apply(&mut p, &json!({"op":"split_segment","id":"s1","at":1.0,"new_id":"--"})).unwrap_err().0, 400, "no file name");
+        assert_eq!(apply(&mut p, &json!({"op":"add_segment","start":9.0,"id":"s-12"})).unwrap_err().0, 409);
+        let files: std::collections::HashSet<_> = p.segments.iter().map(|x| crate::render::seg_file_id(&x.id)).collect();
+        assert_eq!(files.len(), p.segments.len());
+    }
+
+    #[test]
+    fn merge_joins_neighbouring_lines() {
+        let mut p = Project::default();
+        let mut s1 = line("s1", 1.0, 2.0, "one", "раз");
+        s1.extra.insert("words".into(), json!([{ "word": "one", "start": 1.0, "end": 1.4 }]));
+        let mut s2 = line("s2", 2.2, 3.0, "two", "два");
+        s2.speaker = Some("2".into());
+        s2.extra.insert("words".into(), json!([{ "word": "two", "start": 2.2, "end": 2.8 }]));
+        p.segments.extend([s1, s2, line("s3", 4.0, 5.0, "three", "три")]);
+        assert_eq!(apply(&mut p, &json!({"op":"merge_segments","ids":["s1","s3"]})).unwrap_err().0, 400, "not neighbours");
+        assert_eq!(apply(&mut p, &json!({"op":"merge_segments","ids":["s1"]})).unwrap_err().0, 400, "one line");
+        assert_eq!(apply(&mut p, &json!({"op":"merge_segments","ids":["s1","zz"]})).unwrap_err().0, 404);
+        apply(&mut p, &json!({"op":"merge_segments","ids":["s2","s1"]})).unwrap();
+        assert_eq!(p.segments.len(), 2);
+        let merged = &p.segments[0];
+        assert_eq!((merged.id.as_str(), merged.start, merged.end), ("s1", 1.0, 3.0));
+        assert_eq!((merged.src_text.as_str(), merged.tgt_text.as_str()), ("one two", "раз два"));
+        assert_eq!(merged.speaker.as_deref(), Some("1"));
+        assert_eq!(merged.extra["words"].as_array().unwrap().len(), 2);
+        assert!(merged.dirty);
+    }
+
+    fn caption_of<'a>(p: &'a Project, id: &str) -> Vec<&'a CaptionOverride> {
+        p.captions.overrides.iter().filter(|o| o.seg_id == id).collect()
+    }
+
+    #[test]
+    fn split_divides_a_line_s_own_subtitle_and_keeps_its_place_and_style() {
+        let mut p = Project::default();
+        p.segments.push(line("s1", 0.0, 4.0, "a b c d", "один два три четыре"));
+        apply(&mut p, &json!({"op":"caption","seg_id":"s1","text":"свой текст этой фразы","y":120,"color":"#00FF00"})).unwrap();
+        p.captions.overrides.push(CaptionOverride { seg_id: "s1_2".into(), text: Some("от удалённой фразы".into()), ..Default::default() });
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
+        let (first, second) = (caption_of(&p, "s1"), caption_of(&p, "s1_2"));
+        assert_eq!((first.len(), second.len()), (1, 1), "one override each, the stale one of a deleted line gone");
+        assert_eq!((first[0].text.as_deref(), second[0].text.as_deref()), (Some("свой текст"), Some("этой фразы")));
+        assert_eq!((second[0].y, second[0].style.as_ref().map(|st| st.color.as_str())), (Some(120), Some("#00FF00")));
+
+        apply(&mut p, &json!({"op":"caption","seg_id":"s1","y":40})).unwrap();
+        apply(&mut p, &json!({"op":"split_segment","id":"s1","at":1.0})).unwrap();
+        let third = caption_of(&p, "s1_3");
+        assert_eq!((third[0].y, third[0].text.as_deref(), caption_of(&p, "s1")[0].text.as_deref()), (Some(40), Some("текст"), Some("свой")));
+
+        let mut styled = Project::default();
+        styled.segments.push(line("s1", 0.0, 4.0, "a b", "раз два"));
+        apply(&mut styled, &json!({"op":"caption","seg_id":"s1","x":30})).unwrap();
+        apply(&mut styled, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
+        let copy = caption_of(&styled, "s1_2");
+        assert_eq!((copy[0].x, copy[0].text.as_deref()), (Some(30), None), "a style-only override is copied without a text");
+
+        let mut plain = Project::default();
+        plain.segments.push(line("s1", 0.0, 4.0, "a b", "раз два"));
+        apply(&mut plain, &json!({"op":"split_segment","id":"s1","at":2.0})).unwrap();
+        assert!(plain.captions.overrides.is_empty(), "a line without an override gets none");
+    }
+
+    #[test]
+    fn merge_joins_the_parts_own_subtitles_under_the_first_id() {
+        let mut p = Project::default();
+        p.segments.extend([line("s1", 0.0, 1.0, "one", "раз"), line("s2", 1.0, 2.0, "two", "два"), line("s3", 2.0, 3.0, "three", "три")]);
+        apply(&mut p, &json!({"op":"caption","seg_id":"s2","text":"ДВА","x":10})).unwrap();
+        apply(&mut p, &json!({"op":"caption","seg_id":"s3","color":"#FF0000"})).unwrap();
+        apply(&mut p, &json!({"op":"merge_segments","ids":["s1","s2","s3"]})).unwrap();
+        assert_eq!(p.captions.overrides.len(), 1, "the absorbed lines leave no overrides behind");
+        let kept = &p.captions.overrides[0];
+        assert_eq!((kept.seg_id.as_str(), kept.text.as_deref(), kept.x), ("s1", Some("раз ДВА три"), Some(10)));
+
+        let mut styled = Project::default();
+        styled.segments.extend([line("s1", 0.0, 1.0, "one", "раз"), line("s2", 1.0, 2.0, "two", "два")]);
+        apply(&mut styled, &json!({"op":"caption","seg_id":"s1","y":50})).unwrap();
+        apply(&mut styled, &json!({"op":"caption","seg_id":"s2","y":90})).unwrap();
+        apply(&mut styled, &json!({"op":"merge_segments","ids":["s1","s2"]})).unwrap();
+        assert_eq!(styled.captions.overrides.len(), 1);
+        assert_eq!((styled.captions.overrides[0].y, styled.captions.overrides[0].text.as_deref()), (Some(50), None), "without own texts the subtitle keeps the joined translation");
     }
 }

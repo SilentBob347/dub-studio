@@ -23,14 +23,70 @@ pub fn load_selection(mroot: &Path) -> Value {
 
 /// Записать/обновить один слот выбора (engine -> variant) атомарно.
 pub fn set_selection(mroot: &Path, engine: &str, variant: &str) -> std::io::Result<()> {
+    let _held = selection_writes();
     let mut v = load_selection(mroot);
     v.as_object_mut()
         .expect("load_selection returns object")
         .insert(engine.to_string(), Value::String(variant.to_string()));
+    write_selection(mroot, &v)
+}
+
+/// Держится от чтения active.json до записи обратно (ручки настроек, агент и джобы пишут его
+/// одновременно) и делит между писателями один active.json.tmp. Не реентерабелен.
+pub(crate) fn selection_writes() -> std::sync::MutexGuard<'static, ()> {
+    static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Записать весь выбор атомарно (tmp + rename) под уже взятым selection_writes.
+pub fn write_selection(mroot: &Path, selection: &Value) -> std::io::Result<()> {
     let _ = std::fs::create_dir_all(mroot);
     let tmp = mroot.join("active.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap_or_default())?;
+    std::fs::write(&tmp, serde_json::to_vec_pretty(selection).unwrap_or_default())?;
     std::fs::rename(&tmp, mroot.join("active.json"))
+}
+
+/// Выбор для ответов API. Секреты не уходят никогда: вместо ключа OpenRouter — `or_key_set`, пароль
+/// вырезан из `proxy_url`, вместо него — `proxy_password_set`.
+/// `llm_provider`/`vision_provider` в ответе — действующий провайдер стадии, даже если в active.json его ещё нет
+/// (прежние флаги or_llm_on/or_vision_on).
+pub fn public_selection(mroot: &Path) -> Value {
+    let mut public = redact_selection(
+        &load_selection(mroot),
+        crate::credentials::openrouter_source().is_some(),
+        crate::credentials::proxy_password().is_some(),
+    );
+    let slots = public.as_object_mut().expect("redact_selection returns object");
+    for (key, stage) in [("llm_provider", "llm"), ("vision_provider", "vision")] {
+        slots.insert(key.into(), Value::String(llm_backend(mroot, stage).as_str().into()));
+    }
+    public
+}
+
+pub(crate) fn redact_selection(selection: &Value, or_key_set: bool, proxy_password_set: bool) -> Value {
+    let mut slots = selection.as_object().cloned().unwrap_or_default();
+    slots.remove("or_key");
+    let mut inline_password = false;
+    if let Some(url) = slots.get("proxy_url").and_then(Value::as_str).map(str::to_owned) {
+        let (bare, password) = split_proxy_password(&url);
+        inline_password = password.is_some();
+        slots.insert("proxy_url".into(), Value::String(bare));
+    }
+    slots.insert("or_key_set".into(), Value::Bool(or_key_set));
+    slots.insert("proxy_password_set".into(), Value::Bool(proxy_password_set || inline_password));
+    Value::Object(slots)
+}
+
+/// Снять слот выбора, если он указывает на этот вариант (вариант удалён — резолв возьмёт установленный).
+pub fn clear_selection_if(mroot: &Path, engine: &str, variant: &str) -> std::io::Result<()> {
+    let _held = selection_writes();
+    let mut v = load_selection(mroot);
+    let obj = v.as_object_mut().expect("load_selection returns object");
+    if obj.get(engine).and_then(Value::as_str) != Some(variant) {
+        return Ok(());
+    }
+    obj.remove(engine);
+    write_selection(mroot, &v)
 }
 
 fn pick<'a>(sel: &'a Value, engine: &str) -> Option<&'a str> {
@@ -48,6 +104,7 @@ pub fn component_selection(id: &str) -> Vec<(&'static str, String)> {
         "higgs-q4_k_m" => vec![("tts", "q4_k_m".into())],
         "parakeet" => vec![("asr_engine", "parakeet".into()), ("asr", "int8".into())],
         "parakeet-fp32" => vec![("asr_engine", "parakeet".into()), ("asr", "fp32".into())],
+        "parakeet-ultra" => vec![("asr_engine", "parakeet".into()), ("asr", "ultra".into())],
         "whisper-tiny" => vec![("asr_engine", "whisper".into()), ("whisper_model", "tiny".into())],
         "whisper-base" => vec![("asr_engine", "whisper".into()), ("whisper_model", "base".into())],
         "whisper-small" => vec![("asr_engine", "whisper".into()), ("whisper_model", "small".into())],
@@ -88,12 +145,21 @@ pub fn is_selection_key(key: &str) -> bool {
             | "breath_on"       // "1" -> авто-вставка легких вдохов в паузах между фразами; "0" -> выкл
             | "speech_rate_on"  // "1" -> адаптация темпа генерации TTS под длину текста/слота; "0" -> дефолт темп
             | "emo_ref_on"      // "1" -> эмоциональный референс сцены (перенос эмоций из оригинального вокала); "0" -> выкл
+            | "auto_shorten"    // "1" (по умолчанию) -> не влезшие в слот фразы рендер сокращает через LLM и озвучивает заново
+            // Провайдер перевода и отдельно vision: local (своя Gemma) | server (локальный OpenAI-совместимый
+            // сервер: Ollama, LM Studio, vLLM) | openrouter. Значение проверяет select_model.
+            | "llm_provider"
+            | "vision_provider"
+            // Локальный OpenAI-совместимый сервер: адрес и модели из его /v1/models. Ключ — в хранилище секретов.
+            | "srv_url"
+            | "srv_llm"
+            | "srv_vision"
             // Облачные модели (OpenRouter) — опциональная замена тяжёлого локального LLM/TTS. Всё ВЫКЛ по умолчанию.
-            | "or_key"          // API-ключ OpenRouter (хранится локально в active.json, не логируется)
-            | "or_llm_on"       // "1" -> перевод через OpenRouter chat вместо локальной Gemma
+            // Ключ OpenRouter сюда не входит: он в хранилище секретов (credentials), ручка /engine/openrouter/settings.
+            | "or_llm_on"       // прежний флаг перевода через OpenRouter; читается, только пока llm_provider не задан
             | "or_llm"          // id LLM-модели перевода (напр. "google/gemini-2.5-flash")
-            | "or_vision_on"    // "1" -> vision-анализ кадров через OpenRouter multimodal
-            | "or_vision"       // id vision-модели (пусто -> берём or_llm, если он multimodal)
+            | "or_vision_on"    // прежний флаг vision через OpenRouter; читается, только пока vision_provider не задан
+            | "or_vision"       // id vision-модели (пусто -> or_llm, если он принимает картинки)
             | "or_tts_on"       // "1" -> TTS через облако вместо локального Higgs
             | "or_tts_model"    // id TTS-модели OpenRouter (напр. "openai/gpt-4o-mini-tts")
             | "or_tts_voice"    // голос по умолчанию для облачного TTS (напр. "alloy")
@@ -101,14 +167,22 @@ pub fn is_selection_key(key: &str) -> bool {
             | "or_asr_on"       // "1" -> транскрипция (ASR) через OpenRouter вместо локального Parakeet/Whisper
             | "or_asr"          // id STT-модели OpenRouter (напр. "openai/whisper-large-v3")
             | "or_concurrency"  // число параллельных облачных запросов (чанки в N потоков; OpenRouter ~50 конкур.)
-            // Прокси: у части юзеров прямой доступ к HF/OpenRouter закрыт -> все обращения через свой прокси.
-            | "proxy_on"        // "1" -> проксировать весь исходящий трафик приложения через proxy_url
-            | "proxy_url"       // URL прокси: http|https|socks5://[user:pass@]host:port (хранится локально)
+            // Прокси (режим, тип, адрес) меняется только через /engine/proxy/settings: там пароль уходит в хранилище
+            // секретов, а маршрут запросов перестраивается сразу.
     )
 }
 
+/// Допустимое значение слота, у которого значения — перечень. Для прочих слотов — любое непустое.
+pub fn is_selection_value(key: &str, value: &str) -> bool {
+    match key {
+        "llm_provider" | "vision_provider" => LlmBackend::parse(value).is_some(),
+        _ => true,
+    }
+}
+
 /// Backend конкретной локальной стадии по ключу (sep_backend/diar_backend/asr_backend): "cpu"/"gpu"
-/// перекрывают; "auto"/пусто -> сначала общий local_backend, затем по факту NVIDIA-драйвера.
+/// перекрывают; "auto"/пусто -> сначала общий local_backend, затем GPU, только если карта и драйвер годятся
+/// под CUDA 13 (hw::gpu_report) — на драйвере до 580 или Pascal «авто» идёт на CPU, а не падает на CUDA.
 /// Любой движок на любой инстанс — стадии независимы.
 pub fn stage_backend(mroot: &Path, key: &str) -> &'static str {
     let sel = load_selection(mroot);
@@ -121,7 +195,7 @@ pub fn stage_backend(mroot: &Path, key: &str) -> &'static str {
     };
     pick_bk(key)
         .or_else(|| if key == "local_backend" { None } else { pick_bk("local_backend") })
-        .unwrap_or(if crate::setup::detect_driver() { "gpu" } else { "cpu" })
+        .unwrap_or(if crate::hw::gpu_report().cuda13_ok { "gpu" } else { "cpu" })
 }
 
 /// Глобальный backend локальных стадий (обратная совместимость: пресеты/старые вызовы).
@@ -130,51 +204,191 @@ pub fn local_backend(mroot: &Path) -> &'static str {
     stage_backend(mroot, "local_backend")
 }
 
-/// API-ключ OpenRouter из active.json (локальное хранение, десктоп). Пусто/нет -> None.
-pub fn openrouter_key(mroot: &Path) -> Option<String> {
-    pick(&load_selection(mroot), "or_key").map(str::to_string)
+/// API-ключ OpenRouter: переменная окружения OPENROUTER_API_KEY, иначе хранилище секретов. Нет -> None.
+pub fn openrouter_key() -> Option<String> {
+    crate::credentials::openrouter_api_key().map(|(key, _)| key)
 }
 
-/// URL прокси-сервера из active.json — ТОЛЬКО если прокси включён (proxy_on=="1") и URL непустой, иначе None.
-/// Через него идут ВСЕ обращения приложения: закачка моделей (ureq), OpenRouter (Go-хелпер), метаданные HF
-/// (reqwest). Формат: http|https|socks5://[user:pass@]host:port. Валидность URL проверяет /engine/proxy/test.
-pub fn proxy_url(mroot: &Path) -> Option<String> {
-    let sel = load_selection(mroot);
-    if pick(&sel, "proxy_on") != Some("1") {
-        return None;
-    }
-    pick(&sel, "proxy_url").map(str::to_string)
-}
-
-/// Прописать прокси из active.json в env процесса (HTTP(S)_PROXY/ALL_PROXY + lowercase-варианты). Стандартные
-/// клиенты подхватывают его сами: ureq default-agent (Config::default -> Proxy::try_from_env), reqwest, и
-/// дочерние процессы (Go-хелпер: http.ProxyFromEnvironment). Вызывать ОДИН раз на старте — ДО первого
-/// HTTP-клиента (default-agent кешируется). Смена прокси -> рестарт; но закачки строят агента явно из
-/// proxy_url и подхватывают смену без рестарта (см. setup::dl_agent).
-pub fn apply_proxy_env(mroot: &Path) {
-    if let Some(url) = proxy_url(mroot) {
-        for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
-            std::env::set_var(k, &url);
+/// Режим прокси из active.json. Прежние версии знали только proxy_on + proxy_url: включённый прокси с адресом —
+/// свой, иначе — как в Windows (прежний «выключенный» прокси тоже пускал запросы по переменным окружения).
+pub fn proxy_mode(sel: &Value) -> dub_llm::net::ProxyMode {
+    use dub_llm::net::ProxyMode;
+    if let Some(mode) = pick(sel, "proxy_mode") {
+        if let Some(mode) = ProxyMode::parse(mode) {
+            return mode;
         }
-        tracing::info!("прокси включён: весь трафик через {}", mask_proxy(&url));
+        tracing::error!("proxy_mode {mode:?} в active.json не распознан — считаю «как в Windows»");
+    }
+    if pick(sel, "proxy_on") == Some("1") && pick(sel, "proxy_url").is_some() {
+        ProxyMode::Custom
+    } else {
+        ProxyMode::System
     }
 }
 
-/// Спрятать user:pass в URL прокси для логов (не светим креды): scheme://***@host:port.
-fn mask_proxy(url: &str) -> String {
-    match (url.find("://"), url.rfind('@')) {
-        (Some(s), Some(at)) if at > s + 3 => format!("{}***@{}", &url[..s + 3], &url[at + 1..]),
+/// Тип прокси для адреса без схемы.
+pub fn proxy_kind(sel: &Value) -> dub_llm::net::ProxyKind {
+    pick(sel, "proxy_kind").and_then(dub_llm::net::ProxyKind::parse).unwrap_or_default()
+}
+
+/// Адрес своего прокси, по которому идут запросы: адрес из active.json (без пароля) и пароль из хранилища.
+pub(crate) fn proxy_address(sel: &Value, password: Option<&str>) -> Option<String> {
+    pick(sel, "proxy_url").map(|url| proxy_with_password(url, password))
+}
+
+/// Маршрут прокси из active.json и хранилища секретов: адрес лежит без пароля, пароль подставляется из хранилища.
+pub fn proxy_settings(mroot: &Path) -> dub_llm::net::ProxySettings {
+    let sel = load_selection(mroot);
+    dub_llm::net::ProxySettings {
+        mode: proxy_mode(&sel),
+        kind: proxy_kind(&sel),
+        address: proxy_address(&sel, crate::credentials::proxy_password().as_deref()),
+    }
+}
+
+/// Сделать настройки прокси маршрутом всех запросов приложения (старт сервера и каждое сохранение формы).
+/// Свой адрес, который не читается, — ошибка в лог: запросы идут напрямую, окно показывает причину.
+pub fn apply_proxy_route(mroot: &Path) {
+    let settings = proxy_settings(mroot);
+    if settings.mode == dub_llm::net::ProxyMode::Custom {
+        match dub_llm::net::normalize(settings.address.as_deref().unwrap_or_default(), settings.kind) {
+            Ok(url) => tracing::info!("прокси: свой, {}", dub_llm::net::masked(url.as_str())),
+            Err(e) => tracing::error!("прокси: свой адрес не читается ({e:#}) — запросы идут напрямую, пока его не исправят в настройках"),
+        }
+    } else {
+        tracing::info!("прокси: {}", settings.mode.as_str());
+    }
+    dub_llm::net::set(settings);
+}
+
+/// Разбор `[scheme://][user[:password]@]host…` (схему ureq допускает опустить): (до userinfo, user, password,
+/// после `@`).
+fn proxy_userinfo(url: &str) -> Option<(&str, &str, Option<&str>, &str)> {
+    let start = url.find("://").map_or(0, |scheme| scheme + 3);
+    let rest = &url[start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let at = rest[..authority_end].rfind('@')?;
+    let (user, password) = match rest[..at].split_once(':') {
+        Some((user, password)) => (user, Some(password)),
+        None => (&rest[..at], None),
+    };
+    Some((&url[..start], user, password, &rest[at + 1..]))
+}
+
+/// Отделить пароль от адреса прокси: (адрес без пароля, пароль как есть — %XX раскодированы). Логин остаётся
+/// в адресе.
+pub fn split_proxy_password(url: &str) -> (String, Option<String>) {
+    match proxy_userinfo(url) {
+        Some((head, user, Some(password), tail)) => (
+            format!("{head}{user}@{tail}"),
+            Some(dub_llm::net::decode_userinfo(password)).filter(|p| !p.is_empty()),
+        ),
+        _ => (url.to_string(), None),
+    }
+}
+
+/// Есть ли в адресе прокси логин (`user@`), к которому относится пароль.
+pub fn proxy_has_user(url: &str) -> bool {
+    proxy_userinfo(url).is_some_and(|(_, user, _, _)| !user.is_empty())
+}
+
+/// Подставить пароль (как есть, не %XX) в адрес с логином и без пароля; адрес со своим паролем или без логина —
+/// как есть. Пароль кодируется %XX: с / ? # @ : адрес иначе читался бы с чужими хостом и портом.
+pub fn proxy_with_password(url: &str, password: Option<&str>) -> String {
+    match (proxy_userinfo(url), password.filter(|p| !p.is_empty())) {
+        (Some((head, user, None, tail)), Some(password)) if !user.is_empty() => {
+            format!("{head}{user}:{}@{tail}", dub_llm::net::encode_userinfo(password))
+        }
         _ => url.to_string(),
     }
 }
 
-/// Включён ли облачный путь для стадии `stage` ("llm"|"vision"|"tts"): галка ИЛИ есть ключ.
-/// Требует непустой or_key — без ключа облако невозможно, откатываемся на локальный движок.
-pub fn openrouter_stage_on(mroot: &Path, stage: &str) -> bool {
+/// Кто переводит (stage "llm") или смотрит кадры (stage "vision").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmBackend {
+    /// Своя Gemma через llama-server.
+    Local,
+    /// Локальный OpenAI-совместимый сервер пользователя (Ollama, LM Studio, vLLM, llama-server).
+    Server,
+    /// OpenRouter.
+    OpenRouter,
+}
+
+impl LlmBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmBackend::Local => "local",
+            LlmBackend::Server => "server",
+            LlmBackend::OpenRouter => "openrouter",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "local" => Some(LlmBackend::Local),
+            "server" => Some(LlmBackend::Server),
+            "openrouter" => Some(LlmBackend::OpenRouter),
+            _ => None,
+        }
+    }
+}
+
+/// Провайдер стадии "llm" | "vision": llm_provider / vision_provider; пока они не заданы — прежние флаги
+/// or_llm_on / or_vision_on (с ключом OpenRouter), иначе своя Gemma.
+pub fn llm_backend(mroot: &Path, stage: &str) -> LlmBackend {
+    let key = if stage == "vision" { "vision_provider" } else { "llm_provider" };
     let sel = load_selection(mroot);
-    if pick(&sel, "or_key").is_none() {
+    if let Some(value) = pick(&sel, key) {
+        match LlmBackend::parse(value) {
+            Some(backend) => return backend,
+            None => tracing::error!("{key}={value:?} в active.json не распознан — беру прежние флаги or_*_on"),
+        }
+    }
+    // Прежний формат: vision шёл тем же провайдером, что перевод (or_vision_on выбирал лишь отдельную модель).
+    let legacy_stage = if stage == "vision" { "llm" } else { stage };
+    if openrouter_stage_on(mroot, legacy_stage) {
+        LlmBackend::OpenRouter
+    } else {
+        LlmBackend::Local
+    }
+}
+
+/// Адрес локального OpenAI-совместимого сервера по умолчанию — Ollama; LM Studio (1234), vLLM (8000) и
+/// llama-server задаются в настройках.
+pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:11434";
+
+/// Адрес локального сервера из настроек или адрес по умолчанию.
+pub fn server_url(mroot: &Path) -> String {
+    pick(&load_selection(mroot), "srv_url").unwrap_or(DEFAULT_SERVER_URL).to_string()
+}
+
+/// Модель локального сервера для стадии "llm" | "vision". Пусто — не выбрана.
+pub fn server_model(mroot: &Path, stage: &str) -> String {
+    let key = if stage == "vision" { "srv_vision" } else { "srv_llm" };
+    pick(&load_selection(mroot), key).unwrap_or("").to_string()
+}
+
+/// Идёт ли через OpenRouter хоть одна стадия (перевод, vision, TTS, ASR) — стоит ли считать затраты.
+pub fn openrouter_any_on(mroot: &Path) -> bool {
+    llm_backend(mroot, "llm") == LlmBackend::OpenRouter
+        || llm_backend(mroot, "vision") == LlmBackend::OpenRouter
+        || openrouter_stage_on(mroot, "tts")
+        || openrouter_stage_on(mroot, "asr")
+}
+
+/// Нужна ли своя Gemma: перевод или vision идут через неё.
+pub fn local_gemma_needed(mroot: &Path) -> bool {
+    llm_backend(mroot, "llm") == LlmBackend::Local || llm_backend(mroot, "vision") == LlmBackend::Local
+}
+
+/// Включён ли облачный путь для стадии `stage` ("llm"|"vision"|"tts"|"asr") по флагу or_*_on.
+/// Требует ключ OpenRouter — без ключа облако невозможно. Для "llm"/"vision" это только прежний формат
+/// настроек: провайдера стадии решает `llm_backend`.
+pub fn openrouter_stage_on(mroot: &Path, stage: &str) -> bool {
+    if crate::credentials::openrouter_source().is_none() {
         return false;
     }
+    let sel = load_selection(mroot);
     let flag = match stage {
         "llm" => "or_llm_on",
         "vision" => "or_vision_on",
@@ -433,21 +647,29 @@ pub fn resolve_sep(mroot: &Path, sel: &Value) -> PathBuf {
     f("Q8_0")
 }
 
-/// Parakeet ASR: каталоги tdt (int8) / tdt-fp32. from_pretrained сам различает имена файлов внутри.
-/// Env DUB_STUDIO_TDT имеет приоритет.
+/// Parakeet ASR: каталоги tdt (int8) / tdt-fp32 / tdt-ultra (Parakeet Ultra, fp32). from_pretrained сам
+/// различает имена файлов внутри. Без выбора — int8 (дефолт). Env DUB_STUDIO_TDT имеет приоритет.
 pub fn resolve_asr(mroot: &Path, sel: &Value) -> PathBuf {
     if let Ok(env) = std::env::var("DUB_STUDIO_TDT") {
         return PathBuf::from(env);
     }
+    resolve_asr_dir(mroot, sel)
+}
+
+fn resolve_asr_dir(mroot: &Path, sel: &Value) -> PathBuf {
     let fp32 = mroot.join("tdt-fp32");
     let int8 = mroot.join("tdt");
+    let ultra = mroot.join("tdt-ultra");
     let fp32_ok = fp32.join("encoder-model.onnx").is_file();
     let int8_ok = int8.join("encoder-model.int8.onnx").is_file();
+    let ultra_ok = ultra.join("encoder-model.onnx").is_file();
     match pick(sel, "asr") {
         Some("fp32") if fp32_ok => fp32,
         Some("int8") if int8_ok => int8,
+        Some("ultra") if ultra_ok => ultra,
         _ if int8_ok => int8,
         _ if fp32_ok => fp32,
+        _ if ultra_ok => ultra,
         _ => int8,
     }
 }
@@ -497,6 +719,81 @@ pub fn resolve_mt(mroot: &Path, sel: &Value) -> (PathBuf, PathBuf) {
 }
 
 #[cfg(test)]
+mod asr_variant_tests {
+    use super::*;
+
+    #[test]
+    fn parakeet_components_map_to_their_asr_slot() {
+        for (id, variant) in [("parakeet", "int8"), ("parakeet-fp32", "fp32"), ("parakeet-ultra", "ultra")] {
+            let sel = component_selection(id);
+            assert_eq!(sel, vec![("asr_engine", "parakeet".to_string()), ("asr", variant.to_string())], "{id}");
+        }
+    }
+
+    struct TmpModels(PathBuf);
+    impl TmpModels {
+        fn new(tag: &str, dirs: &[(&str, &str)]) -> Self {
+            let root = std::env::temp_dir().join(format!("dub-asr-variant-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for (dir, file) in dirs {
+                std::fs::create_dir_all(root.join(dir)).unwrap();
+                std::fs::write(root.join(dir).join(file), b"x").unwrap();
+            }
+            TmpModels(root)
+        }
+    }
+    impl Drop for TmpModels {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const ALL: &[(&str, &str)] = &[
+        ("tdt", "encoder-model.int8.onnx"),
+        ("tdt-fp32", "encoder-model.onnx"),
+        ("tdt-ultra", "encoder-model.onnx"),
+    ];
+
+    fn sel(asr: &str) -> Value {
+        serde_json::json!({ "asr": asr })
+    }
+
+    fn leaf(p: &Path) -> String {
+        p.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn each_selected_variant_resolves_to_its_folder() {
+        let m = TmpModels::new("all", ALL);
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &sel("int8"))), "tdt");
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &sel("fp32"))), "tdt-fp32");
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &sel("ultra"))), "tdt-ultra");
+    }
+
+    #[test]
+    fn default_stays_int8_when_ultra_installed() {
+        let m = TmpModels::new("default", ALL);
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &serde_json::json!({}))), "tdt");
+    }
+
+    #[test]
+    fn ultra_selected_but_missing_falls_to_installed() {
+        let m = TmpModels::new("missing", &ALL[..1]);
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &sel("ultra"))), "tdt");
+    }
+
+    #[test]
+    fn only_ultra_installed_is_used() {
+        let m = TmpModels::new("only", &ALL[2..]);
+        assert_eq!(leaf(&resolve_asr_dir(&m.0, &serde_json::json!({}))), "tdt-ultra");
+        assert_eq!(
+            AsrChoice::Parakeet(resolve_asr_dir(&m.0, &sel("ultra"))).describe(),
+            "Parakeet (tdt-ultra)"
+        );
+    }
+}
+
+#[cfg(test)]
 mod resolve_live_tests {
     use super::*;
 
@@ -512,7 +809,7 @@ mod resolve_live_tests {
         }
         let sel = load_selection(&mroot);
         let choice = resolve_asr_choice(repo, &mroot, &sel);
-        eprintln!("sel = {sel}");
+        eprintln!("sel = {}", redact_selection(&sel, false, false));
         eprintln!("resolved = {}", choice.describe());
         // Ассертим Whisper только когда он РЕАЛЬНО установлен: резолв по контракту тихо откатывается
         // на Parakeet без бинаря/модели (ревью: иначе тест ложно валится на машине без whisper).
@@ -526,5 +823,110 @@ mod resolve_live_tests {
                 "active.json просит whisper (и он установлен), но резолв дал: {}", choice.describe()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_proxy_password_is_split_off_and_put_back() {
+        assert_eq!(
+            split_proxy_password("http://alice:p%40ss:w@proxy.lan:3128"),
+            ("http://alice@proxy.lan:3128".to_string(), Some("p@ss:w".to_string()))
+        );
+        assert_eq!(split_proxy_password("http://alice:p@ss@proxy.lan:3128").1.as_deref(), Some("p@ss"), "a raw @ as older versions wrote it");
+        assert_eq!(split_proxy_password("socks5://proxy.lan:1080"), ("socks5://proxy.lan:1080".to_string(), None));
+        assert_eq!(split_proxy_password("http://alice@proxy.lan:3128"), ("http://alice@proxy.lan:3128".to_string(), None));
+        assert_eq!(split_proxy_password("http://alice:@proxy.lan:3128"), ("http://alice@proxy.lan:3128".to_string(), None));
+        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", Some("p@ss:w")), "http://alice:p%40ss%3Aw@proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", Some("pa/ss?#")), "http://alice:pa%2Fss%3F%23@proxy.lan:3128");
+        for password in ["p@ss:w", "pa/ss?#", "100%", "пароль"] {
+            let (_, back) = split_proxy_password(&proxy_with_password("http://alice@proxy.lan:3128", Some(password)));
+            assert_eq!(back.as_deref(), Some(password));
+        }
+        assert_eq!(proxy_with_password("http://alice:own@proxy.lan:3128", Some("stored")), "http://alice:own@proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://proxy.lan:3128", Some("stored")), "http://proxy.lan:3128");
+        assert_eq!(proxy_with_password("http://alice@proxy.lan:3128", None), "http://alice@proxy.lan:3128");
+        assert!(proxy_has_user("http://alice@proxy.lan:3128") && !proxy_has_user("http://proxy.lan:3128"));
+        assert!(!proxy_has_user("http://proxy.lan:3128/path@x"));
+        assert_eq!(split_proxy_password("alice:hunter2@proxy.lan:3128"), ("alice@proxy.lan:3128".to_string(), Some("hunter2".to_string())));
+    }
+
+    #[test]
+    fn the_public_selection_carries_flags_instead_of_secrets() {
+        let selection = json!({
+            "tts": "q6_k",
+            "or_key": "sk-or-v1-secret",
+            "proxy_on": "1",
+            "proxy_url": "http://alice:hunter2@proxy.lan:3128",
+        });
+        let public = redact_selection(&selection, true, false);
+        let text = public.to_string();
+        assert!(!text.contains("sk-or-v1-secret") && !text.contains("hunter2") && !text.contains("\"or_key\""));
+        assert_eq!(public["proxy_url"], "http://alice@proxy.lan:3128");
+        assert_eq!(public["or_key_set"], true);
+        assert_eq!(public["proxy_password_set"], true, "a legacy inline password still counts as set");
+        assert_eq!(public["tts"], "q6_k");
+
+        let bare = redact_selection(&json!({ "proxy_url": "socks5://proxy.lan:1080" }), false, false);
+        assert_eq!(bare["or_key_set"], false);
+        assert_eq!(bare["proxy_password_set"], false);
+        assert_eq!(bare["proxy_url"], "socks5://proxy.lan:1080");
+    }
+
+    #[test]
+    fn secrets_are_not_selection_slots() {
+        assert!(!is_selection_key("or_key") && !is_selection_key("proxy_url") && !is_selection_key("srv_key"));
+        assert!(is_selection_key("or_llm_on") && is_selection_key("llm_provider") && is_selection_key("srv_url"));
+        assert!(!is_selection_key("proxy_on") && !is_selection_key("proxy_mode"), "the proxy changes only through its form");
+        assert!(is_selection_value("vision_provider", "server") && !is_selection_value("llm_provider", "ollama"));
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+    use dub_llm::net::{ProxyKind, ProxyMode};
+    use serde_json::json;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dub-models-{tag}-{}-{}", std::process::id(), uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn each_stage_has_its_own_provider() {
+        let root = scratch("backend");
+        assert_eq!(llm_backend(&root, "llm"), LlmBackend::Local);
+        set_selection(&root, "llm_provider", "openrouter").unwrap();
+        set_selection(&root, "vision_provider", "server").unwrap();
+        assert_eq!(llm_backend(&root, "llm"), LlmBackend::OpenRouter);
+        assert_eq!(llm_backend(&root, "vision"), LlmBackend::Server);
+        assert!(!local_gemma_needed(&root));
+        set_selection(&root, "vision_provider", "local").unwrap();
+        assert!(local_gemma_needed(&root));
+        assert_eq!(server_url(&root), DEFAULT_SERVER_URL);
+        set_selection(&root, "srv_url", "http://192.168.1.5:1234/v1").unwrap();
+        set_selection(&root, "srv_vision", "qwen2.5-vl").unwrap();
+        assert_eq!(server_url(&root), "http://192.168.1.5:1234/v1");
+        assert_eq!(server_model(&root, "vision"), "qwen2.5-vl");
+        assert_eq!(server_model(&root, "llm"), "");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_old_proxy_switch_reads_as_a_mode() {
+        let custom = json!({ "proxy_on": "1", "proxy_url": "http://proxy.lan:3128" });
+        assert_eq!(proxy_mode(&custom), ProxyMode::Custom);
+        assert_eq!(proxy_mode(&json!({ "proxy_on": "0", "proxy_url": "http://proxy.lan:3128" })), ProxyMode::System);
+        assert_eq!(proxy_mode(&json!({ "proxy_on": "1" })), ProxyMode::System, "on without an address was never a route");
+        assert_eq!(proxy_mode(&json!({})), ProxyMode::System);
+        assert_eq!(proxy_mode(&json!({ "proxy_mode": "off", "proxy_on": "1", "proxy_url": "h:1" })), ProxyMode::Off);
+        assert_eq!(proxy_kind(&json!({ "proxy_kind": "socks5" })), ProxyKind::Socks5);
+        assert_eq!(proxy_kind(&json!({})), ProxyKind::Http);
     }
 }

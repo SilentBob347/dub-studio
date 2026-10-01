@@ -7,9 +7,10 @@
 //! как читает render.rs). Пустой список пола -> спикеры этого пола остаются на клонировании (слот "-").
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use dub_core::Project;
+use serde_json::{json, Value};
 
 use crate::f0;
 
@@ -39,6 +40,52 @@ pub struct SpeakerAssign {
 pub struct Slots {
     pub male: Vec<String>,
     pub female: Vec<String>,
+}
+
+impl Slots {
+    /// Из тела {male:[имена], female:[имена]}: пробелы по краям срезаются, пустые имена отбрасываются.
+    pub fn from_json(body: &Value) -> Slots {
+        let names_of = |k: &str| -> Vec<String> {
+            body.get(k)
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default()
+        };
+        Slots { male: names_of("male"), female: names_of("female") }
+    }
+
+    /// Имена слотов, которых нет среди голосов voices/ (`available`).
+    pub fn missing_in(&self, available: &[String]) -> Vec<String> {
+        self.male.iter().chain(self.female.iter()).filter(|n| !available.contains(n)).cloned().collect()
+    }
+}
+
+/// Вокал анализа для замера F0: чистый vocals16_clean.wav, иначе сырой 16k vocals16.wav; None — анализа не было.
+pub fn vocals_for(dir: &Path) -> Option<PathBuf> {
+    [dir.join("vocals16_clean.wav"), dir.join("vocals16.wav")].into_iter().find(|p| p.is_file())
+}
+
+/// Итог раздачи для ответа: {speaker: {voice, gender, f0}}.
+pub fn mapping(assigns: &[SpeakerAssign]) -> Value {
+    assigns
+        .iter()
+        .map(|a| {
+            let gender = match a.gender {
+                Some(Gender::Male) => Value::from("male"),
+                Some(Gender::Female) => Value::from("female"),
+                None => Value::Null,
+            };
+            (
+                a.speaker.clone(),
+                json!({
+                    "voice": a.voice.clone().map(Value::from).unwrap_or(Value::Null),
+                    "gender": gender,
+                    "f0": a.f0,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>()
+        .into()
 }
 
 /// Замерить медиану F0 спикера: собрать до F0_SAMPLE_SECS его реплик из вокала (вырезки по сегментам),
@@ -102,16 +149,30 @@ fn distribute(ranked: &[String], slots: &[String]) -> BTreeMap<String, Option<St
     out
 }
 
-/// Полное авто-распределение. Читает сегменты проекта (id спикера + тайминги), меряет F0 на vocals,
-/// ранжирует по длительности, раскладывает по слотам. Записывает в проект voice.mode/voice.name и метит
-/// сегменты dirty (как ручная смена голоса) — если хоть один голос-из-пака назначен. Возвращает список
-/// назначений (для ответа эндпоинта). Не мутирует проект, если оба списка пусты И назначений из пака нет.
+/// Полное авто-распределение: plan по проекту, затем apply к нему же. Возвращает список назначений (для
+/// ответа эндпоинта).
 pub fn assign(proj: &mut Project, vocals: &Path, wd: &Path, slots: &Slots) -> Vec<SpeakerAssign> {
-    // Сегменты по спикеру (id -> [(start,end)]); пустой speaker -> "0" (как render).
+    let infos = plan(proj, vocals, wd, slots);
+    apply(proj, &infos);
+    infos
+}
+
+/// Спикер сегмента так, как его различает распределение: пустой speaker -> "0" (как render).
+fn speaker_key(s: &dub_core::Segment) -> String {
+    s.speaker.clone().unwrap_or_else(|| "0".to_string())
+}
+
+/// Спикеры проекта, между которыми plan раскладывает голоса.
+pub fn speakers(proj: &Project) -> std::collections::BTreeSet<String> {
+    proj.segments.iter().map(speaker_key).collect()
+}
+
+/// Распределение без записи в проект. Читает сегменты (id спикера + тайминги), меряет F0 на vocals,
+/// ранжирует по длительности, раскладывает по слотам.
+pub fn plan(proj: &Project, vocals: &Path, wd: &Path, slots: &Slots) -> Vec<SpeakerAssign> {
     let mut by_spk: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
     for s in &proj.segments {
-        let key = s.speaker.clone().unwrap_or_else(|| "0".to_string());
-        by_spk.entry(key).or_default().push((s.start, s.end));
+        by_spk.entry(speaker_key(s)).or_default().push((s.start, s.end));
     }
     if by_spk.is_empty() {
         return Vec::new();
@@ -179,31 +240,31 @@ pub fn assign(proj: &mut Project, vocals: &Path, wd: &Path, slots: &Slots) -> Ve
     for info in &mut infos {
         info.voice = voice_of(&info.speaker);
     }
+    infos
+}
 
-    // Записать в проект per-speaker голоса тем же механизмом, что ручное назначение: voice.mode="voice" +
-    // позиционный CSV voice.name по лексикографически отсортированным id спикеров (render.rs так читает).
-    // Спикер без голоса (клон) -> сентинел CLONE_SLOT в его позиции. Оба списка пусты -> mode="clone".
-    let any_pack = infos.iter().any(|i| i.voice.is_some());
-    if !any_pack {
-        // никто не на паке -> клонирование всех (как раньше). Не форсим dirty без изменения голоса.
+/// Записать назначения plan в проект тем же механизмом, что ручное назначение: voice.mode="voice" +
+/// позиционный CSV voice.name по лексикографически отсортированным id спикеров (render.rs так читает), и
+/// пометить сегменты dirty. Спикер без голоса (клон) -> сентинел CLONE_SLOT в его позиции. Ни одного голоса
+/// из пака -> mode="clone" без пометки dirty. Пустой план проект не трогает.
+pub fn apply(proj: &mut Project, infos: &[SpeakerAssign]) {
+    if infos.is_empty() {
+        return;
+    }
+    if !infos.iter().any(|i| i.voice.is_some()) {
         proj.audio.voice.mode = "clone".to_string();
         proj.audio.voice.name = None;
-        return infos;
+        return;
     }
-    // Лексикографический порядок спикеров = порядок позиций CSV в render (BTreeMap уже отсортирован).
-    let assign_by_spk: BTreeMap<String, Option<String>> =
-        infos.iter().map(|i| (i.speaker.clone(), i.voice.clone())).collect();
-    let csv: Vec<String> = assign_by_spk
-        .values()
-        .map(|v| v.clone().unwrap_or_else(|| CLONE_SLOT.to_string()))
-        .collect();
+    let assign_by_spk: BTreeMap<&str, Option<&str>> =
+        infos.iter().map(|i| (i.speaker.as_str(), i.voice.as_deref())).collect();
+    let csv: Vec<&str> = assign_by_spk.values().map(|v| v.unwrap_or(CLONE_SLOT)).collect();
     proj.audio.voice.mode = "voice".to_string();
     proj.audio.voice.name = Some(csv.join(","));
     // Смена голоса -> ре-синтез: метим все сегменты dirty (как op_recast/ручная смена голоса).
     for seg in &mut proj.segments {
         seg.dirty = true;
     }
-    infos
 }
 
 /// Санитизация имени спикера для имени временного файла.

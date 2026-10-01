@@ -1,0 +1,116 @@
+name: Release build
+
+# A push to release/<anything> builds the signed installers with scripts/build-release.ps1 and puts them
+# into a draft GitHub release v<version>; publishing the draft is a manual step.
+on:
+  push:
+    branches: ['release/**']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+      - name: Install ffmpeg
+        run: choco install ffmpeg -y --no-progress
+
+      # models\higgs-engine and models\ocr are not in git. The VC++ runtime comes from the runner's Visual
+      # Studio redistributable, the PP-OCR models from the installer of the last published release.
+      - name: Bundled files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:RUNNER_TEMP 'bundled'
+          $higgs = Join-Path $source 'models\higgs-engine'
+          $ocr = Join-Path $source 'models\ocr'
+          New-Item -ItemType Directory -Force -Path $higgs, $ocr | Out-Null
+
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $redist = Get-ChildItem (Join-Path $vs 'VC\Redist\MSVC') -Directory | Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $redist) { throw "no VC++ redistributable under $vs" }
+          Get-ChildItem (Join-Path $redist.FullName 'x64') -Directory | Where-Object { $_.Name -match '^Microsoft\.VC\d+\.(CRT|OpenMP)$' } |
+            Get-ChildItem -File -Filter *.dll | Copy-Item -Destination $higgs
+
+          $tag = gh release view --repo $env:GITHUB_REPOSITORY --json tagName --jq .tagName
+          gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern '*.msi' --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { throw "could not download the MSI of $tag" }
+          $msi = Get-ChildItem $env:RUNNER_TEMP -File -Filter *.msi | Select-Object -First 1
+          $unpacked = Join-Path $env:RUNNER_TEMP 'msi'
+          $p = Start-Process msiexec.exe -ArgumentList '/a', "`"$($msi.FullName)`"", '/qn', "TARGETDIR=`"$unpacked`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msiexec /a $($msi.Name) exited with $($p.ExitCode)" }
+          $det = Get-ChildItem $unpacked -Recurse -File -Filter det.onnx | Where-Object { $_.Directory.Name -eq 'ocr' } | Select-Object -First 1
+          if (-not $det) { throw "no models\ocr in the $tag installer" }
+          Get-ChildItem $det.Directory -File | Copy-Item -Destination $ocr
+
+          Get-ChildItem $higgs, $ocr -File | Select-Object FullName, Length | Format-Table -AutoSize | Out-String -Width 300 | Write-Host
+          "DUB_MODELS_SOURCE=$source" >> $env:GITHUB_ENV
+
+      - name: Build release
+        shell: powershell
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $version = (Get-Content -Raw desktop\src-tauri\tauri.conf.json | ConvertFrom-Json).version
+          scripts\build-release.ps1 -ModelsSource $env:DUB_MODELS_SOURCE -ReleaseNotes "Dub Studio $version"
+          if (-not $?) { exit 1 }
+          "DUB_VERSION=$version" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dub-studio-${{ env.DUB_VERSION }}
+          path: release/${{ env.DUB_VERSION }}/*
+          if-no-files-found: error
+
+      - name: Draft release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:DUB_VERSION
+          $tag = "v$version"
+          $lines = Get-Content -Encoding UTF8 CHANGELOG.md
+          $start = ($lines | Select-String -Pattern "^## .* $([regex]::Escape($version))$" | Select-Object -First 1).LineNumber
+          if (-not $start) { throw "CHANGELOG.md has no section for $version" }
+          $notes = @()
+          foreach ($line in $lines[$start..($lines.Count - 1)]) { if ($line -match '^## ') { break }; $notes += $line }
+          $notesFile = Join-Path $env:RUNNER_TEMP 'notes.md'
+          [System.IO.File]::WriteAllText($notesFile, ($notes -join "`n").Trim(), (New-Object System.Text.UTF8Encoding($false)))
+          $files = Get-ChildItem "release\$version" -File | ForEach-Object { $_.FullName }
+
+          $existing = gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate --jq '.[] | "\(.tag_name) \(.draft)"' |
+            Where-Object { $_ -like "$tag *" } | ForEach-Object { ($_ -split ' ')[1] }
+          if ($existing -eq 'false') { throw "release $tag is already published; bump the version" }
+          if ($existing -eq 'true') {
+            gh release upload $tag @files --repo $env:GITHUB_REPOSITORY --clobber
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --notes-file $notesFile
+          } else {
+            gh release create $tag @files --repo $env:GITHUB_REPOSITORY --draft --target $env:GITHUB_SHA --title "Dub Studio $version" --notes-file $notesFile
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed with $LASTEXITCODE" }

@@ -34,6 +34,12 @@ pub fn read_mono_f32(path: &Path) -> Result<(Vec<f32>, u32), String> {
     Ok((mono, spec.sample_rate))
 }
 
+fn peaks_args(video: &Path) -> Vec<std::ffi::OsString> {
+    let mut a: Vec<std::ffi::OsString> = vec!["-v".into(), "quiet".into(), "-i".into(), video.into()];
+    a.extend(["-vn", "-af", crate::media::SYNC_AF, "-ac", "1", "-ar", "8000", "-f", "s16le", "-"].map(Into::into));
+    a
+}
+
 /// Даунсэмпл-пики аудио для WaveformTimeline. Порт app.py._compute_peaks: ffmpeg -> s16le 8kHz mono,
 /// N бакетов, в каждом max(|amp|)/max_amp, округление до 3 знаков. CPU, вне GPU-воркера. Сбой ffmpeg
 /// или тишина -> пустой список (как питон — не отравляем кэш).
@@ -42,11 +48,7 @@ pub fn waveform_peaks(video: &Path, n: usize) -> Vec<f64> {
     const FFMPEG: &str = "ffmpeg.exe";
     #[cfg(not(windows))]
     const FFMPEG: &str = "ffmpeg";
-    let out = std::process::Command::new(FFMPEG)
-        .args(["-v", "quiet", "-i"])
-        .arg(video)
-        .args(["-ac", "1", "-ar", "8000", "-f", "s16le", "-"])
-        .output();
+    let out = std::process::Command::new(FFMPEG).args(peaks_args(video)).output();
     let bytes = match out {
         Ok(o) if o.status.success() => o.stdout,
         _ => return Vec::new(),
@@ -92,3 +94,12 @@ pub fn write_mono_f32(path: &Path, data: &[f32], sample_rate: u32) -> Result<(),
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn waveform_reads_audio_by_its_timestamps() {
+        let args = super::peaks_args(std::path::Path::new("in.mp4"));
+        let af = args.iter().position(|a| a == "-af").expect("-af");
+        assert!(args[af + 1].to_string_lossy().starts_with(crate::media::SYNC_AF));
+    }
+}
