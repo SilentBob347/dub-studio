@@ -1187,9 +1187,9 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "local_server_key_delete",
-                description: "Remove the API key stored for the local server's address in settings.",
-                schema: nothing,
-                call: |_| send(Method::DELETE, "/engine/server/key".into(), json!({})),
+                description: "Remove the API key stored for the local server's address (url, default: the one in settings).",
+                schema: || object(json!({ "url": { "type": "string" } }), &[]),
+                call: |args| send(Method::DELETE, format!("/engine/server/key{}", query(&[("url", given(args, "url"))])), json!({})),
             },
             Tool {
                 name: "openrouter_voices",

@@ -604,6 +604,22 @@ fn file_tag(p: &std::path::Path) -> String {
     format!("{}:{size}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
 }
 
+/// Кто переводит (stage "llm") или смотрит кадры (stage "vision") — для ключа стадии перевода: своя Gemma
+/// своими файлами, локальный сервер адресом и моделью, OpenRouter моделью.
+fn provider_tag(paths: &AnalyzePaths, stage: &str) -> String {
+    let mr = &paths.models_root;
+    match crate::models::llm_backend(mr, stage) {
+        crate::models::LlmBackend::Local if stage == "vision" => {
+            format!("local:{}+{}", file_tag(&paths.mt_model), file_tag(&paths.mmproj))
+        }
+        crate::models::LlmBackend::Local => format!("local:{}", file_tag(&paths.mt_model)),
+        crate::models::LlmBackend::Server => {
+            format!("server:{}:{}", crate::models::server_url(mr), crate::models::server_model(mr, stage))
+        }
+        crate::models::LlmBackend::OpenRouter => format!("openrouter:{}", crate::models::openrouter_model(mr, stage)),
+    }
+}
+
 fn mtime(p: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
@@ -1262,14 +1278,7 @@ pub fn run(args: &AnalyzeArgs, paths: &AnalyzePaths, progress: &Progress) -> Res
     // vocals16 уже объявлен выше (стадия ASR) и не перемещался — переиспользуем.
     crate::jobs::check_cancelled()?;
     bench.stage("translate");
-    let mr = &paths.models_root;
-    let llm_tag = format!(
-        "{}|{}|{}|{}",
-        file_tag(&paths.mt_model),
-        file_tag(&paths.mmproj),
-        if crate::models::openrouter_stage_on(mr, "llm") { crate::models::openrouter_model(mr, "llm") } else { String::new() },
-        if crate::models::openrouter_stage_on(mr, "vision") { crate::models::openrouter_model(mr, "vision") } else { String::new() },
-    );
+    let llm_tag = format!("{}|{}", provider_tag(paths, "llm"), provider_tag(paths, "vision"));
     let translate_key = cache::hash_stage(&[
         TRANSLATE_VER,
         &transcript_fp,
@@ -1549,6 +1558,42 @@ mod resume_tests {
         assert_eq!(fresh.captions.sub_y, Some(900));
         assert_eq!(fresh.audio.content_type, "anime");
         let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn translate_key_follows_the_provider_of_each_stage() {
+        let root = tmp_dir("provider");
+        let p = std::path::PathBuf::new;
+        let paths = AnalyzePaths {
+            input: p(),
+            work_dir: p(),
+            repo_root: p(),
+            asr: crate::models::AsrChoice::Parakeet(p()),
+            sortformer_onnx: p(),
+            llama_bin: p(),
+            mt_model: root.join("gemma.gguf"),
+            mmproj: root.join("mmproj.gguf"),
+            models_root: root.clone(),
+            caption_fps: 1,
+            import_subs: None,
+            bsroformer_cli: p(),
+            bsroformer_model: p(),
+        };
+        let local = provider_tag(&paths, "llm");
+        assert!(local.starts_with("local:"));
+        assert_ne!(provider_tag(&paths, "vision"), local);
+
+        crate::models::set_selection(&root, "llm_provider", "server").unwrap();
+        crate::models::set_selection(&root, "srv_llm", "qwen3").unwrap();
+        let server = provider_tag(&paths, "llm");
+        assert!(server.starts_with("server:") && server.ends_with(":qwen3"));
+        crate::models::set_selection(&root, "srv_url", "http://192.168.1.5:1234/v1").unwrap();
+        assert_ne!(provider_tag(&paths, "llm"), server);
+
+        crate::models::set_selection(&root, "vision_provider", "openrouter").unwrap();
+        crate::models::set_selection(&root, "or_llm", "google/gemma-4").unwrap();
+        assert_eq!(provider_tag(&paths, "vision"), "openrouter:google/gemma-4");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -216,7 +216,7 @@ impl WhisperAsr {
             for (i, a, _b, p) in batch.iter().cloned() {
                 let eng = self.clone();
                 let lang = lang.to_string();
-                handles.push(std::thread::spawn(move || -> Result<Parsed, AsrError> {
+                handles.push(dub_core::proc::spawn(move || -> Result<Parsed, AsrError> {
                     let off = a as f64 / TARGET_SR as f64;
                     // 1 ретрай на окно: транзиентный сбой сабпроцесса не валит весь файл сразу.
                     let mut parsed = match eng.run_words(&p, &lang, Some(threads_per)) {

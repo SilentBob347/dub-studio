@@ -378,6 +378,11 @@ fn child_hook(pid: u32, alive: bool) {
     }
 }
 
+fn carry_current() -> Box<dyn FnOnce() -> Box<dyn std::any::Any> + Send> {
+    let ctl = current();
+    Box::new(move || Box::new(ctl.map(enter)))
+}
+
 struct Job {
     kind: JobKind,
     pid: Option<String>,
@@ -504,6 +509,7 @@ impl JobQueue {
     /// Создать очередь и запустить единственный воркер.
     pub fn new() -> Self {
         dub_core::proc::set_hook(child_hook);
+        dub_core::proc::set_carry(carry_current);
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
         let (submit_tx, mut submit_rx) = tokio::sync::mpsc::unbounded_channel::<(String, JobFn)>();
 

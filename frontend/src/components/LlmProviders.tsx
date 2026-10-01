@@ -48,7 +48,7 @@ function ServerKey({ url, typedUrl }: { url: string; typedUrl: string }) {
         <button onClick={() => run(() => api.saveServerKey(key.trim(), typedUrl), t("providers.serverKeyStored"))} disabled={busy || !key.trim()}
           className="px-3 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] text-[12px] hover:border-[var(--color-accent)] disabled:opacity-40">{busy ? "…" : t("providers.save")}</button>
         {configured && (
-          <button onClick={() => run(() => api.deleteServerKey(), t("providers.serverKeyRemoved"))} disabled={busy} aria-label={t("providers.serverKeyDelete")} title={t("providers.serverKeyDelete")}
+          <button onClick={() => run(() => api.deleteServerKey(typedUrl), t("providers.serverKeyRemoved"))} disabled={busy} aria-label={t("providers.serverKeyDelete")} title={t("providers.serverKeyDelete")}
             className="px-2 rounded-md border border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-warn)] disabled:opacity-40"><Trash2 size={13} /></button>
         )}
       </div>

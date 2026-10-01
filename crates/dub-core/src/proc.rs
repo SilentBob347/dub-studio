@@ -16,6 +16,27 @@ pub fn set_hook(hook: ChildHook) {
     let _ = HOOK.set(hook);
 }
 
+/// Перенос привязки к джобе в новый поток: вызывается в порождающем потоке и возвращает то, что в новом
+/// потоке привязывает его к той же джобе; результат держится, пока поток работает.
+pub type Carry = fn() -> Box<dyn FnOnce() -> Box<dyn std::any::Any> + Send>;
+
+static CARRY: OnceLock<Carry> = OnceLock::new();
+
+/// Поставить перенос привязки (один раз на процесс; повторные вызовы игнорируются).
+pub fn set_carry(carry: Carry) {
+    let _ = CARRY.set(carry);
+}
+
+/// `std::thread::spawn`, после которого процессы, запущенные в новом потоке, учитываются за той же
+/// джобой, что и у порождающего потока.
+pub fn spawn<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> std::thread::JoinHandle<T> {
+    let attach = CARRY.get().map(|carry| carry());
+    std::thread::spawn(move || {
+        let _attached = attach.map(|attach| attach());
+        work()
+    })
+}
+
 /// Отметка «процесс жив»; снимается при drop. Держать, пока хэндл процесса не закрыт: тогда pid не
 /// может быть переиспользован другим процессом.
 pub struct ChildGuard {

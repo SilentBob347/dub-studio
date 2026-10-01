@@ -112,8 +112,9 @@ pub async fn update_server_key(State(st): State<AppState>, Json(body): Json<Valu
     }
 }
 
-pub async fn delete_server_key(State(st): State<AppState>) -> Response {
-    let address = crate::models::server_url(&st.models_root);
+// DELETE /engine/server/key?url=
+pub async fn delete_server_key(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let address = server_key_address(&st.models_root, q.get("url").map(String::as_str));
     match credentials::store_local_server_key(&address, None) {
         Ok(_) => Json(server_key_state(&address)).into_response(),
         Err(e) => failure(StatusCode::INTERNAL_SERVER_ERROR, "store_failed", format!("{e:#}")),
@@ -219,41 +220,41 @@ pub(crate) fn apply_proxy_form(models_root: &Path, secrets: &Path, form: &Value)
         Some(_) => return Err(FormError::bad("invalid_proxy_kind", "kind must be http, https, socks5 or socks4")),
     };
     let slots = selection.as_object_mut().expect("load_selection returns object");
-    match form.get("url") {
+    let store = match form.get("url") {
         None => {
             let stored = slots.get("proxy_url").and_then(Value::as_str).unwrap_or_default();
             if matches!(change, Some(Some(_))) && !crate::models::proxy_has_user(stored) {
                 return Err(FormError::bad("proxy_password_without_user", "a proxy password needs a user name in the address (user@host:port)"));
             }
-            if let Some(change) = change {
-                credentials::store_proxy_password_in(secrets, change.as_deref()).map_err(FormError::internal)?;
-            }
+            change
         }
         Some(Value::String(url)) if url.trim().is_empty() => {
             slots.remove("proxy_url");
-            credentials::store_proxy_password_in(secrets, None).map_err(FormError::internal)?;
+            Some(None)
         }
         Some(Value::String(url)) => {
             let written = dub_llm::net::normalize(url, kind)
                 .map_err(|e| FormError::bad("invalid_proxy_url", format!("{e:#}")))?;
             let (bare, inline) = crate::models::split_proxy_password(&dub_llm::net::normalized_text(&written));
             let change = change.or(inline.map(Some));
-            if crate::models::proxy_has_user(&bare) {
-                if let Some(change) = change {
-                    credentials::store_proxy_password_in(secrets, change.as_deref()).map_err(FormError::internal)?;
-                }
+            let store = if crate::models::proxy_has_user(&bare) {
+                change
             } else {
                 if matches!(change, Some(Some(_))) {
                     return Err(FormError::bad("proxy_password_without_user", "a proxy password needs a user name in the address (user@host:port)"));
                 }
-                credentials::store_proxy_password_in(secrets, None).map_err(FormError::internal)?;
-            }
+                Some(None)
+            };
             slots.insert("proxy_url".into(), Value::String(bare));
+            store
         }
         Some(_) => return Err(FormError::bad("invalid_proxy_url", "url must be a string")),
-    }
+    };
     if mode == dub_llm::net::ProxyMode::Custom && slots.get("proxy_url").and_then(Value::as_str).is_none_or(|url| url.trim().is_empty()) {
         return Err(FormError::bad("proxy_url_required", "a proxy of your own needs an address; switch the mode before removing it"));
+    }
+    if let Some(change) = store {
+        credentials::store_proxy_password_in(secrets, change.as_deref()).map_err(FormError::internal)?;
     }
     slots.insert("proxy_mode".into(), Value::String(mode.as_str().into()));
     slots.insert("proxy_kind".into(), Value::String(kind.as_str().into()));
@@ -378,6 +379,7 @@ mod tests {
         assert_eq!((view["mode"].as_str(), view["url"].as_str()), (Some("custom"), Some("http://carol@legacy.lan:3128")), "the old switch stays on");
         let bad = apply_proxy_form(&models, &secrets, &json!({ "url": "" }));
         assert_eq!(bad.err().map(|e| e.code), Some("proxy_url_required"));
+        assert_eq!(credentials::proxy_password_in(&secrets).as_deref(), Some("pw"), "a refused form changes nothing");
 
         std::fs::write(models.join("active.json"), r#"{"proxy_mode":"custom","proxy_url":"garbage"}"#).unwrap();
         assert!(proxy_view(&models, &secrets)["problem"].as_str().is_some_and(|p| p.contains("garbage")));
