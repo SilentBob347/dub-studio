@@ -17,6 +17,11 @@ $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "..."
 scripts\build-release.ps1 -ReleaseNotes "..." -ModelsSource "F:\AI\Dub Studio"
 ```
 
+На GitHub тот же скрипт запускает `.github/workflows/release.yml` при пуше в ветку `release/…`: VC++-рантайм он берёт
+из Visual Studio раннера, PP-OCR — из MSI последнего опубликованного релиза, ключ подписи — из секретов репозитория
+`TAURI_SIGNING_PRIVATE_KEY` и `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Файлы ложатся в черновик релиза `v<версия>`;
+публикует его человек.
+
 Что делает полный прогон:
 
 1. Гейт: фронт (`npm ci` при отсутствии `node_modules`, `npm run test` если такой скрипт есть, `npm run build`),
